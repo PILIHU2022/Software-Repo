@@ -78,7 +78,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android SDK packages
         # android-37.x is a preview platform, so the stable channel may not
@@ -131,7 +131,7 @@ jobs:
         run: ./scripts/build-app.sh "${{ matrix.app }}" --out "$RUNNER_TEMP/dist/${{ matrix.app }}"
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: patchwork-${{ matrix.app }}
           path: ${{ runner.temp }}/dist/${{ matrix.app }}
@@ -167,7 +167,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android SDK packages
         run: |
@@ -183,7 +183,7 @@ jobs:
       - name: Download APK artifacts
         id: download
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: patchwork-*
@@ -267,20 +267,20 @@ jobs:
 
       - name: Configure Pages
         if: steps.apks.outputs.found == 'true'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           enablement: true
 
       - name: Upload Pages artifact
         if: steps.apks.outputs.found == 'true'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: fdroid
 
       - name: Deploy Pages
         id: deployment
         if: steps.apks.outputs.found == 'true'
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   notify-failure:
     name: Report failure
@@ -295,7 +295,7 @@ jobs:
       issues: write
     steps:
       - name: Open or update failure issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = 'Patchwork build failed';
