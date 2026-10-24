@@ -1,0 +1,245 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 16:34:38 +0800
+Subject: [PATCH] Add an Analysis settings category with animation controls
+
+Persist an animateStatistics preference (default on) through the existing
+DataStore, repository, use-case and view-model chain. Settings gains an
+Analysis category between Display and About with a switch for the animation
+and an About analysis history dialog explaining that the local SQLite history
+never leaves the device.
+---
+ .../data/dataStore/SettingsDataStore.kt       | 16 +++++
+ .../repositories/SettingsRepositoryImpl.kt    |  6 ++
+ .../domain/repositories/SettingsRepository.kt |  3 +
+ .../domain/usecases/SettingsUseCase.kt        |  5 ++
+ .../viewmodel/SettingsViewModel.kt            |  5 ++
+ .../screentime/ui/screens/SettingsScreen.kt   | 62 +++++++++++++++++++
+ app/src/main/res/values-zh-rCN/strings.xml    |  6 ++
+ app/src/main/res/values/strings.xml           |  6 ++
+ 8 files changed, 109 insertions(+)
+
+diff --git a/app/src/main/java/com/atharok/screentime/data/dataStore/SettingsDataStore.kt b/app/src/main/java/com/atharok/screentime/data/dataStore/SettingsDataStore.kt
+index 980232d..fe7f288 100644
+--- a/app/src/main/java/com/atharok/screentime/data/dataStore/SettingsDataStore.kt
++++ b/app/src/main/java/com/atharok/screentime/data/dataStore/SettingsDataStore.kt
+@@ -25,6 +25,7 @@ class SettingsDataStore(private val context: Context) {
+         private const val DEFAULT_PERIOD_KEY = "default_period_key"
+         private const val IGNORE_SYSTEM_APP_KEY = "ignore_system_app_key"
+         private const val IGNORED_PACKAGES_KEY = "ignored_packages_key"
++        private const val ANIMATE_STATISTICS_KEY = "animate_statistics_key"
+     }
+ 
+     private val themeKey = stringPreferencesKey(THEME_KEY)
+@@ -33,6 +34,7 @@ class SettingsDataStore(private val context: Context) {
+     private val defaultPeriodKey = stringPreferencesKey(DEFAULT_PERIOD_KEY)
+     private val ignoreSystemAppsKey = booleanPreferencesKey(IGNORE_SYSTEM_APP_KEY)
+     private val ignoredPackagesKey = stringPreferencesKey(IGNORED_PACKAGES_KEY)
++    private val animateStatisticsKey = booleanPreferencesKey(ANIMATE_STATISTICS_KEY)
+ 
+     private fun Flow<Preferences>.catchException(): Flow<Preferences> = this.catch {
+         if (it is IOException) {
+@@ -142,4 +144,18 @@ class SettingsDataStore(private val context: Context) {
+             }
+         }
+     }
++
++    // ---- Analysis ----
++
++    val animateStatisticsFlow: Flow<Boolean> = context.dataStore.data
++        .catchException()
++        .map { preferences ->
++            preferences[animateStatisticsKey] ?: true
++        }
++
++    suspend fun saveAnimateStatistics(animateStatistics: Boolean) {
++        context.dataStore.edit {
++            it[animateStatisticsKey] = animateStatistics
++        }
++    }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/data/repositories/SettingsRepositoryImpl.kt b/app/src/main/java/com/atharok/screentime/data/repositories/SettingsRepositoryImpl.kt
+index f87fdfb..a51af04 100644
+--- a/app/src/main/java/com/atharok/screentime/data/repositories/SettingsRepositoryImpl.kt
++++ b/app/src/main/java/com/atharok/screentime/data/repositories/SettingsRepositoryImpl.kt
+@@ -45,4 +45,10 @@ class SettingsRepositoryImpl(
+     override suspend fun saveIgnoredPackages(ignoredPackages: List<String>) {
+         settingsDataStore.saveIgnoredPackages(ignoredPackages)
+     }
++
++    override fun animateStatistics(): Flow<Boolean> = settingsDataStore.animateStatisticsFlow
++
++    override suspend fun saveAnimateStatistics(animateStatistics: Boolean) {
++        settingsDataStore.saveAnimateStatistics(animateStatistics)
++    }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/domain/repositories/SettingsRepository.kt b/app/src/main/java/com/atharok/screentime/domain/repositories/SettingsRepository.kt
+index be50c4e..eabeb02 100644
+--- a/app/src/main/java/com/atharok/screentime/domain/repositories/SettingsRepository.kt
++++ b/app/src/main/java/com/atharok/screentime/domain/repositories/SettingsRepository.kt
+@@ -22,4 +22,7 @@ interface SettingsRepository {
+ 
+     fun getIgnoredPackages(): Flow<List<String>>
+     suspend fun saveIgnoredPackages(ignoredPackages: List<String>)
++
++    fun animateStatistics(): Flow<Boolean>
++    suspend fun saveAnimateStatistics(animateStatistics: Boolean)
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/domain/usecases/SettingsUseCase.kt b/app/src/main/java/com/atharok/screentime/domain/usecases/SettingsUseCase.kt
+index e2db293..6c99b0a 100644
+--- a/app/src/main/java/com/atharok/screentime/domain/usecases/SettingsUseCase.kt
++++ b/app/src/main/java/com/atharok/screentime/domain/usecases/SettingsUseCase.kt
+@@ -36,4 +36,9 @@ class SettingsUseCase(private val repository: SettingsRepository) {
+     suspend fun saveIgnoredPackages(ignoredPackages: List<String>) {
+         repository.saveIgnoredPackages(ignoredPackages)
+     }
++
++    fun animateStatistics(): Flow<Boolean> = repository.animateStatistics()
++    suspend fun saveAnimateStatistics(animateStatistics: Boolean) {
++        repository.saveAnimateStatistics(animateStatistics)
++    }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/presentation/viewmodel/SettingsViewModel.kt b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/SettingsViewModel.kt
+index c174b74..cc7277e 100644
+--- a/app/src/main/java/com/atharok/screentime/presentation/viewmodel/SettingsViewModel.kt
++++ b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/SettingsViewModel.kt
+@@ -41,4 +41,9 @@ class SettingsViewModel(
+     fun saveIgnoredPackages(ignoredPackages: List<String>) = viewModelScope.launch {
+         useCase.saveIgnoredPackages(ignoredPackages)
+     }
++
++    val animateStatistics: Flow<Boolean> get() = useCase.animateStatistics()
++    fun setAnimateStatistics(animateStatistics: Boolean) = viewModelScope.launch {
++        useCase.saveAnimateStatistics(animateStatistics)
++    }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/SettingsScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/SettingsScreen.kt
+index 9e9ab24..1dd40ec 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/SettingsScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/SettingsScreen.kt
+@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.outlined.Info
+ import androidx.compose.material.icons.rounded.DisplaySettings
++import androidx.compose.material.icons.rounded.Insights
+ import androidx.compose.material.icons.rounded.Palette
+ import androidx.compose.material3.HorizontalDivider
+ import androidx.compose.material3.MaterialTheme
+@@ -51,6 +52,7 @@ import com.atharok.screentime.ui.components.AppScaffold
+ import com.atharok.screentime.ui.components.ListDialog
+ import com.atharok.screentime.ui.components.NavigateUpAction
+ import com.atharok.screentime.ui.components.ScreenTimeCalculationMethodModalBottomSheet
++import com.atharok.screentime.ui.components.SimpleDialog
+ import com.atharok.screentime.ui.components.TextNormal
+ import com.atharok.screentime.ui.components.TextNormalSecondary
+ import com.atharok.screentime.ui.views.PeriodSelector
+@@ -87,6 +89,9 @@ fun SettingsScreen(
+             // Display
+             val defaultPeriod: Period by settingsViewModel.defaultPeriod.collectAsStateWithLifecycle(initialValue = Period.DAY)
+             val ignoreSystemApps: Boolean by settingsViewModel.ignoreSystemApps.collectAsStateWithLifecycle(initialValue = false)
++            // Analysis
++            val animateStatistics: Boolean by settingsViewModel.animateStatistics.collectAsStateWithLifecycle(initialValue = true)
++            var showAnalysisAbout by remember { mutableStateOf(false) }
+ 
+             // ---- Appearance ----
+ 
+@@ -209,6 +214,63 @@ fun SettingsScreen(
+                     .padding(vertical = verticalPadding)
+             )
+ 
++            // ---- Analysis ----
++
++            SettingsTitle(
++                text = stringResource(id = R.string.analysis_settings),
++                icon = Icons.Rounded.Insights,
++                iconDescription = stringResource(id = R.string.analysis_settings),
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(
++                        horizontal = horizontalPadding,
++                        vertical = verticalPadding
++                    )
++            )
++
++            SettingsSwitch(
++                primaryText = stringResource(id = R.string.analysis_animate_statistics),
++                secondaryText = stringResource(id = R.string.analysis_animate_statistics_info),
++                checked = animateStatistics,
++                onCheckedChange = settingsViewModel::setAnimateStatistics,
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(
++                        horizontal = horizontalPadding,
++                        vertical = verticalPadding
++                    )
++            )
++
++            SettingsText(
++                text = stringResource(id = R.string.analysis_about),
++                modifier = Modifier
++                    .clickable {
++                        showAnalysisAbout = true
++                    }
++                    .fillMaxWidth()
++                    .padding(
++                        horizontal = horizontalPadding,
++                        vertical = verticalPadding
++                    )
++            )
++
++            if (showAnalysisAbout) {
++                SimpleDialog(
++                    confirmButtonText = stringResource(android.R.string.ok),
++                    dismissButtonText = null,
++                    onConfirmation = { showAnalysisAbout = false },
++                    onDismissRequest = { showAnalysisAbout = false },
++                    dialogTitle = stringResource(id = R.string.analysis_about_title),
++                    dialogText = stringResource(id = R.string.analysis_about_message)
++                )
++            }
++
++            HorizontalDivider(
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(vertical = verticalPadding)
++            )
++
+             // ---- About ----
+ 
+             SettingsTitle(
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index f8cbd55..9717cc7 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -100,4 +100,10 @@
+     <string name="analysis_reimport_title">重新导入系统历史？</string>
+     <string name="analysis_reimport_message">将扫描最多一年的系统使用数据（以系统实际保留的范围为准）并合并到本地历史。已有日期若记录更多则不会被覆盖。</string>
+     <string name="analysis_reimport_confirm">重新导入</string>
++    <string name="analysis_settings">分析</string>
++    <string name="analysis_animate_statistics">统计动画</string>
++    <string name="analysis_animate_statistics_info">分析数据变化时，时长从 0 递增，柱状条从 0 生长。</string>
++    <string name="analysis_about">关于分析记录</string>
++    <string name="analysis_about_title">关于分析记录</string>
++    <string name="analysis_about_message">分析页的数据来自仅保存在本机的使用记录。\n\n• 屏幕使用时间每天自动保存到本地 SQLite 数据库。\n• “重新导入”会扫描最多一年的 Android 使用数据（以系统实际保留范围为准），同一天保留较大的值。\n• 时长是根据 Android 使用事件估算的；同时使用的应用会分别计入各自的应用时长。\n• 所有数据都不会上传到服务器。</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 0c26a79..4161790 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -157,4 +157,10 @@
+     <string name="analysis_reimport_title">Re-import system history?</string>
+     <string name="analysis_reimport_message">Scans up to one year of system usage data (as far back as the system keeps it) and merges it into the local history. Days that already contain more usage are kept.</string>
+     <string name="analysis_reimport_confirm">Re-import</string>
++    <string name="analysis_settings">Analysis</string>
++    <string name="analysis_animate_statistics">Animate statistics</string>
++    <string name="analysis_animate_statistics_info">Durations count up from zero and bars grow when the analysis data changes.</string>
++    <string name="analysis_about">About analysis history</string>
++    <string name="analysis_about_title">About analysis history</string>
++    <string name="analysis_about_message">The Analysis screen is generated from a usage history that stays on this device.\n\n• Screen time is saved automatically every day and kept in a local SQLite database.\n• Re-import scans up to one year of Android usage data (as far back as the system keeps it) and keeps the larger value for each day.\n• Durations are estimates based on Android usage events; apps used at the same time are counted separately per app.\n• Nothing is uploaded to a server.</string>
+ </resources>
+\ No newline at end of file

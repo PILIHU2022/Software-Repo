@@ -1,0 +1,564 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 16:34:41 +0800
+Subject: [PATCH] Animate Analysis durations and charts from zero
+
+Add reusable rememberAnimatedDuration/rememberAnimatedFraction helpers backed
+by Animatable. The weekday duration table counts its labels up and grows its
+progress bars with a 50 ms stagger; the summary counters, top-app durations
+and Canvas bar charts rise from zero. The animation is snapped to its final
+value immediately when the new Animate statistics setting is off.
+---
+ .../screentime/ui/components/Animation.kt     |  87 ++++++-
+ .../screentime/ui/screens/AnalysisScreen.kt   | 236 ++++++++++++------
+ 2 files changed, 251 insertions(+), 72 deletions(-)
+
+diff --git a/app/src/main/java/com/atharok/screentime/ui/components/Animation.kt b/app/src/main/java/com/atharok/screentime/ui/components/Animation.kt
+index 657f1a3..a7f3a3a 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/components/Animation.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/components/Animation.kt
+@@ -1,11 +1,16 @@
+ package com.atharok.screentime.ui.components
+ 
+ import androidx.compose.animation.AnimatedContent
++import androidx.compose.animation.core.Animatable
++import androidx.compose.animation.core.FastOutSlowInEasing
+ import androidx.compose.animation.core.tween
+ import androidx.compose.animation.fadeIn
+ import androidx.compose.animation.fadeOut
+ import androidx.compose.animation.togetherWith
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.remember
++import kotlinx.coroutines.delay
+ 
+ 
+ @Composable
+@@ -19,4 +24,84 @@ fun <T> AnimatedFade(targetState: T, content: @Composable (T) -> Unit) {
+     ) { state ->
+         content(state)
+     }
+-}
+\ No newline at end of file
++}
++
++/**
++ * Animates a duration from 0 to [timestamp] and returns the current animated value.
++ *
++ * @param timestamp The final duration, in the same unit used by the caller (milliseconds).
++ * @param enabled When false, the final value is returned immediately (no flash of zero).
++ * @param durationMillis The duration of the count-up animation.
++ * @param delayMillis An optional delay before the animation starts.
++ * @param animationKey When this value changes, the animation restarts from zero.
++ */
++@Composable
++fun rememberAnimatedDuration(
++    timestamp: Long,
++    enabled: Boolean = true,
++    durationMillis: Int = 900,
++    delayMillis: Int = 0,
++    animationKey: Any? = timestamp
++): Long {
++    val progress = rememberAnimationProgress(
++        enabled = enabled,
++        durationMillis = durationMillis,
++        delayMillis = delayMillis,
++        animationKey = animationKey
++    )
++    return (timestamp.toDouble() * progress).toLong()
++}
++
++/**
++ * Animates a fraction from 0 to [target] and returns the current animated value.
++ *
++ * @param target The final fraction, usually in the 0..1 range.
++ * @param enabled When false, the final value is returned immediately (no flash of zero).
++ * @param durationMillis The duration of the animation.
++ * @param delayMillis An optional delay before the animation starts.
++ * @param animationKey When this value changes, the animation restarts from zero.
++ */
++@Composable
++fun rememberAnimatedFraction(
++    target: Float,
++    enabled: Boolean = true,
++    durationMillis: Int = 900,
++    delayMillis: Int = 0,
++    animationKey: Any? = target
++): Float {
++    val progress = rememberAnimationProgress(
++        enabled = enabled,
++        durationMillis = durationMillis,
++        delayMillis = delayMillis,
++        animationKey = animationKey
++    )
++    return target * progress
++}
++
++@Composable
++private fun rememberAnimationProgress(
++    enabled: Boolean,
++    durationMillis: Int,
++    delayMillis: Int,
++    animationKey: Any?
++): Float {
++    val progress = remember { Animatable(if (enabled) 0f else 1f) }
++    LaunchedEffect(animationKey, enabled) {
++        if (!enabled) {
++            progress.snapTo(1f)
++        } else {
++            progress.snapTo(0f)
++            if (delayMillis > 0) {
++                delay(delayMillis.toLong())
++            }
++            progress.animateTo(
++                targetValue = 1f,
++                animationSpec = tween(
++                    durationMillis = durationMillis,
++                    easing = FastOutSlowInEasing
++                )
++            )
++        }
++    }
++    return progress.value
++}
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+index a8f31a3..0865fc1 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+@@ -1,6 +1,5 @@
+ package com.atharok.screentime.ui.screens
+ 
+-import android.content.pm.PackageManager
+ import androidx.compose.foundation.Canvas
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
+@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.foundation.shape.CircleShape
+-import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.rounded.Insights
+ import androidx.compose.material3.Button
+@@ -49,10 +47,12 @@ import com.atharok.screentime.R
+ import com.atharok.screentime.common.extensions.getApplicationIconSafety
+ import com.atharok.screentime.common.utils.DateTimeUtils
+ import com.atharok.screentime.domain.entities.analysis.AnalysisRange
++import com.atharok.screentime.domain.entities.analysis.AppUsageTotal
+ import com.atharok.screentime.domain.entities.analysis.DailyUsagePoint
+ import com.atharok.screentime.domain.entities.analysis.UsageAnalysis
+ import com.atharok.screentime.domain.resources.Resource
+ import com.atharok.screentime.presentation.viewmodel.AnalysisViewModel
++import com.atharok.screentime.presentation.viewmodel.SettingsViewModel
+ import com.atharok.screentime.ui.components.AppScaffold
+ import com.atharok.screentime.ui.components.ApplicationIcon
+ import com.atharok.screentime.ui.components.NavigateUpAction
+@@ -66,6 +66,8 @@ import com.atharok.screentime.ui.components.TextMedium
+ import com.atharok.screentime.ui.components.TextNormal
+ import com.atharok.screentime.ui.components.TextNormalSecondary
+ import com.atharok.screentime.ui.components.TextSmall
++import com.atharok.screentime.ui.components.rememberAnimatedDuration
++import com.atharok.screentime.ui.components.rememberAnimatedFraction
+ import org.koin.androidx.compose.koinViewModel
+ 
+ @Composable
+@@ -74,9 +76,13 @@ fun AnalysisScreen(
+     openSettingsScreen: () -> Unit,
+     openApplicationUsageScreen: (String) -> Unit,
+     modifier: Modifier = Modifier,
+-    viewModel: AnalysisViewModel = koinViewModel()
++    viewModel: AnalysisViewModel = koinViewModel(),
++    settingsViewModel: SettingsViewModel = koinViewModel()
+ ) {
+     val analysisResource: Resource<UsageAnalysis> by viewModel.analysisFlow.collectAsStateWithLifecycle()
++    val animateStatistics: Boolean by settingsViewModel.animateStatistics.collectAsStateWithLifecycle(
++        initialValue = true
++    )
+     var showReimportDialog by remember { mutableStateOf(false) }
+ 
+     AppScaffold(
+@@ -96,6 +102,7 @@ fun AnalysisScreen(
+             onRangeSelected = viewModel::selectRange,
+             onRefresh = viewModel::refresh,
+             openApplicationUsageScreen = openApplicationUsageScreen,
++            animateStatistics = animateStatistics,
+             innerPadding = innerPadding
+         )
+     }
+@@ -123,6 +130,7 @@ private fun AnalysisContent(
+     onRangeSelected: (AnalysisRange) -> Unit,
+     onRefresh: () -> Unit,
+     openApplicationUsageScreen: (String) -> Unit,
++    animateStatistics: Boolean,
+     innerPadding: PaddingValues
+ ) {
+     LazyColumn(
+@@ -178,24 +186,28 @@ private fun AnalysisContent(
+                     item(key = "summary") {
+                         SummaryCard(
+                             analysis = analysis,
++                            animateStatistics = animateStatistics,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+                     item(key = "daily_chart") {
+                         DailyChartCard(
+                             analysis = analysis,
++                            animateStatistics = animateStatistics,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+                     item(key = "weekday_chart") {
+                         WeekdayCard(
+                             analysis = analysis,
++                            animateStatistics = animateStatistics,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+                     item(key = "hourly_chart") {
+                         HourlyCard(
+                             analysis = analysis,
++                            animateStatistics = animateStatistics,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+@@ -203,6 +215,7 @@ private fun AnalysisContent(
+                         item(key = "top_apps") {
+                             TopAppsCard(
+                                 analysis = analysis,
++                                animateStatistics = animateStatistics,
+                                 openApplicationUsageScreen = openApplicationUsageScreen,
+                                 modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                             )
+@@ -259,8 +272,28 @@ private fun AnalysisRangeSelector(
+ @Composable
+ private fun SummaryCard(
+     analysis: UsageAnalysis,
++    animateStatistics: Boolean,
+     modifier: Modifier = Modifier
+ ) {
++    val animatedDailyAverage = rememberAnimatedDuration(
++        timestamp = analysis.averageDaily,
++        enabled = animateStatistics,
++        animationKey = analysis.averageDaily
++    )
++    val animatedTotal = rememberAnimatedDuration(
++        timestamp = analysis.totalDuration,
++        enabled = animateStatistics,
++        delayMillis = 60,
++        animationKey = analysis.totalDuration
++    )
++    val bestDayDuration = analysis.bestDay?.duration
++    val animatedBestDay = rememberAnimatedDuration(
++        timestamp = bestDayDuration ?: 0L,
++        enabled = animateStatistics,
++        delayMillis = 120,
++        animationKey = bestDayDuration
++    )
++
+     OutlinedCard(modifier = modifier) {
+         Column(
+             modifier = Modifier
+@@ -269,19 +302,19 @@ private fun SummaryCard(
+         ) {
+             TextSmall(text = stringResource(id = R.string.analysis_daily_average))
+             TextExtraLarge(
+-                text = DateTimeUtils.formatToDuration(analysis.averageDaily),
++                text = DateTimeUtils.formatToDuration(animatedDailyAverage),
+                 modifier = Modifier.padding(top = dimensionResource(id = R.dimen.padding_small))
+             )
+             Spacer(modifier = Modifier.height(dimensionResource(id = R.dimen.padding_medium)))
+             Row(modifier = Modifier.fillMaxWidth()) {
+                 SummaryValue(
+                     label = stringResource(id = R.string.analysis_total),
+-                    value = DateTimeUtils.formatToDuration(analysis.totalDuration),
++                    value = DateTimeUtils.formatToDuration(animatedTotal),
+                     modifier = Modifier.weight(1f)
+                 )
+                 SummaryValue(
+                     label = stringResource(id = R.string.analysis_best_day),
+-                    value = analysis.bestDay?.let { DateTimeUtils.formatToDuration(it.duration) } ?: "-",
++                    value = analysis.bestDay?.let { DateTimeUtils.formatToDuration(animatedBestDay) } ?: "-",
+                     modifier = Modifier.weight(1f)
+                 )
+             }
+@@ -329,6 +362,7 @@ private fun SummaryValue(
+ @Composable
+ private fun DailyChartCard(
+     analysis: UsageAnalysis,
++    animateStatistics: Boolean,
+     modifier: Modifier = Modifier
+ ) {
+     OutlinedCard(modifier = modifier) {
+@@ -342,6 +376,7 @@ private fun DailyChartCard(
+             SimpleBarChart(
+                 values = values,
+                 average = analysis.averageDaily,
++                animate = animateStatistics,
+                 modifier = Modifier
+                     .fillMaxWidth()
+                     .height(150.dp)
+@@ -378,6 +413,7 @@ private fun DailyChartLabels(points: List<DailyUsagePoint>) {
+ @Composable
+ private fun WeekdayCard(
+     analysis: UsageAnalysis,
++    animateStatistics: Boolean,
+     modifier: Modifier = Modifier
+ ) {
+     val max = remember(analysis.weekdayAverage) { analysis.weekdayAverage.maxOrNull() ?: 0L }
+@@ -389,38 +425,66 @@ private fun WeekdayCard(
+         ) {
+             TextMedium(text = stringResource(id = R.string.analysis_by_weekday))
+             analysis.weekdayAverage.forEachIndexed { index, duration ->
+-                Row(
+-                    verticalAlignment = Alignment.CenterVertically,
+-                    modifier = Modifier
+-                        .fillMaxWidth()
+-                        .padding(top = dimensionResource(id = R.dimen.padding_normal))
+-                ) {
+-                    TextSmall(
+-                        text = DateTimeUtils.formatWeekdayByIndex(index),
+-                        modifier = Modifier.width(52.dp)
+-                    )
+-                    LinearProgressIndicator(
+-                        progress = { if (max == 0L) 0f else duration.toFloat() / max },
+-                        modifier = Modifier
+-                            .weight(1f)
+-                            .height(8.dp)
+-                            .clip(CircleShape),
+-                        drawStopIndicator = {}
+-                    )
+-                    TextSmall(
+-                        text = DateTimeUtils.formatToDuration(duration),
+-                        textAlign = TextAlign.End,
+-                        modifier = Modifier.width(80.dp)
+-                    )
+-                }
++                WeekdayRow(
++                    index = index,
++                    duration = duration,
++                    max = max,
++                    animate = animateStatistics
++                )
+             }
+         }
+     }
+ }
+ 
++@Composable
++private fun WeekdayRow(
++    index: Int,
++    duration: Long,
++    max: Long,
++    animate: Boolean
++) {
++    val targetFraction = if (max == 0L) 0f else duration.toFloat() / max
++    val fraction = rememberAnimatedFraction(
++        target = targetFraction,
++        enabled = animate,
++        delayMillis = index * 50,
++        animationKey = duration to max
++    )
++    val animatedDuration = if (targetFraction > 0f) {
++        (duration.toDouble() * fraction / targetFraction).toLong()
++    } else {
++        0L
++    }
++    Row(
++        verticalAlignment = Alignment.CenterVertically,
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(top = dimensionResource(id = R.dimen.padding_normal))
++    ) {
++        TextSmall(
++            text = DateTimeUtils.formatWeekdayByIndex(index),
++            modifier = Modifier.width(52.dp)
++        )
++        LinearProgressIndicator(
++            progress = { fraction },
++            modifier = Modifier
++                .weight(1f)
++                .height(8.dp)
++                .clip(CircleShape),
++            drawStopIndicator = {}
++        )
++        TextSmall(
++            text = DateTimeUtils.formatToDuration(animatedDuration),
++            textAlign = TextAlign.End,
++            modifier = Modifier.width(80.dp)
++        )
++    }
++}
++
+ @Composable
+ private fun HourlyCard(
+     analysis: UsageAnalysis,
++    animateStatistics: Boolean,
+     modifier: Modifier = Modifier
+ ) {
+     OutlinedCard(modifier = modifier) {
+@@ -434,6 +498,7 @@ private fun HourlyCard(
+             SimpleBarChart(
+                 values = values,
+                 average = null,
++                animate = animateStatistics,
+                 modifier = Modifier
+                     .fillMaxWidth()
+                     .height(90.dp)
+@@ -452,10 +517,10 @@ private fun HourlyCard(
+ @Composable
+ private fun TopAppsCard(
+     analysis: UsageAnalysis,
++    animateStatistics: Boolean,
+     openApplicationUsageScreen: (String) -> Unit,
+     modifier: Modifier = Modifier
+ ) {
+-    val context = LocalContext.current
+     OutlinedCard(modifier = modifier) {
+         Column(
+             modifier = Modifier
+@@ -463,48 +528,70 @@ private fun TopAppsCard(
+                 .padding(dimensionResource(id = R.dimen.padding_large))
+         ) {
+             TextMedium(text = stringResource(id = R.string.analysis_top_apps))
+-            analysis.topApps.forEach { app ->
+-                Row(
+-                    verticalAlignment = Alignment.CenterVertically,
+-                    modifier = Modifier
+-                        .fillMaxWidth()
+-                        .clickable { openApplicationUsageScreen(app.packageName) }
+-                        .padding(vertical = dimensionResource(id = R.dimen.padding_normal))
+-                ) {
+-                    val icon = remember(app.packageName) {
+-                        context.packageManager.getApplicationIconSafety(app.packageName)
+-                    }
+-                    ApplicationIcon(
+-                        drawable = icon,
+-                        contentDescription = app.appName,
+-                        modifier = Modifier.size(dimensionResource(id = R.dimen.icon_medium_size)),
+-                        cacheKey = app.packageName
+-                    )
+-                    Column(
+-                        modifier = Modifier
+-                            .weight(1f)
+-                            .padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+-                    ) {
+-                        TextNormal(text = app.appName, maxLines = 1)
+-                        TextSmall(text = app.packageName, maxLines = 1)
+-                    }
+-                    Column(horizontalAlignment = Alignment.End) {
+-                        TextNormal(text = DateTimeUtils.formatToDuration(app.duration), maxLines = 1)
+-                        TextSmall(
+-                            text = pluralStringResource(
+-                                id = R.plurals.analysis_days_used,
+-                                count = app.daysUsed,
+-                                app.daysUsed
+-                            ),
+-                            maxLines = 1
+-                        )
+-                    }
+-                }
++            analysis.topApps.forEachIndexed { index, app ->
++                TopAppRow(
++                    app = app,
++                    index = index,
++                    animate = animateStatistics,
++                    openApplicationUsageScreen = openApplicationUsageScreen
++                )
+             }
+         }
+     }
+ }
+ 
++@Composable
++private fun TopAppRow(
++    app: AppUsageTotal,
++    index: Int,
++    animate: Boolean,
++    openApplicationUsageScreen: (String) -> Unit
++) {
++    val context = LocalContext.current
++    val animatedDuration = rememberAnimatedDuration(
++        timestamp = app.duration,
++        enabled = animate,
++        delayMillis = index * 60,
++        animationKey = app.packageName to app.duration
++    )
++    Row(
++        verticalAlignment = Alignment.CenterVertically,
++        modifier = Modifier
++            .fillMaxWidth()
++            .clickable { openApplicationUsageScreen(app.packageName) }
++            .padding(vertical = dimensionResource(id = R.dimen.padding_normal))
++    ) {
++        val icon = remember(app.packageName) {
++            context.packageManager.getApplicationIconSafety(app.packageName)
++        }
++        ApplicationIcon(
++            drawable = icon,
++            contentDescription = app.appName,
++            modifier = Modifier.size(dimensionResource(id = R.dimen.icon_medium_size)),
++            cacheKey = app.packageName
++        )
++        Column(
++            modifier = Modifier
++                .weight(1f)
++                .padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++        ) {
++            TextNormal(text = app.appName, maxLines = 1)
++            TextSmall(text = app.packageName, maxLines = 1)
++        }
++        Column(horizontalAlignment = Alignment.End) {
++            TextNormal(text = DateTimeUtils.formatToDuration(animatedDuration), maxLines = 1)
++            TextSmall(
++                text = pluralStringResource(
++                    id = R.plurals.analysis_days_used,
++                    count = app.daysUsed,
++                    app.daysUsed
++                ),
++                maxLines = 1
++            )
++        }
++    }
++}
++
+ @Composable
+ private fun EmptyHistory(
+     onRefresh: () -> Unit,
+@@ -557,12 +644,18 @@ private fun FailureMessage(throwable: Throwable) {
+ private fun SimpleBarChart(
+     values: List<Long>,
+     average: Long?,
+-    modifier: Modifier = Modifier
++    modifier: Modifier = Modifier,
++    animate: Boolean = true
+ ) {
+     if (values.isEmpty()) return
+     val barColor = MaterialTheme.colorScheme.primary
+     val averageColor = MaterialTheme.colorScheme.tertiary
+     val gridColor = MaterialTheme.colorScheme.outlineVariant
++    val animationProgress = rememberAnimatedFraction(
++        target = 1f,
++        enabled = animate,
++        animationKey = values
++    )
+ 
+     Canvas(modifier = modifier) {
+         val maxValue = maxOf(values.maxOrNull() ?: 1L, average ?: 0L, 1L)
+@@ -596,13 +689,14 @@ private fun SimpleBarChart(
+         val radius = CornerRadius(3f, 3f)
+ 
+         values.forEachIndexed { index, value ->
+-            val height = (value.toFloat() / maxValue) * chartHeight
++            val baseHeight = (value.toFloat() / maxValue) * chartHeight
++            val height = baseHeight.coerceAtLeast(2f) * animationProgress
+             val left = index * slot + (slot - barWidth) / 2f
+             val top = chartHeight - height
+             drawRoundRect(
+                 color = barColor.copy(alpha = if (value > 0L) 0.9f else 0.2f),
+                 topLeft = Offset(left, top),
+-                size = Size(barWidth, height.coerceAtLeast(2f)),
++                size = Size(barWidth, height),
+                 cornerRadius = radius
+             )
+         }
