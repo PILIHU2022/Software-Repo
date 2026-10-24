@@ -29,7 +29,7 @@ concurrency:
 jobs:
   check:
     name: Check upstream
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.check.outputs.matrix }}
       any_changed: ${{ steps.check.outputs.any_changed }}
@@ -60,7 +60,7 @@ jobs:
     name: Build ${{ matrix.app }}
     needs: check
     if: needs.check.outputs.any_changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -77,8 +77,46 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+      # Hosted ubuntu-24.04 images already ship the Android SDK; setup-android
+      # is both unnecessary and fragile (it failed on the ubuntu-26 image).
+      # Just verify the preinstalled SDK and put sdkmanager on PATH.
+      - name: Verify Android SDK
+        run: |
+          set -euo pipefail
+          uname -a
+          java -version
+          echo "ANDROID_HOME=${ANDROID_HOME:-<unset>}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<unset>}"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK_ROOT=$SDK_ROOT"
+          if [[ ! -d "$SDK_ROOT" ]]; then
+            echo "::error::Android SDK directory not found: $SDK_ROOT"
+            ls -la /usr/local/lib/android 2>/dev/null || true
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            shopt -s nullglob
+            for candidate in "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager "$SDK_ROOT"/cmdline-tools/bin/sdkmanager; do
+              if [[ -x "$candidate" ]]; then
+                echo "Adding $(dirname "$candidate") to PATH"
+                echo "$(dirname "$candidate")" >> "$GITHUB_PATH"
+                export PATH="$(dirname "$candidate"):$PATH"
+                break
+              fi
+            done
+            shopt -u nullglob
+          fi
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            echo "::error::sdkmanager not found under $SDK_ROOT"
+            ls -la "$SDK_ROOT" || true
+            exit 1
+          fi
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          sdkmanager --version
+          ls "$SDK_ROOT"
+          df -h
 
       - name: Install Android SDK packages
         # android-37.x is a preview platform, so the stable channel may not
@@ -137,6 +175,19 @@ jobs:
           path: ${{ runner.temp }}/dist/${{ matrix.app }}
           if-no-files-found: error
 
+      - name: Dump build environment on failure
+        if: failure()
+        run: |
+          set -x
+          uname -a || true
+          java -version || true
+          echo "ANDROID_HOME=${ANDROID_HOME:-<unset>}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<unset>}"
+          df -h || true
+          free -g || true
+          ls -la "$RUNNER_TEMP/dist/${{ matrix.app }}" 2>/dev/null || true
+          find "$RUNNER_TEMP/dist" -maxdepth 3 -type f 2>/dev/null || true
+
   publish:
     name: Publish F-Droid repository
     needs:
@@ -149,7 +200,7 @@ jobs:
       needs.check.result == 'success' &&
       needs.check.outputs.any_changed == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'failure')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment:
       name: github-pages
@@ -166,8 +217,43 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+      - name: Verify Android SDK
+        run: |
+          set -euo pipefail
+          uname -a
+          java -version
+          echo "ANDROID_HOME=${ANDROID_HOME:-<unset>}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<unset>}"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK_ROOT=$SDK_ROOT"
+          if [[ ! -d "$SDK_ROOT" ]]; then
+            echo "::error::Android SDK directory not found: $SDK_ROOT"
+            ls -la /usr/local/lib/android 2>/dev/null || true
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            shopt -s nullglob
+            for candidate in "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager "$SDK_ROOT"/cmdline-tools/bin/sdkmanager; do
+              if [[ -x "$candidate" ]]; then
+                echo "Adding $(dirname "$candidate") to PATH"
+                echo "$(dirname "$candidate")" >> "$GITHUB_PATH"
+                export PATH="$(dirname "$candidate"):$PATH"
+                break
+              fi
+            done
+            shopt -u nullglob
+          fi
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            echo "::error::sdkmanager not found under $SDK_ROOT"
+            ls -la "$SDK_ROOT" || true
+            exit 1
+          fi
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          sdkmanager --version
+          ls "$SDK_ROOT"
+          df -h
 
       - name: Install Android SDK packages
         run: |
@@ -289,18 +375,53 @@ jobs:
       - build
       - publish
     if: failure()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       issues: write
+      actions: read
     steps:
       - name: Open or update failure issue
         uses: actions/github-script@v9
         with:
           script: |
             const title = 'Patchwork build failed';
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            // Job logs are not readable without authentication, so copy the
+            // tail of every failed job into the issue; this is our public
+            // debugging channel.
+            const excerpts = [];
+            try {
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner,
+                repo,
+                run_id: context.runId,
+                per_page: 100,
+              });
+              for (const job of jobs.filter((j) => j.conclusion === 'failure').slice(0, 5)) {
+                try {
+                  const res = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                    owner,
+                    repo,
+                    job_id: job.id,
+                  });
+                  const raw = typeof res.data === 'string'
+                    ? res.data
+                    : Buffer.from(res.data).toString('utf8');
+                  const tail = raw.split('\n').slice(-200).join('\n');
+                  excerpts.push(`### ${job.name}\n\n\`\`\`\n${tail.slice(-12000)}\n\`\`\``);
+                } catch (err) {
+                  excerpts.push(`### ${job.name}\n\nCould not download logs: ${err.message}`);
+                }
+              }
+            } catch (err) {
+              excerpts.push(`Could not list jobs: ${err.message}`);
+            }
+
+            let body = [
               `The patchwork build failed: ${runUrl}`,
               '',
               'Local reproduction:',
@@ -312,25 +433,31 @@ jobs:
               './scripts/build-app.sh screentime',
               '```',
             ].join('\n');
+            if (excerpts.length > 0) {
+              body += '\n\n## Failed job logs (tail)\n\n' + excerpts.join('\n\n');
+            }
+            if (body.length > 60000) {
+              body = body.slice(0, 60000) + '\n\n(truncated)';
+            }
 
             const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner,
+              repo,
               state: 'open',
               per_page: 100,
             });
             const existing = issues.find((issue) => issue.title === title);
             if (existing) {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner,
+                repo,
                 issue_number: existing.number,
                 body,
               });
             } else {
               await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner,
+                repo,
                 title,
                 body,
               });
