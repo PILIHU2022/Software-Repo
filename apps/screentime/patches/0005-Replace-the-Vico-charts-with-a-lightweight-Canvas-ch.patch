@@ -1,0 +1,599 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:15:28 +0800
+Subject: [PATCH] Replace the Vico charts with a lightweight Canvas chart
+
+The main screen and the per-app screen only need a simple bar chart with a
+value axis, day/hour labels, grid lines and an average line. Draw it with a
+Compose Canvas instead of instantiating a Vico CartesianChartHost and
+feeding a model producer, which removes the chart setup from the
+composition and drops the last Vico API usage from the app code (R8 can
+then strip the dependency from release builds).
+
+The new chart keeps the previous 192dp height, nice-minute value axis,
+every-4-hours / per-weekday labels, rounded bars, dashed average line and
+theme colors.
+---
+ .../ui/screens/ApplicationUsageScreen.kt      |   9 +-
+ .../ui/screens/DeviceUsageScreen.kt           |  13 +-
+ .../com/atharok/screentime/ui/views/Chart.kt  | 337 ++++++++++--------
+ .../screentime/ui/views/TotalUsageView.kt     |   7 -
+ 4 files changed, 187 insertions(+), 179 deletions(-)
+
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt
+index edcfd5a..088e0e7 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt
+@@ -12,7 +12,6 @@ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+-import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.res.dimensionResource
+ import androidx.compose.ui.res.stringResource
+@@ -32,7 +31,6 @@ import com.atharok.screentime.ui.components.SettingsAction
+ import com.atharok.screentime.ui.components.TextSmall
+ import com.atharok.screentime.ui.views.PeriodSelector
+ import com.atharok.screentime.ui.views.TotalUsageView
+-import com.patrykandpatrick.vico.compose.cartesian.data.CartesianChartModelProducer
+ 
+ @Composable
+ fun ApplicationUsageScreen(
+@@ -91,8 +89,7 @@ private fun StatelessApplicationUsageScreen(
+     navigateUp: () -> Unit,
+     openSettingsScreen: () -> Unit,
+     refresh: (Period) -> Unit,
+-    modifier: Modifier = Modifier,
+-    modelProducer: CartesianChartModelProducer = remember { CartesianChartModelProducer() }
++    modifier: Modifier = Modifier
+ ) {
+     ApplicationUsageScaffold(
+         packageName = packageName,
+@@ -147,7 +144,6 @@ private fun StatelessApplicationUsageScreen(
+                         onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+                         deviceUsage = deviceUsageResource.data,
+                         appUsage = deviceUsageResource.data.getAppUsage(packageName),
+-                        modelProducer = modelProducer,
+                         modifier = Modifier
+                             .fillMaxSize()
+                             .padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+@@ -167,7 +163,6 @@ private fun TotalUsageView(
+     onSelectedCentralTendencyChange: (CentralTendency) -> Unit,
+     deviceUsage: DeviceUsage<*>,
+     appUsage: AppUsage,
+-    modelProducer: CartesianChartModelProducer,
+     modifier: Modifier = Modifier
+ ) {
+     if(period == Period.WEEK) {
+@@ -180,7 +175,6 @@ private fun TotalUsageView(
+             onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+             timeIntervalStart = deviceUsage.timeIntervalStart,
+             timeIntervalEnd = deviceUsage.timeIntervalEnd,
+-            modelProducer = modelProducer,
+             chartValues = appUsage.getChartValues(),
+             dateOfLastRefresh = deviceUsage.dateOfLastRefresh,
+             modifier = modifier
+@@ -196,7 +190,6 @@ private fun TotalUsageView(
+             selectedCentralTendency = selectedCentralTendency,
+             onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+             timestamp = deviceUsage.timeIntervalStart,
+-            modelProducer = modelProducer,
+             chartValues = appUsage.getChartValues(),
+             dateOfLastRefresh = deviceUsage.dateOfLastRefresh,
+             modifier = modifier
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+index f7fcdd1..a139e3c 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+@@ -18,7 +18,6 @@ import androidx.compose.material3.LinearProgressIndicator
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+-import androidx.compose.runtime.remember
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+@@ -43,7 +42,6 @@ import com.atharok.screentime.ui.components.TextNormalSecondary
+ import com.atharok.screentime.ui.components.TextSmall
+ import com.atharok.screentime.ui.views.PeriodSelector
+ import com.atharok.screentime.ui.views.TotalUsageView
+-import com.patrykandpatrick.vico.compose.cartesian.data.CartesianChartModelProducer
+ 
+ @Composable
+ fun DeviceUsageScreen(
+@@ -103,8 +101,7 @@ private fun StatelessDeviceUsageScreen(
+     openAnalysisScreen: () -> Unit,
+     openSettingsScreen: () -> Unit,
+     refresh: (Period) -> Unit,
+-    modifier: Modifier = Modifier,
+-    modelProducer: CartesianChartModelProducer = remember { CartesianChartModelProducer() }
++    modifier: Modifier = Modifier
+ ) {
+     AppScaffold(
+         title = stringResource(id = R.string.app_name),
+@@ -140,8 +137,7 @@ private fun StatelessDeviceUsageScreen(
+                 deviceUsageResource = deviceUsageResource,
+                 openApplicationUsageScreen = openApplicationUsageScreen,
+                 openAnalysisScreen = openAnalysisScreen,
+-                innerPadding = innerPadding,
+-                modelProducer = modelProducer
++                innerPadding = innerPadding
+             )
+         //}
+     }
+@@ -159,7 +155,6 @@ private fun PortraitDeviceUsageScreen(
+     openApplicationUsageScreen: (appPackageName: String) -> Unit,
+     openAnalysisScreen: () -> Unit,
+     innerPadding: PaddingValues,
+-    modelProducer: CartesianChartModelProducer,
+     modifier: Modifier = Modifier
+ ) {
+     LazyColumn(
+@@ -202,7 +197,6 @@ private fun PortraitDeviceUsageScreen(
+                         selectedCentralTendency = selectedCentralTendency,
+                         onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+                         deviceUsage = deviceUsage,
+-                        modelProducer = modelProducer,
+                         modifier = Modifier
+                             .fillMaxWidth()
+                             .padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+@@ -330,7 +324,6 @@ private fun TotalUsageView(
+     selectedCentralTendency: CentralTendency,
+     onSelectedCentralTendencyChange: (CentralTendency) -> Unit,
+     deviceUsage: DeviceUsage<*>,
+-    modelProducer: CartesianChartModelProducer,
+     modifier: Modifier = Modifier
+ ) {
+     if(period == Period.WEEK) {
+@@ -343,7 +336,6 @@ private fun TotalUsageView(
+             onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+             timeIntervalStart = deviceUsage.timeIntervalStart,
+             timeIntervalEnd = deviceUsage.timeIntervalEnd,
+-            modelProducer = modelProducer,
+             chartValues = deviceUsage.getChartValues(),
+             dateOfLastRefresh = deviceUsage.dateOfLastRefresh,
+             modifier = modifier
+@@ -359,7 +351,6 @@ private fun TotalUsageView(
+             selectedCentralTendency = selectedCentralTendency,
+             onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+             timestamp = deviceUsage.timeIntervalStart,
+-            modelProducer = modelProducer,
+             chartValues = deviceUsage.getChartValues(),
+             dateOfLastRefresh = deviceUsage.dateOfLastRefresh,
+             modifier = modifier
+diff --git a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+index a3f5fa3..ea9f23c 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+@@ -1,185 +1,216 @@
+ package com.atharok.screentime.ui.views
+ 
+-import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.Canvas
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.geometry.CornerRadius
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.geometry.Size
++import androidx.compose.ui.graphics.PathEffect
++import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.text.TextStyle
++import androidx.compose.ui.text.drawText
++import androidx.compose.ui.text.rememberTextMeasurer
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import com.atharok.screentime.common.utils.DateTimeUtils
+ import com.atharok.screentime.domain.entities.Period
+-import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
+-import com.patrykandpatrick.vico.compose.cartesian.axis.Axis
+-import com.patrykandpatrick.vico.compose.cartesian.axis.HorizontalAxis
+-import com.patrykandpatrick.vico.compose.cartesian.axis.VerticalAxis
+-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberAxisGuidelineComponent
+-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberAxisLabelComponent
+-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberAxisLineComponent
+-import com.patrykandpatrick.vico.compose.cartesian.data.CartesianChartModelProducer
+-import com.patrykandpatrick.vico.compose.cartesian.data.CartesianValueFormatter
+-import com.patrykandpatrick.vico.compose.cartesian.data.columnModel
+-import com.patrykandpatrick.vico.compose.cartesian.decoration.HorizontalLine
+-import com.patrykandpatrick.vico.compose.cartesian.layer.ColumnCartesianLayer
+-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberColumnCartesianLayer
+-import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
+-import com.patrykandpatrick.vico.compose.cartesian.rememberVicoScrollState
+-import com.patrykandpatrick.vico.compose.common.Fill
+-import com.patrykandpatrick.vico.compose.common.ProvideVicoTheme
+-import com.patrykandpatrick.vico.compose.common.component.LineComponent
+-import com.patrykandpatrick.vico.compose.common.component.TextComponent
+-import com.patrykandpatrick.vico.compose.common.component.rememberLineComponent
+-import com.patrykandpatrick.vico.compose.common.data.ExtraStore
+-import com.patrykandpatrick.vico.compose.common.vicoTheme
+-import com.patrykandpatrick.vico.compose.m3.common.rememberM3VicoTheme
+-import kotlin.math.floor
++import kotlin.math.ceil
+ 
++private const val CHART_HEIGHT_DP = 192
++private const val MAX_INTERVALS = 6
++private const val DAY_LABEL_INTERVAL = 4
++
++private val STEP_CANDIDATES_MINUTES = intArrayOf(
++    1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440
++)
++
++private data class ChartAxis(
++    val maxMinutes: Int,
++    val ticks: List<Int>
++)
++
++private fun computeChartAxis(maxHours: Double): ChartAxis {
++    val maxMinutes = ceil(maxHours * 60.0).toInt().coerceAtLeast(1)
++    val step = STEP_CANDIDATES_MINUTES.firstOrNull { candidate ->
++        ceil(maxMinutes.toDouble() / candidate).toInt() <= MAX_INTERVALS
++    } ?: STEP_CANDIDATES_MINUTES.last()
++    val maxTick = ceil(maxMinutes.toDouble() / step).toInt() * step
++    return ChartAxis(
++        maxMinutes = maxTick,
++        ticks = (0..maxTick step step).toList()
++    )
++}
++
++/**
++ * Lightweight bar chart drawn with Compose Canvas.
++ *
++ * [data] keys are the bottom-axis labels and values are durations in hours. The chart keeps the
++ * features of the previous Vico chart: a value axis with duration labels, grid lines, rounded
++ * bars, a dashed average line and per-day/hour labels.
++ */
+ @Composable
+ fun Chart(
+     period: Period,
+     data: Map<String, Float>,
+     average: Double,
+-    modelProducer: CartesianChartModelProducer,
+     modifier: Modifier = Modifier
+ ) {
++    if (data.isEmpty()) return
+ 
+-    val bottomAxisLabelListKey = remember { ExtraStore.Key<List<String>>() }
++    val values = remember(data) { data.values.toList() }
++    val labels = remember(data) { data.keys.toList() }
++    val textMeasurer = rememberTextMeasurer()
++    val labelStyle = TextStyle(
++        color = MaterialTheme.colorScheme.onSurfaceVariant,
++        fontSize = 12.sp
++    )
+ 
+-    LaunchedEffect(data) {
+-        modelProducer.runTransaction {
+-            columnModel { series(data.values) }
+-            extras {
+-                it[bottomAxisLabelListKey] = data.keys.toList()
+-            }
++    val axis = remember(values, average) {
++        computeChartAxis(
++            maxOf(values.maxOrNull() ?: 0f, average.toFloat()).toDouble()
++        )
++    }
++    val yAxisLabels = remember(axis, labelStyle) {
++        axis.ticks.map { minutes ->
++            textMeasurer.measure(
++                text = DateTimeUtils.formatToHoursMinutes(minutes / 60f),
++                style = labelStyle
++            )
+         }
+     }
+-
+-    StatelessChart(
+-        data = data,
+-        average = average,
+-        bottomAxis = when(period) {
+-            Period.WEEK -> {
+-                rememberBottomAxisDefault(
+-                    valueFormatter = remember {{ cartesianMeasuringContext, x, _ ->
+-                        val xInt: Int = x.toInt()
+-                        cartesianMeasuringContext.model.extraStore.getOrNull(bottomAxisLabelListKey)?.getOrNull(xInt) ?: "$xInt"
+-                    }},
+-                    itemPlacer = HorizontalAxis.ItemPlacer.aligned(addExtremeLabelPadding = true)
+-                )
+-            }
+-            Period.DAY -> {
+-                rememberBottomAxisDefault(
+-                    valueFormatter = remember{{ cartesianMeasuringContext, x, _  ->
+-                        val xInt: Int = x.toInt()
+-                        if(xInt % 4 == 0) cartesianMeasuringContext.model.extraStore.getOrNull(bottomAxisLabelListKey)?.getOrNull(xInt) ?: "$xInt" else "$xInt"
+-                    }},
+-                    itemPlacer = HorizontalAxis.ItemPlacer.aligned(spacing = { 4 }, addExtremeLabelPadding = true)
+-                )
++    val bottomLabelIndices = remember(period, labels) {
++        when {
++            period == Period.DAY -> labels.indices.filter { it % DAY_LABEL_INTERVAL == 0 }
++            labels.size <= 7 -> labels.indices.toList()
++            else -> {
++                val step = ceil(labels.size / 6.0).toInt().coerceAtLeast(1)
++                labels.indices.filter { it % step == 0 }
+             }
+-        },
+-        modifier = modifier,
+-        modelProducer = modelProducer
+-    )
+-}
++        }
++    }
++    val bottomLabels = remember(bottomLabelIndices, labels, labelStyle) {
++        bottomLabelIndices.map { index ->
++            textMeasurer.measure(text = labels[index], style = labelStyle)
++        }
++    }
+ 
+-@Composable
+-private fun StatelessChart(
+-    data: Map<String, Float>,
+-    average: Double,
+-    bottomAxis: Axis<Axis.Position.Horizontal.Bottom>,
+-    modifier: Modifier,
+-    modelProducer: CartesianChartModelProducer
+-) {
+-    ProvideVicoTheme(theme = rememberM3VicoTheme()) {
+-        CartesianChartHost(
+-            chart = rememberCartesianChart(
+-                rememberColumnCartesianLayer(
+-                    columnProvider = ColumnCartesianLayer.ColumnProvider.series(
+-                        vicoTheme.columnCartesianLayerColors.map { color ->
+-                            rememberLineComponent(
+-                                fill = Fill(color),
+-                                thickness = 4.dp,
+-                                shape = CircleShape
+-                            )
+-                        }
+-                    )
+-                ),
+-                startAxis = VerticalAxis.rememberStart(
+-                    line = rememberAxisLineComponentDefault(),
+-                    label = rememberAxisLabelComponentDefault(),
+-                    tick = rememberAxisTickGuidelineComponentDefault(),
+-                    guideline = rememberAxisGuidelineComponentDefault(),
+-                    valueFormatter = remember {
+-                        { _, y: Double, _ ->
+-                            DateTimeUtils.formatToHoursMinutes(y.toFloat())
+-                        }
+-                    },
+-                    itemPlacer = VerticalAxis.ItemPlacer.step(
+-                        step = {
+-                            val max = data.values.max()
+-                            (if(max >= 1f) 0.25f + floor(max) * 0.25f else 1f / 60f).toDouble()
+-                        }
+-                    )
+-                ),
+-                bottomAxis = bottomAxis,
+-
+-                // Average
+-                decorations = listOf(
+-                    HorizontalLine(
+-                        y = {
+-                            //(data.values.sum() / data.values.size).toDouble()
+-                            average
+-                        },
+-                        line = LineComponent(
+-                            fill = Fill(MaterialTheme.colorScheme.tertiary),
+-                            shape = CircleShape
+-                        )
+-                    )
+-                )
+-            ),
+-            modelProducer = modelProducer,
+-            modifier = modifier,
+-            scrollState = rememberVicoScrollState(false),
+-        )
++    val density = LocalDensity.current
++    val leftPadding = remember(yAxisLabels, density) {
++        with(density) {
++            (yAxisLabels.maxOfOrNull { it.size.width } ?: 0) + 8.dp.toPx()
++        }
++    }
++    val bottomPadding = remember(bottomLabels, density) {
++        with(density) {
++            (bottomLabels.maxOfOrNull { it.size.height } ?: 0) + 6.dp.toPx()
++        }
+     }
+-}
+ 
+-// ---- Axis ----
++    val barColor = MaterialTheme.colorScheme.primary
++    val averageColor = MaterialTheme.colorScheme.tertiary
++    val gridColor = MaterialTheme.colorScheme.outlineVariant
++    val axisColor = MaterialTheme.colorScheme.outline
+ 
+-@Composable
+-private fun rememberBottomAxisDefault(
+-    valueFormatter: CartesianValueFormatter = remember { CartesianValueFormatter.decimal() },
+-    itemPlacer: HorizontalAxis.ItemPlacer = remember { HorizontalAxis.ItemPlacer.aligned() },
+-): HorizontalAxis<Axis.Position.Horizontal.Bottom> = HorizontalAxis.rememberBottom(
+-    line = rememberAxisLineComponentDefault(),
+-    label = rememberAxisLabelComponentDefault(),
+-    tick = rememberAxisTickGuidelineComponentDefault(),
+-    guideline = rememberAxisGuidelineComponentDefault(),
+-    valueFormatter = valueFormatter,
+-    itemPlacer = itemPlacer
+-)
++    Canvas(
++        modifier = modifier
++            .fillMaxWidth()
++            .height(CHART_HEIGHT_DP.dp)
++    ) {
++        val rightPadding = 2.dp.toPx()
++        val topPadding = 4.dp.toPx()
++        val plotLeft = leftPadding
++        val plotRight = size.width - rightPadding
++        val plotTop = topPadding
++        val plotBottom = size.height - bottomPadding
+ 
+-@Composable
+-private fun rememberAxisLabelComponentDefault(): TextComponent = rememberAxisLabelComponent(
+-    style = TextStyle(
+-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+-        fontSize = 12.sp
+-    )
+-)
++        if (plotRight <= plotLeft || plotBottom <= plotTop) return@Canvas
+ 
+-@Composable
+-private fun rememberAxisLineComponentDefault(): LineComponent = rememberAxisLineComponent(
+-    fill = Fill(MaterialTheme.colorScheme.outline)
+-)
++        val plotWidth = plotRight - plotLeft
++        val plotHeight = plotBottom - plotTop
++        val maxMinutes = axis.maxMinutes.toFloat().coerceAtLeast(1f)
+ 
+-@Composable
+-private fun rememberAxisTickGuidelineComponentDefault(): LineComponent = rememberAxisGuidelineComponent(
+-    fill = Fill(MaterialTheme.colorScheme.outline)
+-)
++        fun valueToY(minutes: Float): Float =
++            plotBottom - (minutes / maxMinutes) * plotHeight
+ 
+-@Composable
+-private fun rememberAxisGuidelineComponentDefault(): LineComponent = rememberAxisGuidelineComponent(
+-    fill = Fill(MaterialTheme.colorScheme.outlineVariant)
+-)
+\ No newline at end of file
++        // Grid + value labels.
++        axis.ticks.forEachIndexed { index, minutes ->
++            val y = valueToY(minutes.toFloat())
++            drawLine(
++                color = gridColor,
++                start = Offset(plotLeft, y),
++                end = Offset(plotRight, y),
++                strokeWidth = 1f
++            )
++            val layout = yAxisLabels[index]
++            drawText(
++                textLayoutResult = layout,
++                topLeft = Offset(
++                    x = (plotLeft - layout.size.width - 4.dp.toPx()).coerceAtLeast(0f),
++                    y = (y - layout.size.height / 2f)
++                        .coerceIn(0f, (size.height - layout.size.height).coerceAtLeast(0f))
++                )
++            )
++        }
++
++        // Axes.
++        drawLine(
++            color = axisColor,
++            start = Offset(plotLeft, plotTop),
++            end = Offset(plotLeft, plotBottom),
++            strokeWidth = 1f
++        )
++        drawLine(
++            color = axisColor,
++            start = Offset(plotLeft, plotBottom),
++            end = Offset(plotRight, plotBottom),
++            strokeWidth = 1f
++        )
++
++        // Bars.
++        val slot = plotWidth / values.size
++        val barWidth = (slot * 0.62f).coerceAtLeast(2.dp.toPx())
++        val radiusPx = minOf(3.dp.toPx(), barWidth / 2f)
++        val radius = CornerRadius(radiusPx, radiusPx)
++        values.forEachIndexed { index, value ->
++            if (value <= 0f) return@forEachIndexed
++            val barHeight = (value / maxMinutes) * plotHeight
++            if (barHeight <= 0f) return@forEachIndexed
++            val left = plotLeft + index * slot + (slot - barWidth) / 2f
++            drawRoundRect(
++                color = barColor.copy(alpha = 0.9f),
++                topLeft = Offset(left, plotBottom - barHeight),
++                size = Size(barWidth, barHeight.coerceAtLeast(2.dp.toPx())),
++                cornerRadius = radius
++            )
++        }
++
++        // Average line.
++        if (average > 0.0) {
++            val y = valueToY((average * 60.0).toFloat())
++            drawLine(
++                color = averageColor,
++                start = Offset(plotLeft, y),
++                end = Offset(plotRight, y),
++                strokeWidth = 2f,
++                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))
++            )
++        }
++
++        // Bottom-axis labels.
++        bottomLabelIndices.forEachIndexed { labelIndex, dataIndex ->
++            val layout = bottomLabels[labelIndex]
++            val centerX = plotLeft + (dataIndex + 0.5f) * slot
++            val x = (centerX - layout.size.width / 2f)
++                .coerceIn(0f, (size.width - layout.size.width).coerceAtLeast(0f))
++            drawText(
++                textLayoutResult = layout,
++                topLeft = Offset(x, plotBottom + 4.dp.toPx())
++            )
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/ui/views/TotalUsageView.kt b/app/src/main/java/com/atharok/screentime/ui/views/TotalUsageView.kt
+index 4139a7c..44aca70 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/views/TotalUsageView.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/views/TotalUsageView.kt
+@@ -35,7 +35,6 @@ import com.atharok.screentime.ui.components.OutlinedCard
+ import com.atharok.screentime.ui.components.TextExtraLarge
+ import com.atharok.screentime.ui.components.TextNormal
+ import com.atharok.screentime.ui.components.TextSmall
+-import com.patrykandpatrick.vico.compose.cartesian.data.CartesianChartModelProducer
+ 
+ @Composable
+ fun TotalUsageView(
+@@ -47,7 +46,6 @@ fun TotalUsageView(
+     onSelectedCentralTendencyChange: (CentralTendency) -> Unit,
+     timeIntervalStart: Long,
+     timeIntervalEnd: Long,
+-    modelProducer: CartesianChartModelProducer,
+     chartValues: Map<String, Float>,
+     dateOfLastRefresh: String,
+     modifier: Modifier = Modifier
+@@ -59,7 +57,6 @@ fun TotalUsageView(
+         medianTime = medianTime,
+         selectedCentralTendency = selectedCentralTendency,
+         onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+-        modelProducer = modelProducer,
+         chartValues = chartValues,
+         dateOfLastRefresh = dateOfLastRefresh,
+         modifier = modifier
+@@ -83,7 +80,6 @@ fun TotalUsageView(
+     selectedCentralTendency: CentralTendency,
+     onSelectedCentralTendencyChange: (CentralTendency) -> Unit,
+     timestamp: Long,
+-    modelProducer: CartesianChartModelProducer,
+     chartValues: Map<String, Float>,
+     dateOfLastRefresh: String,
+     modifier: Modifier = Modifier
+@@ -95,7 +91,6 @@ fun TotalUsageView(
+         medianTime = medianTime,
+         selectedCentralTendency = selectedCentralTendency,
+         onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+-        modelProducer = modelProducer,
+         chartValues = chartValues,
+         dateOfLastRefresh = dateOfLastRefresh,
+         modifier = modifier
+@@ -117,7 +112,6 @@ private fun TotalUsageView(
+     medianTime: Long,
+     selectedCentralTendency: CentralTendency,
+     onSelectedCentralTendencyChange: (CentralTendency) -> Unit,
+-    modelProducer: CartesianChartModelProducer,
+     chartValues: Map<String, Float>,
+     dateOfLastRefresh: String,
+     modifier: Modifier = Modifier,
+@@ -151,7 +145,6 @@ private fun TotalUsageView(
+                         } else {
+                             DateTimeUtils.convertToHourDouble(medianTime)
+                         },
+-                        modelProducer = modelProducer,
+                         modifier = Modifier.padding(vertical = dimensionResource(id = R.dimen.padding_large))
+                     )
+                 }

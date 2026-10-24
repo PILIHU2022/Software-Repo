@@ -1,0 +1,399 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 08:36:03 +0800
+Subject: [PATCH] Cache per-card date, icon and text work on the home list
+
+---
+ .../expensetracker/shared/ui/MainContent.kt   |  23 +--
+ .../shared/ui/RecurringExpenseOverview.kt     |  61 ++++++--
+ .../shared/ui/TillaExpenseCard.kt             | 132 ++++++++++++------
+ 3 files changed, 153 insertions(+), 63 deletions(-)
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+index 1ec217e..7ed4599 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+@@ -134,6 +134,10 @@ fun MainContent(
+         } else {
+             TillaBackgroundDark
+         }
++    // Hoisted so the FAB does not get a new click lambda on every recomposition.
++    val onAddExpense = remember(navController) {
++        { navController.navigate(EditExpensePane()) }
++    }
+ 
+     Scaffold(
+         modifier = modifier,
+@@ -157,9 +161,7 @@ fun MainContent(
+         floatingActionButton = {
+             if (backStackEntry?.destination?.isInRoute<MainNavRoute>(HomePane(), UpcomingPane) == true) {
+                 FloatingActionButton(
+-                    onClick = {
+-                        navController.navigate(EditExpensePane())
+-                    },
++                    onClick = onAddExpense,
+                     shape = RoundedCornerShape(20.dp),
+                     containerColor = Color(0xFF2EE6D6),
+                     contentColor = Color(0xFF00201D),
+@@ -313,6 +315,14 @@ fun MainContent(
+                     val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+                     val bottomPadding = if (keyboardOpen) 0.dp else 80.dp
+                     val layoutDirection = LocalLayoutDirection.current
++                    val overviewContentPadding =
++                        remember(isFilterRowVisible) {
++                            PaddingValues(
++                                top = if (isFilterRowVisible) 0.dp else 8.dp,
++                                start = 16.dp,
++                                end = 16.dp,
++                            )
++                        }
+                     Column(
+                         modifier =
+                             Modifier
+@@ -350,12 +360,7 @@ fun MainContent(
+                             isGridMode = isGridMode,
+                             navController = navController,
+                             recurringExpenseViewModel = recurringExpenseViewModel,
+-                            contentPadding =
+-                                PaddingValues(
+-                                    top = if (isFilterRowVisible) 0.dp else 8.dp,
+-                                    start = 16.dp,
+-                                    end = 16.dp,
+-                                ),
++                            contentPadding = overviewContentPadding,
+                             bottomSafeArea = bottomPadding,
+                         )
+                     }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+index acc517e..85458b3 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridS
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.dp
+@@ -22,8 +23,11 @@ import de.dbauer.expensetracker.shared.data.EditExpensePane
+ import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
+ import de.dbauer.expensetracker.shared.toCurrencyString
+ import de.dbauer.expensetracker.shared.viewmodel.RecurringExpenseViewModel
++import kotlinx.datetime.TimeZone
++import kotlinx.datetime.toLocalDateTime
+ import org.koin.compose.koinInject
+ import org.koin.compose.viewmodel.koinViewModel
++import kotlin.time.Clock
+ 
+ @Composable
+ fun RecurringExpenseOverview(
+@@ -39,15 +43,31 @@ fun RecurringExpenseOverview(
+     val gridState = rememberLazyStaggeredGridState()
+ 
+     val currencyCode by userPreferencesRepository.defaultCurrency.collectAsState()
+-    val weeklyExpense =
+-        recurringExpenseViewModel.currencyPrefix +
+-            recurringExpenseViewModel.filteredWeeklyExpense.toCurrencyString(currencyCode)
+-    val monthlyExpense =
+-        recurringExpenseViewModel.currencyPrefix +
+-            recurringExpenseViewModel.filteredMonthlyExpense.toCurrencyString(currencyCode)
+-    val yearlyExpense =
+-        recurringExpenseViewModel.currencyPrefix +
+-            recurringExpenseViewModel.filteredYearlyExpense.toCurrencyString(currencyCode)
++    val currencyPrefix = recurringExpenseViewModel.currencyPrefix
++    val weekly = recurringExpenseViewModel.filteredWeeklyExpense
++    val monthly = recurringExpenseViewModel.filteredMonthlyExpense
++    val yearly = recurringExpenseViewModel.filteredYearlyExpense
++
++    // Formatting is cheap but happens on every recomposition of the screen; keep the last
++    // formatted strings around until the underlying value really changes.
++    val weeklyExpense = remember(currencyPrefix, weekly, currencyCode) {
++        currencyPrefix + weekly.toCurrencyString(currencyCode)
++    }
++    val monthlyExpense = remember(currencyPrefix, monthly, currencyCode) {
++        currencyPrefix + monthly.toCurrencyString(currencyCode)
++    }
++    val yearlyExpense = remember(currencyPrefix, yearly, currencyCode) {
++        currencyPrefix + yearly.toCurrencyString(currencyCode)
++    }
++
++    // Compute "today" once per overview composition instead of once per card per frame. The
++    // date is captured by the item content lambdas, so cards that scroll into view reuse it.
++    val today = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date
++
++    // One stable click handler for the whole list, shared by every card.
++    val onExpenseClick = remember(navController) {
++        { expenseId: Int -> navController.navigate(EditExpensePane(expenseId)) }
++    }
+ 
+     LazyVerticalStaggeredGrid(
+         columns =
+@@ -62,7 +82,11 @@ fun RecurringExpenseOverview(
+         contentPadding = contentPadding,
+         modifier = modifier.fillMaxWidth(),
+     ) {
+-        item(span = StaggeredGridItemSpan.FullLine) {
++        item(
++            key = "summary",
++            contentType = "summary",
++            span = StaggeredGridItemSpan.FullLine,
++        ) {
+             TillaExpenseSummary(
+                 monthlyExpense = monthlyExpense,
+                 weeklyExpense = weeklyExpense,
+@@ -71,17 +95,24 @@ fun RecurringExpenseOverview(
+             )
+         }
+ 
+-        items(items = recurringExpenseViewModel.filteredRecurringExpenseData) { recurringExpenseData ->
++        items(
++            items = recurringExpenseViewModel.filteredRecurringExpenseData,
++            key = { it.id },
++            contentType = { "expense" },
++        ) { recurringExpenseData ->
+             TillaExpenseCard(
+                 expense = recurringExpenseData,
++                today = today,
+                 compact = isGridMode,
+-                onClick = {
+-                    navController.navigate(EditExpensePane(recurringExpenseData.id))
+-                },
++                onClick = onExpenseClick,
+             )
+         }
+ 
+-        item(span = StaggeredGridItemSpan.FullLine) {
++        item(
++            key = "spacer",
++            contentType = "spacer",
++            span = StaggeredGridItemSpan.FullLine,
++        ) {
+             Spacer(
+                 modifier =
+                     Modifier
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+index 3d4a487..348cf52 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+@@ -33,9 +33,9 @@ import androidx.compose.ui.unit.sp
+ import de.dbauer.expensetracker.shared.data.ExpenseService
+ import de.dbauer.expensetracker.shared.data.ExpenseServiceCatalog
+ import de.dbauer.expensetracker.shared.data.ExpenseServiceIcon
++import de.dbauer.expensetracker.shared.data.Recurrence
+ import de.dbauer.expensetracker.shared.data.RecurringExpenseData
+-import kotlinx.datetime.TimeZone
+-import kotlinx.datetime.toLocalDateTime
++import kotlinx.datetime.LocalDate
+ import org.jetbrains.compose.resources.painterResource
+ import org.jetbrains.compose.resources.pluralStringResource
+ import org.jetbrains.compose.resources.stringResource
+@@ -49,7 +49,6 @@ import recurringexpensetracker.shared.generated.resources.home_summary_per_month
+ import recurringexpensetracker.shared.generated.resources.home_summary_total
+ import recurringexpensetracker.shared.generated.resources.home_summary_weekly
+ import recurringexpensetracker.shared.generated.resources.home_summary_yearly
+-import kotlin.time.Clock
+ 
+ private val TillaCardShape = RoundedCornerShape(26.dp)
+ 
+@@ -111,29 +110,35 @@ fun ExpenseServiceIconView(
+ 
+ /**
+  * A full-bleed, colour-coded expense tile inspired by Tilla.
++ *
++ * All date/format/icon work happens in `remember` blocks keyed on the fields it depends on, so
++ * scrolling does not redo it for every frame.
+  */
+ @Composable
+ fun TillaExpenseCard(
+     expense: RecurringExpenseData,
+-    onClick: () -> Unit,
++    today: LocalDate,
++    onClick: (Int) -> Unit,
+     modifier: Modifier = Modifier,
+     compact: Boolean = false,
+ ) {
+-    val service = ExpenseServiceCatalog.find(expense.serviceId)
+-    val background = service?.backgroundColor ?: remember(expense.name) { fallbackCardColor(expense.name) }
+-    val foreground =
+-        service?.foregroundColor ?: if (background.luminance() > 0.5f) Color(0xFF151719) else Color.White
+-    val iconTint = service?.iconTint ?: foreground
++    val style = remember(expense.serviceId, expense.name) { buildCardStyle(expense.serviceId, expense.name) }
++    val monthlyPriceText = remember(expense.monthlyPrice) { expense.monthlyPrice.toCurrencyString() }
++    // getNextPaymentDay() walks month by month from the first payment, so cache it per expense/day.
++    val remaining = remember(expense, today) { remainingFor(expense, today) }
++    val remainingText = rememberLabelText(remaining)
++    val tagColors = remember(expense.tags) { expense.tags.take(6).map { Color(it.color) } }
++    val handleClick = remember(expense.id, onClick) { { onClick(expense.id) } }
+ 
+     Surface(
+         modifier =
+             modifier
+                 .fillMaxWidth()
+                 .clip(TillaCardShape)
+-                .clickable(onClick = onClick),
++                .clickable(onClick = handleClick),
+         shape = TillaCardShape,
+-        color = background,
+-        contentColor = foreground,
++        color = style.background,
++        contentColor = style.foreground,
+     ) {
+         Row(
+             modifier =
+@@ -146,8 +151,8 @@ fun TillaExpenseCard(
+             verticalAlignment = Alignment.CenterVertically,
+         ) {
+             ExpenseServiceIconView(
+-                service = service,
+-                tint = iconTint,
++                service = style.service,
++                tint = style.iconTint,
+                 modifier = Modifier.size(if (compact) 28.dp else 32.dp),
+             )
+             Spacer(modifier = Modifier.size(if (compact) 10.dp else 14.dp))
+@@ -169,20 +174,20 @@ fun TillaExpenseCard(
+                         maxLines = 1,
+                         overflow = TextOverflow.Ellipsis,
+                         modifier = Modifier.padding(top = 2.dp),
+-                        color = foreground.copy(alpha = 0.72f),
++                        color = style.descriptionColor,
+                     )
+                 }
+-                if (expense.tags.isNotEmpty()) {
++                if (tagColors.isNotEmpty()) {
+                     Row(
+                         horizontalArrangement = Arrangement.spacedBy(3.dp),
+                         modifier = Modifier.padding(top = if (compact) 3.dp else 5.dp),
+                     ) {
+-                        expense.tags.take(6).forEach { tag ->
++                        tagColors.forEach { tagColor ->
+                             Box(
+                                 modifier =
+                                     Modifier
+                                         .size(if (compact) 4.dp else 5.dp)
+-                                        .background(Color(tag.color), CircleShape),
++                                        .background(tagColor, CircleShape),
+                             )
+                         }
+                     }
+@@ -191,18 +196,18 @@ fun TillaExpenseCard(
+             Spacer(modifier = Modifier.size(8.dp))
+             Column(horizontalAlignment = Alignment.End) {
+                 Text(
+-                    text = expense.monthlyPrice.toCurrencyString(),
++                    text = monthlyPriceText,
+                     fontSize = if (compact) 15.sp else 17.sp,
+                     fontWeight = FontWeight.Bold,
+                     maxLines = 1,
+                     overflow = TextOverflow.Ellipsis,
+                 )
+                 Text(
+-                    text = remainingLabel(expense).uppercase(),
++                    text = remainingText,
+                     fontSize = if (compact) 9.sp else 10.sp,
+                     fontWeight = FontWeight.Medium,
+                     letterSpacing = 0.4.sp,
+-                    color = foreground.copy(alpha = 0.78f),
++                    color = style.labelColor,
+                     maxLines = 1,
+                 )
+             }
+@@ -210,30 +215,79 @@ fun TillaExpenseCard(
+     }
+ }
+ 
+-@Composable
+-private fun remainingLabel(expense: RecurringExpenseData): String {
+-    val today = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date
+-    val nextPayment = expense.getNextPaymentDay()
+-    if (nextPayment == null) {
+-        return stringResource(expense.recurrence.fullStringRes)
+-    }
++private data class TillaCardStyle(
++    val service: ExpenseService?,
++    val background: Color,
++    val foreground: Color,
++    val iconTint: Color,
++    val descriptionColor: Color,
++    val labelColor: Color,
++)
++
++private fun buildCardStyle(
++    serviceId: String?,
++    name: String,
++): TillaCardStyle {
++    val service = ExpenseServiceCatalog.find(serviceId)
++    val background = service?.backgroundColor ?: fallbackCardColor(name)
++    val foreground =
++        service?.foregroundColor ?: if (background.luminance() > 0.5f) Color(0xFF151719) else Color.White
++    return TillaCardStyle(
++        service = service,
++        background = background,
++        foreground = foreground,
++        iconTint = service?.iconTint ?: foreground,
++        descriptionColor = foreground.copy(alpha = 0.72f),
++        labelColor = foreground.copy(alpha = 0.78f),
++    )
++}
++
++/** Pre-localised remaining-time state, computed once per expense and day. */
++private sealed interface Remaining {
++    data object Today : Remaining
++
++    data object Tomorrow : Remaining
++
++    data class Days(val count: Int) : Remaining
++
++    data class Months(val count: Int) : Remaining
++
++    data class Years(val count: Int) : Remaining
++
++    data class RecurrenceText(val recurrence: Recurrence) : Remaining
++}
++
++private fun remainingFor(
++    expense: RecurringExpenseData,
++    today: LocalDate,
++): Remaining {
++    val nextPayment = expense.getNextPaymentDayAfter(today)
++        ?: return Remaining.RecurrenceText(expense.recurrence)
+ 
+     val days = (nextPayment.toEpochDays() - today.toEpochDays()).toInt()
+     return when {
+-        days <= 0 -> stringResource(Res.string.home_card_today)
+-        days == 1 -> stringResource(Res.string.home_card_tomorrow)
+-        days < 30 -> pluralStringResource(Res.plurals.home_card_days, days, days)
+-        days < 365 -> {
+-            val months = (days / 30).coerceAtLeast(1)
+-            pluralStringResource(Res.plurals.home_card_months, months, months)
+-        }
+-        else -> {
+-            val years = (days / 365).coerceAtLeast(1)
+-            pluralStringResource(Res.plurals.home_card_years, years, years)
+-        }
++        days <= 0 -> Remaining.Today
++        days == 1 -> Remaining.Tomorrow
++        days < 30 -> Remaining.Days(days)
++        days < 365 -> Remaining.Months((days / 30).coerceAtLeast(1))
++        else -> Remaining.Years((days / 365).coerceAtLeast(1))
+     }
+ }
+ 
++@Composable
++private fun rememberLabelText(remaining: Remaining): String {
++    val label =
++        when (remaining) {
++            Remaining.Today -> stringResource(Res.string.home_card_today)
++            Remaining.Tomorrow -> stringResource(Res.string.home_card_tomorrow)
++            is Remaining.Days -> pluralStringResource(Res.plurals.home_card_days, remaining.count, remaining.count)
++            is Remaining.Months -> pluralStringResource(Res.plurals.home_card_months, remaining.count, remaining.count)
++            is Remaining.Years -> pluralStringResource(Res.plurals.home_card_years, remaining.count, remaining.count)
++            is Remaining.RecurrenceText -> stringResource(remaining.recurrence.fullStringRes)
++        }
++    return remember(label) { label.uppercase() }
++}
++
+ @Composable
+ fun TillaExpenseSummary(
+     monthlyExpense: String,

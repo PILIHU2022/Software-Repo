@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:11:38 +0800
+Subject: [PATCH] Use a plain LazyColumn for the list mode
+
+---
+ .../shared/ui/RecurringExpenseOverview.kt     | 143 ++++++++++++------
+ 1 file changed, 95 insertions(+), 48 deletions(-)
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+index 85458b3..f2759f6 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+@@ -6,10 +6,13 @@ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.items as lazyColumnItems
++import androidx.compose.foundation.lazy.rememberLazyListState
+ import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+-import androidx.compose.foundation.lazy.staggeredgrid.items
++import androidx.compose.foundation.lazy.staggeredgrid.items as staggeredGridItems
+ import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+@@ -29,6 +32,8 @@ import org.koin.compose.koinInject
+ import org.koin.compose.viewmodel.koinViewModel
+ import kotlin.time.Clock
+ 
++private val ItemSpacing = 10.dp
++
+ @Composable
+ fun RecurringExpenseOverview(
+     isGridMode: Boolean,
+@@ -39,7 +44,7 @@ fun RecurringExpenseOverview(
+     recurringExpenseViewModel: RecurringExpenseViewModel = koinViewModel<RecurringExpenseViewModel>(),
+     userPreferencesRepository: IUserPreferencesRepository = koinInject(),
+ ) {
+-    val listState = rememberLazyStaggeredGridState()
++    val listState = rememberLazyListState()
+     val gridState = rememberLazyStaggeredGridState()
+ 
+     val currencyCode by userPreferencesRepository.defaultCurrency.collectAsState()
+@@ -69,56 +74,98 @@ fun RecurringExpenseOverview(
+         { expenseId: Int -> navController.navigate(EditExpensePane(expenseId)) }
+     }
+ 
+-    LazyVerticalStaggeredGrid(
+-        columns =
+-            if (isGridMode) {
+-                StaggeredGridCells.Adaptive(170.dp)
+-            } else {
+-                StaggeredGridCells.Fixed(1)
+-            },
+-        state = if (isGridMode) gridState else listState,
+-        verticalItemSpacing = 10.dp,
+-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+-        contentPadding = contentPadding,
+-        modifier = modifier.fillMaxWidth(),
+-    ) {
+-        item(
+-            key = "summary",
+-            contentType = "summary",
+-            span = StaggeredGridItemSpan.FullLine,
++    val expenses = recurringExpenseViewModel.filteredRecurringExpenseData
++
++    val summaryContent: @Composable () -> Unit = {
++        TillaExpenseSummary(
++            monthlyExpense = monthlyExpense,
++            weeklyExpense = weeklyExpense,
++            yearlyExpense = yearlyExpense,
++            modifier = Modifier.padding(bottom = 6.dp),
++        )
++    }
++    val bottomSpacer: @Composable () -> Unit = {
++        Spacer(
++            modifier =
++                Modifier
++                    .fillMaxWidth()
++                    .height(bottomSafeArea),
++        )
++    }
++
++    if (isGridMode) {
++        LazyVerticalStaggeredGrid(
++            columns = StaggeredGridCells.Adaptive(170.dp),
++            state = gridState,
++            verticalItemSpacing = ItemSpacing,
++            horizontalArrangement = Arrangement.spacedBy(ItemSpacing),
++            contentPadding = contentPadding,
++            modifier = modifier.fillMaxWidth(),
+         ) {
+-            TillaExpenseSummary(
+-                monthlyExpense = monthlyExpense,
+-                weeklyExpense = weeklyExpense,
+-                yearlyExpense = yearlyExpense,
+-                modifier = Modifier.padding(bottom = 6.dp),
+-            )
+-        }
++            item(
++                key = "summary",
++                contentType = "summary",
++                span = StaggeredGridItemSpan.FullLine,
++            ) {
++                summaryContent()
++            }
+ 
+-        items(
+-            items = recurringExpenseViewModel.filteredRecurringExpenseData,
+-            key = { it.id },
+-            contentType = { "expense" },
+-        ) { recurringExpenseData ->
+-            TillaExpenseCard(
+-                expense = recurringExpenseData,
+-                today = today,
+-                compact = isGridMode,
+-                onClick = onExpenseClick,
+-            )
+-        }
++            staggeredGridItems(
++                items = expenses,
++                key = { it.id },
++                contentType = { "expense" },
++            ) { recurringExpenseData ->
++                TillaExpenseCard(
++                    expense = recurringExpenseData,
++                    today = today,
++                    compact = true,
++                    onClick = onExpenseClick,
++                )
++            }
+ 
+-        item(
+-            key = "spacer",
+-            contentType = "spacer",
+-            span = StaggeredGridItemSpan.FullLine,
++            item(
++                key = "spacer",
++                contentType = "spacer",
++                span = StaggeredGridItemSpan.FullLine,
++            ) {
++                bottomSpacer()
++            }
++        }
++    } else {
++        // A plain LazyColumn is cheaper than a staggered grid with a single column: no
++        // staggered placement/measurement bookkeeping for the most common list mode.
++        LazyColumn(
++            state = listState,
++            verticalArrangement = Arrangement.spacedBy(ItemSpacing),
++            contentPadding = contentPadding,
++            modifier = modifier.fillMaxWidth(),
+         ) {
+-            Spacer(
+-                modifier =
+-                    Modifier
+-                        .fillMaxWidth()
+-                        .height(bottomSafeArea),
+-            )
++            item(
++                key = "summary",
++                contentType = "summary",
++            ) {
++                summaryContent()
++            }
++
++            lazyColumnItems(
++                items = expenses,
++                key = { it.id },
++                contentType = { "expense" },
++            ) { recurringExpenseData ->
++                TillaExpenseCard(
++                    expense = recurringExpenseData,
++                    today = today,
++                    compact = false,
++                    onClick = onExpenseClick,
++                )
++            }
++
++            item(
++                key = "spacer",
++                contentType = "spacer",
++            ) {
++                bottomSpacer()
++            }
+         }
+     }
+ }

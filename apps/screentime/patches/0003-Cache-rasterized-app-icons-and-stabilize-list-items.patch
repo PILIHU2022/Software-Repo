@@ -1,0 +1,317 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 08:37:03 +0800
+Subject: [PATCH] Cache rasterized app icons and stabilize list items
+
+ApplicationIcon used to run drawable.toBitmap() on every composition, so
+scrolling the usage list re-allocated one bitmap per visible row. The
+bitmaps are now memoized per package in a small LRU cache (4 MB, sized by
+real bitmap bytes) and list items have stable keys/content types. Chart
+value lists on the analysis screen are also remembered instead of being
+re-built on every recomposition.
+---
+ .../atharok/screentime/ui/components/Image.kt | 48 +++++++++++++++++--
+ .../screentime/ui/screens/AnalysisScreen.kt   | 33 +++++++------
+ .../ui/screens/DeviceUsageScreen.kt           | 13 +++--
+ .../ui/screens/IgnoredAppsScreen.kt           |  9 +++-
+ 4 files changed, 79 insertions(+), 24 deletions(-)
+
+diff --git a/app/src/main/java/com/atharok/screentime/ui/components/Image.kt b/app/src/main/java/com/atharok/screentime/ui/components/Image.kt
+index fde5969..1b825af 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/components/Image.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/components/Image.kt
+@@ -1,6 +1,7 @@
+ package com.atharok.screentime.ui.components
+ 
+ import android.graphics.drawable.Drawable
++import android.util.LruCache
+ import androidx.compose.foundation.Image
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.layout.padding
+@@ -9,12 +10,15 @@ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.rounded.QuestionMark
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.graphics.ColorFilter
+ import androidx.compose.ui.graphics.DefaultAlpha
+ import androidx.compose.ui.graphics.FilterQuality
++import androidx.compose.ui.graphics.ImageBitmap
++import androidx.compose.ui.graphics.asAndroidBitmap
+ import androidx.compose.ui.graphics.asImageBitmap
+ import androidx.compose.ui.graphics.drawscope.DrawScope
+ import androidx.compose.ui.layout.ContentScale
+@@ -22,6 +26,31 @@ import androidx.compose.ui.res.dimensionResource
+ import androidx.core.graphics.drawable.toBitmap
+ import com.atharok.screentime.R
+ 
++/**
++ * Bounded cache of already-rasterized icons.
++ *
++ * Application icons come from remote packages and are not guaranteed to be the same instance
++ * between two calls. Converting a [Drawable] to a bitmap is relatively expensive, so the result
++ * is kept here (keyed by package name) instead of being redone every time a list item is
++ * composed. Bitmaps do not hold a reference to any activity, so this cannot leak a screen; the
++ * cache is capped by the real bitmap size.
++ */
++private object ApplicationIconBitmapCache {
++
++    private const val MAX_SIZE_BYTES = 4 * 1024 * 1024
++
++    private val cache = object : LruCache<String, ImageBitmap>(MAX_SIZE_BYTES) {
++        override fun sizeOf(key: String, value: ImageBitmap): Int =
++            value.asAndroidBitmap().allocationByteCount
++    }
++
++    fun get(key: String): ImageBitmap? = cache.get(key)
++
++    fun put(key: String, value: ImageBitmap) {
++        cache.put(key, value)
++    }
++}
++
+ @Composable
+ fun Image(
+     drawable: Drawable,
+@@ -31,10 +60,19 @@ fun Image(
+     contentScale: ContentScale = ContentScale.Fit,
+     alpha: Float = DefaultAlpha,
+     colorFilter: ColorFilter? = null,
+-    filterQuality: FilterQuality = DrawScope.DefaultFilterQuality
++    filterQuality: FilterQuality = DrawScope.DefaultFilterQuality,
++    cacheKey: String? = null
+ ) {
++    // Converting a drawable allocates a new bitmap: never do it on every composition.
++    val imageBitmap = remember(drawable, cacheKey) {
++        cacheKey?.let { ApplicationIconBitmapCache.get(it) }
++            ?: drawable.toBitmap().asImageBitmap().also { bitmap ->
++                cacheKey?.let { ApplicationIconBitmapCache.put(it, bitmap) }
++            }
++    }
++
+     Image(
+-        bitmap = drawable.toBitmap().asImageBitmap(),
++        bitmap = imageBitmap,
+         contentDescription = contentDescription,
+         modifier = modifier,
+         alignment = alignment,
+@@ -50,12 +88,14 @@ fun ApplicationIcon(
+     drawable: Drawable?,
+     contentDescription: String?,
+     modifier: Modifier = Modifier,
++    cacheKey: String? = null
+ ) {
+     drawable?.let {
+         Image(
+             drawable = it,
+             contentDescription = contentDescription,
+-            modifier = modifier
++            modifier = modifier,
++            cacheKey = cacheKey
+         )
+     } ?: run {
+         Image(
+@@ -68,4 +108,4 @@ fun ApplicationIcon(
+             colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.onPrimary)
+         )
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+index c5994a3..1ffda21 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+@@ -110,7 +110,7 @@ private fun AnalysisContent(
+         verticalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_medium)),
+         modifier = Modifier.fillMaxWidth()
+     ) {
+-        item {
++        item(key = "range_selector") {
+             AnalysisRangeSelector(
+                 selectedRange = selectedRange,
+                 onRangeSelected = onRangeSelected,
+@@ -122,7 +122,7 @@ private fun AnalysisContent(
+         }
+ 
+         if (isRefreshing) {
+-            item {
++            item(key = "refreshing") {
+                 LinearProgressIndicator(
+                     modifier = Modifier
+                         .fillMaxWidth()
+@@ -132,10 +132,10 @@ private fun AnalysisContent(
+         }
+ 
+         when (analysisResource) {
+-            is Resource.Failure -> item {
++            is Resource.Failure -> item(key = "failure") {
+                 FailureMessage(analysisResource.throwable)
+             }
+-            is Resource.Progress -> item {
++            is Resource.Progress -> item(key = "loading") {
+                 Box(
+                     contentAlignment = Alignment.Center,
+                     modifier = Modifier
+@@ -148,39 +148,39 @@ private fun AnalysisContent(
+             is Resource.Success -> {
+                 val analysis = analysisResource.data
+                 if (!analysis.hasData) {
+-                    item {
++                    item(key = "empty_history") {
+                         EmptyHistory(
+                             onRefresh = onRefresh,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+                 } else {
+-                    item {
++                    item(key = "summary") {
+                         SummaryCard(
+                             analysis = analysis,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+-                    item {
++                    item(key = "daily_chart") {
+                         DailyChartCard(
+                             analysis = analysis,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+-                    item {
++                    item(key = "weekday_chart") {
+                         WeekdayCard(
+                             analysis = analysis,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+-                    item {
++                    item(key = "hourly_chart") {
+                         HourlyCard(
+                             analysis = analysis,
+                             modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
+                         )
+                     }
+                     if (analysis.topApps.isNotEmpty()) {
+-                        item {
++                        item(key = "top_apps") {
+                             TopAppsCard(
+                                 analysis = analysis,
+                                 openApplicationUsageScreen = openApplicationUsageScreen,
+@@ -189,7 +189,7 @@ private fun AnalysisContent(
+                         }
+                     }
+                     analysis.lastUpdated?.let { updatedAt ->
+-                        item {
++                        item(key = "last_updated") {
+                             TextSmall(
+                                 text = stringResource(
+                                     id = R.string.data_updated,
+@@ -318,8 +318,9 @@ private fun DailyChartCard(
+                 .padding(dimensionResource(id = R.dimen.padding_large))
+         ) {
+             TextMedium(text = stringResource(id = R.string.analysis_daily_screen_time))
++            val values = remember(analysis.daily) { analysis.daily.map { it.duration } }
+             SimpleBarChart(
+-                values = analysis.daily.map { it.duration },
++                values = values,
+                 average = analysis.averageDaily,
+                 modifier = Modifier
+                     .fillMaxWidth()
+@@ -359,7 +360,7 @@ private fun WeekdayCard(
+     analysis: UsageAnalysis,
+     modifier: Modifier = Modifier
+ ) {
+-    val max = analysis.weekdayAverage.maxOrNull() ?: 0L
++    val max = remember(analysis.weekdayAverage) { analysis.weekdayAverage.maxOrNull() ?: 0L }
+     OutlinedCard(modifier = modifier) {
+         Column(
+             modifier = Modifier
+@@ -409,8 +410,9 @@ private fun HourlyCard(
+                 .padding(dimensionResource(id = R.dimen.padding_large))
+         ) {
+             TextMedium(text = stringResource(id = R.string.analysis_by_hour))
++            val values = remember(analysis.hourlyAverage) { analysis.hourlyAverage.toList() }
+             SimpleBarChart(
+-                values = analysis.hourlyAverage.toList(),
++                values = values,
+                 average = null,
+                 modifier = Modifier
+                     .fillMaxWidth()
+@@ -455,7 +457,8 @@ private fun TopAppsCard(
+                     ApplicationIcon(
+                         drawable = icon,
+                         contentDescription = app.appName,
+-                        modifier = Modifier.size(dimensionResource(id = R.dimen.icon_medium_size))
++                        modifier = Modifier.size(dimensionResource(id = R.dimen.icon_medium_size)),
++                        cacheKey = app.packageName
+                     )
+                     Column(
+                         modifier = Modifier
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+index 0faa00b..f7fcdd1 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+@@ -209,13 +209,19 @@ private fun PortraitDeviceUsageScreen(
+                     )
+                 }
+ 
+-                items(deviceUsage.appUsageList) { appUsage ->
++                val totalTimeUsed = deviceUsage.getTotalTimeUsed()
++
++                items(
++                    items = deviceUsage.appUsageList,
++                    key = { appUsage -> appUsage.packageName },
++                    contentType = { "application_usage" }
++                ) { appUsage ->
+                     ApplicationUsageItem(
+                         packageName = appUsage.packageName,
+                         appName = appUsage.appName,
+                         appIcon = appUsage.appIcon,
+                         timeUsed = appUsage.getTotalTimeUsed(),
+-                        percentUsed = appUsage.getPercentUsed(deviceUsage.getTotalTimeUsed()),
++                        percentUsed = appUsage.getPercentUsed(totalTimeUsed),
+                         modifier = Modifier
+                             .fillMaxSize()
+                             .clickable {
+@@ -380,7 +386,8 @@ private fun ApplicationUsageItem(
+             ApplicationIcon(
+                 drawable = appIcon,
+                 contentDescription = appName,
+-                modifier = Modifier.size(dimensionResource(id = R.dimen.icon_large_size))
++                modifier = Modifier.size(dimensionResource(id = R.dimen.icon_large_size)),
++                cacheKey = packageName
+             )
+ 
+             Column(
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/IgnoredAppsScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/IgnoredAppsScreen.kt
+index 71d446c..b1cce08 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/IgnoredAppsScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/IgnoredAppsScreen.kt
+@@ -100,7 +100,11 @@ fun StatelessIgnoredAppsScreen(
+                     modifier = Modifier,
+                     contentPadding = innerPadding
+                 ) {
+-                    items(installedApps) { installedApp ->
++                    items(
++                        items = installedApps,
++                        key = { installedApp -> installedApp.packageName },
++                        contentType = { "installed_app" }
++                    ) { installedApp ->
+                         InstalledAppsItem(
+                             appName = installedApp.name,
+                             packageName = installedApp.packageName,
+@@ -145,7 +149,8 @@ private fun InstalledAppsItem(
+         ApplicationIcon(
+             drawable = appIcon,
+             contentDescription = appName,
+-            modifier = Modifier.size(dimensionResource(id = R.dimen.icon_large_size))
++            modifier = Modifier.size(dimensionResource(id = R.dimen.icon_large_size)),
++            cacheKey = packageName
+         )
+ 
+         Column(

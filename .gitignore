@@ -1,0 +1,11 @@
+# Local build caches and outputs (never commit these)
+.cache/
+dist/
+.gradle/
+
+# Generated F-Droid signing key (copied from signing/ by publish-fdroid.sh)
+fdroid/keystore.jks
+
+# Editor / OS noise
+.DS_Store
+*.log

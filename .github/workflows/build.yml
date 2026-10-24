@@ -1,0 +1,269 @@
+name: Patchwork build
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build every app even when upstream has not changed
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/**'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: patchwork-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check upstream
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.check.outputs.matrix }}
+      any_changed: ${{ steps.check.outputs.any_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve build matrix
+        id: check
+        env:
+          FORCE: ${{ github.event_name == 'push' || inputs.force }}
+        run: |
+          set -euo pipefail
+          if [[ "$FORCE" == "true" ]]; then
+            result="$(./scripts/check-upstream.sh --all)"
+          else
+            result="$(./scripts/check-upstream.sh)"
+          fi
+          printf '%s\n' "$result"
+          matrix="$(jq -c '.matrix' <<<"$result")"
+          changed="$(jq -r '.changed' <<<"$result")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "any_changed=$changed" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.app }}
+    needs: check
+    if: needs.check.outputs.any_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          packages=(
+            "platform-tools"
+            "build-tools;37.0.0"
+            "platforms;android-37.0"
+            "platforms;android-37.1"
+          )
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          if ! sdkmanager --install "${packages[@]}"; then
+            echo "Stable channel failed; retrying with --channel=3 (preview packages)"
+            sdkmanager --channel=3 --install "${packages[@]}"
+          fi
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Materialize keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PATCHWORK_KEYSTORE_BASE64 }}
+          INPUT_STORE_PASSWORD: ${{ secrets.PATCHWORK_STORE_PASSWORD }}
+          INPUT_KEY_ALIAS: ${{ secrets.PATCHWORK_KEY_ALIAS }}
+          INPUT_KEY_PASSWORD: ${{ secrets.PATCHWORK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${KEYSTORE_BASE64:-}" ]]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/patchwork.jks"
+          else
+            cp signing/patchwork-test.jks "$RUNNER_TEMP/patchwork.jks"
+          fi
+          chmod 600 "$RUNNER_TEMP/patchwork.jks"
+          {
+            echo "PATCHWORK_KEYSTORE_FILE=$RUNNER_TEMP/patchwork.jks"
+            echo "PATCHWORK_STORE_PASSWORD=${INPUT_STORE_PASSWORD:-patchwork123}"
+            echo "PATCHWORK_KEY_ALIAS=${INPUT_KEY_ALIAS:-patchwork}"
+            echo "PATCHWORK_KEY_PASSWORD=${INPUT_KEY_PASSWORD:-patchwork123}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build ${{ matrix.app }}
+        run: ./scripts/build-app.sh "${{ matrix.app }}" --out "$RUNNER_TEMP/dist/${{ matrix.app }}"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: patchwork-${{ matrix.app }}
+          path: ${{ runner.temp }}/dist/${{ matrix.app }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish F-Droid repository
+    needs:
+      - check
+      - build
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          if ! sdkmanager --install "platform-tools" "build-tools;37.0.0"; then
+            sdkmanager --channel=3 --install "platform-tools" "build-tools;37.0.0"
+          fi
+
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: patchwork-*
+
+      - name: Install fdroidserver
+        run: |
+          set -euo pipefail
+          pipx install fdroidserver
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Publish to F-Droid repository
+        env:
+          MATRIX: ${{ needs.check.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          state="$(jq -c '[.include[] | {(.app): .sha}] | add // {}' <<<"$MATRIX")"
+          printf 'Build state: %s\n' "$state"
+          ./scripts/publish-fdroid.sh --apk-dir dist --state-json "$state"
+
+      - name: Commit repository changes
+        run: |
+          set -euo pipefail
+          git config user.name "Spark"
+          git config user.email "Spark-CN@outlook.com"
+          git add fdroid/repo fdroid/.build-state.json
+          if git diff --cached --quiet; then
+            echo "No repository changes to commit"
+            exit 0
+          fi
+          git commit -m "Update F-Droid repo [skip ci]"
+          git pull --rebase origin main
+          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: fdroid
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify-failure:
+    name: Report failure
+    needs:
+      - check
+      - build
+      - publish
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update failure issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Patchwork build failed';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `The patchwork build failed: ${runUrl}`,
+              '',
+              'Local reproduction:',
+              '```bash',
+              'export ANDROID_HOME=/path/to/android-sdk',
+              './scripts/build-app.sh expenses --no-build',
+              './scripts/build-app.sh screentime --no-build',
+              './scripts/build-app.sh expenses',
+              './scripts/build-app.sh screentime',
+              '```',
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }

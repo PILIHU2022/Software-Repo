@@ -1,0 +1,918 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 08:36:07 +0800
+Subject: [PATCH] Suggest service icons from expense names and add quick
+ templates
+
+---
+ .../values-zh-rCN/strings.xml                 |   4 +
+ .../composeResources/values/strings.xml       |   6 +-
+ .../shared/data/ExpenseServiceNameMatcher.kt  | 195 +++++++++++++++++
+ .../shared/data/ExpenseTemplate.kt            |  35 +++
+ .../editexpense/EditRecurringExpenseScreen.kt |   9 +-
+ .../ui/editexpense/QuickTemplatesRow.kt       |  76 +++++++
+ .../shared/ui/editexpense/ServiceOption.kt    |   2 +-
+ .../EditRecurringExpenseViewModel.kt          |  82 +++++++-
+ .../data/ExpenseServiceNameMatcherTest.kt     | 141 +++++++++++++
+ .../EditRecurringExpenseViewModelTest.kt      | 199 ++++++++++++++++++
+ 10 files changed, 744 insertions(+), 5 deletions(-)
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseTemplate.kt
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/QuickTemplatesRow.kt
+ create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt
+
+diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+index f2e5269..a32b477 100644
+--- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
++++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+@@ -150,4 +150,8 @@
+     <string name="edit_expense_service_social">社交</string>
+     <string name="edit_expense_service_other">其他</string>
+     <string name="edit_expense_service_count">%1$d 个内置图标</string>
++
++    <!-- Quick templates & automatic icon selection -->
++    <string name="edit_expense_quick_templates">快速模板</string>
++    <string name="edit_expense_quick_templates_hint">点击即可填入名称、图标和价格</string>
+ </resources>
+diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
+index 255f0df..104c4b1 100644
+--- a/shared/src/commonMain/composeResources/values/strings.xml
++++ b/shared/src/commonMain/composeResources/values/strings.xml
+@@ -217,4 +217,8 @@
+     <string name="edit_expense_service_social">Social</string>
+     <string name="edit_expense_service_other">Other</string>
+     <string name="edit_expense_service_count">%1$d built-in icons</string>
+-</resources>
+\ No newline at end of file
++
++    <!-- Quick templates & automatic icon selection -->
++    <string name="edit_expense_quick_templates">Quick templates</string>
++    <string name="edit_expense_quick_templates_hint">Tap to fill name, icon and price</string>
++</resources>
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt
+new file mode 100644
+index 0000000..f251875
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt
+@@ -0,0 +1,195 @@
++package de.dbauer.expensetracker.shared.data
++
++/**
++ * Maps a free-form expense name (for example "Netflix Premium") to one of the built-in
++ * [ExpenseService]s.
++ *
++ * Matching is intentionally conservative:
++ * - Names are lowercased, punctuation and emoji are treated as word separators.
++ * - An alias must match a whole word (or a whole sequence of words), never a partial word.
++ * - Ultra-short aliases ("x", "max", "hbo", ...) are only accepted at the beginning of a name
++ *   so that names like "Maximum" or "Rent" never pick a random icon.
++ * - The longest (most specific) alias wins, which makes "youtube music" beat "youtube".
++ *
++ * Brands that have no icon in the catalog (for example Disney+) intentionally resolve to null.
++ */
++object ExpenseServiceNameMatcher {
++    private const val SHORT_ALIAS_MAX_LENGTH = 4
++
++    private data class Alias(
++        val serviceId: String,
++        val words: List<String>,
++        val text: String,
++    )
++
++    private val aliases: List<Alias> =
++        buildAliases()
++            .filter { ExpenseServiceCatalog.find(it.serviceId) != null }
++            .sortedWith(compareByDescending<Alias> { it.words.size }.thenByDescending { it.text.length })
++
++    /**
++     * Returns the built-in service whose brand is mentioned in [name], or `null` when there is
++     * no confident match.
++     */
++    fun find(name: String): ExpenseService? {
++        val words = normalizedWords(name)
++        if (words.isEmpty()) return null
++
++        aliases.forEach { alias ->
++            val index = words.indexOfSequence(alias.words)
++            if (index < 0) return@forEach
++            // Short brand words like "x" or "max" are too ambiguous in the middle of a name.
++            if (index > 0 && alias.words.size == 1 && alias.text.length < SHORT_ALIAS_MAX_LENGTH) {
++                return@forEach
++            }
++            return ExpenseServiceCatalog.find(alias.serviceId)
++        }
++        return null
++    }
++
++    internal fun normalize(value: String): String = normalizedWords(value).joinToString(" ")
++
++    private fun normalizedWords(value: String): List<String> {
++        val words = mutableListOf<String>()
++        val current = StringBuilder()
++        value.forEach { character ->
++            if (character.isLetterOrDigit()) {
++                current.append(character.lowercaseChar())
++            } else if (current.isNotEmpty()) {
++                words.add(current.toString())
++                current.clear()
++            }
++        }
++        if (current.isNotEmpty()) {
++            words.add(current.toString())
++        }
++        return words
++    }
++
++    private fun List<String>.indexOfSequence(sequence: List<String>): Int {
++        if (sequence.isEmpty() || sequence.size > size) return -1
++        for (start in 0..(size - sequence.size)) {
++            var matches = true
++            for (offset in sequence.indices) {
++                if (this[start + offset] != sequence[offset]) {
++                    matches = false
++                    break
++                }
++            }
++            if (matches) return start
++        }
++        return -1
++    }
++
++    private fun buildAliases(): List<Alias> {
++        val aliases = mutableListOf<Alias>()
++
++        fun service(
++            serviceId: String,
++            vararg names: String,
++        ) {
++            names.forEach { name ->
++                val text = normalize(name)
++                if (text.isNotEmpty()) {
++                    aliases.add(Alias(serviceId, text.split(' '), text))
++                }
++            }
++        }
++
++        service("netflix", "netflix", "netflix premium", "netflix standard", "netflix basic")
++        service("youtube", "youtube", "youtube premium", "youtube red", "yt premium")
++        service("primevideo", "prime video", "amazon prime", "amazon prime video", "primevideo", "amazon video")
++        service("hulu", "hulu")
++        service("max", "hbo", "hbo max", "hbo now", "max")
++        service("paramountplus", "paramount plus", "paramount", "paramountplus")
++        service("twitch", "twitch", "twitch prime", "twitch turbo")
++        service("crunchyroll", "crunchyroll", "crunchy roll")
++        service("appletv", "apple tv", "apple tv plus", "appletv")
++        service("spotify", "spotify", "spotify premium", "spotify family", "spotify duo", "spotify student")
++        service("youtubemusic", "youtube music", "yt music", "youtubemusic")
++        service("applemusic", "apple music", "applemusic")
++        service("deezer", "deezer", "deezer premium")
++        service("tidal", "tidal", "tidal hifi")
++        service("soundcloud", "soundcloud", "soundcloud go")
++        service("audible", "audible", "audible plus", "amazon audible")
++        service("openai", "chatgpt", "chat gpt", "openai", "gpt", "gpt 4", "gpt plus", "chatgpt plus")
++        service("claude", "claude", "claude pro", "anthropic")
++        service("notion", "notion", "notion ai")
++        service("evernote", "evernote")
++        service("todoist", "todoist", "todoist pro")
++        service("trello", "trello", "trello premium")
++        service("asana", "asana")
++        service("clickup", "clickup", "click up")
++        service("slack", "slack", "slack pro")
++        service("discord", "discord", "discord nitro")
++        service("telegram", "telegram", "telegram premium")
++        service("zoom", "zoom", "zoom pro")
++        service("msteams", "microsoft teams", "ms teams", "teams")
++        service(
++            "adobe",
++            "adobe",
++            "adobe creative cloud",
++            "creative cloud",
++            "adobe cc",
++            "photoshop",
++            "lightroom",
++            "acrobat",
++        )
++        service("figma", "figma", "figma pro")
++        service("canva", "canva", "canva pro")
++        service("github", "github", "github copilot", "gh copilot")
++        service("gitlab", "gitlab")
++        service("googledrive", "google drive", "gdrive", "google drive storage")
++        service("dropbox", "dropbox", "dropbox plus")
++        service("onedrive", "onedrive", "microsoft onedrive", "one drive")
++        service("googleone", "google one", "google one storage", "google storage")
++        service("bitwarden", "bitwarden", "bitwarden premium")
++        service("1password", "1password", "1 password", "one password")
++        service("nordvpn", "nordvpn", "nord vpn")
++        service("expressvpn", "expressvpn", "express vpn")
++        service("surfshark", "surfshark", "surf shark")
++        service("protonvpn", "proton", "protonvpn", "proton vpn", "proton mail", "protonmail")
++        service("xbox", "xbox", "xbox game pass", "game pass", "xbox live", "microsoft xbox")
++        service(
++            "playstation",
++            "playstation",
++            "play station",
++            "playstation plus",
++            "playstation network",
++            "ps plus",
++            "psn",
++        )
++        service("nintendo", "nintendo", "nintendo switch", "switch online", "nintendo online")
++        service("steam", "steam", "steam wallet")
++        service("strava", "strava", "strava premium", "strava summit")
++        service("nike", "nike", "nike plus", "nike run club", "nike training club")
++        service("duolingo", "duolingo", "duolingo plus", "duolingo super")
++        service("headspace", "headspace")
++        service("paypal", "paypal")
++        service("patreon", "patreon")
++        service("substack", "substack")
++        service("medium", "medium", "medium membership")
++        service("nytimes", "new york times", "the new york times", "nytimes", "nyt")
++        service("amazon", "amazon", "amazon shopping")
++        service("cloudflare", "cloudflare")
++        service("vercel", "vercel")
++        service("digitalocean", "digitalocean", "digital ocean")
++        service("jetbrains", "jetbrains", "intellij", "pycharm", "webstorm", "phpstorm", "goland", "rider")
++        service("x", "twitter", "x", "twitter blue", "x premium", "x blue")
++        service("reddit", "reddit", "reddit premium", "reddit gold")
++        service("pinterest", "pinterest")
++        service("snapchat", "snapchat", "snapchat plus", "snap")
++        service("instagram", "instagram", "insta")
++        service("facebook", "facebook", "meta", "fb")
++        service("apple", "apple", "apple one", "apple care", "applecare", "icloud", "apple icloud")
++        service("uber", "uber", "uber one", "uber eats", "ubereats")
++        service("tinder", "tinder", "tinder plus", "tinder gold", "tinder platinum")
++
++        return aliases
++    }
++}
++
++/**
++ * Convenience shorthand for [ExpenseServiceNameMatcher.find].
++ */
++fun ExpenseServiceCatalog.findByName(name: String): ExpenseService? = ExpenseServiceNameMatcher.find(name)
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseTemplate.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseTemplate.kt
+new file mode 100644
+index 0000000..606a9b3
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseTemplate.kt
+@@ -0,0 +1,35 @@
++package de.dbauer.expensetracker.shared.data
++
++/**
++ * A one-tap preset for a new recurring expense.
++ *
++ * [monthlyPrice] is a typical monthly price in the user's default currency, only used to
++ * pre-fill the price field; the user can always change it before saving.
++ */
++data class ExpenseTemplate(
++    val name: String,
++    val serviceId: String,
++    val monthlyPrice: Float,
++)
++
++/**
++ * Curated quick templates for the most common subscriptions.
++ *
++ * Keep this list short and well known: it is rendered as a horizontal chip row at the top of
++ * the "new expense" screen. Brand names stay untranslated.
++ */
++object ExpenseTemplates {
++    val quickTemplates: List<ExpenseTemplate> =
++        listOf(
++            ExpenseTemplate(name = "Netflix", serviceId = "netflix", monthlyPrice = 15.49f),
++            ExpenseTemplate(name = "Spotify", serviceId = "spotify", monthlyPrice = 11.99f),
++            ExpenseTemplate(name = "YouTube Premium", serviceId = "youtube", monthlyPrice = 13.99f),
++            ExpenseTemplate(name = "ChatGPT", serviceId = "openai", monthlyPrice = 20.00f),
++            ExpenseTemplate(name = "Claude", serviceId = "claude", monthlyPrice = 20.00f),
++            ExpenseTemplate(name = "Notion", serviceId = "notion", monthlyPrice = 10.00f),
++            ExpenseTemplate(name = "Adobe", serviceId = "adobe", monthlyPrice = 22.99f),
++            ExpenseTemplate(name = "Prime Video", serviceId = "primevideo", monthlyPrice = 8.99f),
++            ExpenseTemplate(name = "Apple One", serviceId = "apple", monthlyPrice = 19.95f),
++            ExpenseTemplate(name = "GitHub", serviceId = "github", monthlyPrice = 4.00f),
++        )
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt
+index f23ba51..88a1a52 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt
+@@ -84,15 +84,20 @@ fun EditRecurringExpenseScreen(
+                 .padding(horizontal = 16.dp)
+                 .verticalScroll(scrollState),
+     ) {
++        if (viewModel.isNewExpense) {
++            QuickTemplatesRow(
++                onTemplateSelected = viewModel::onTemplateSelected,
++            )
++        }
+         NameOption(
+             name = viewModel.nameState,
+-            onNameChange = { viewModel.nameState = it },
++            onNameChange = viewModel::onNameChanged,
+             nameInputError = viewModel.nameInputError.value,
+             onNext = { localFocusManager.moveFocus(FocusDirection.Next) },
+         )
+         ServiceOption(
+             selectedServiceId = viewModel.selectedServiceId,
+-            onServiceSelected = { viewModel.selectedServiceId = it },
++            onServiceSelected = viewModel::onServiceSelected,
+         )
+         DescriptionOption(
+             description = viewModel.descriptionState,
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/QuickTemplatesRow.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/QuickTemplatesRow.kt
+new file mode 100644
+index 0000000..2050fb4
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/QuickTemplatesRow.kt
+@@ -0,0 +1,76 @@
++package de.dbauer.expensetracker.shared.ui.editexpense
++
++import androidx.compose.foundation.horizontalScroll
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.material3.AssistChip
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.dp
++import de.dbauer.expensetracker.shared.data.ExpenseServiceCatalog
++import de.dbauer.expensetracker.shared.data.ExpenseTemplate
++import de.dbauer.expensetracker.shared.data.ExpenseTemplates
++import org.jetbrains.compose.resources.stringResource
++import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.edit_expense_quick_templates
++import recurringexpensetracker.shared.generated.resources.edit_expense_quick_templates_hint
++
++/**
++ * Horizontal row of one-tap presets shown at the top of the "new expense" screen.
++ *
++ * Tapping a template fills name, icon, price and recurrence at once (see
++ * [de.dbauer.expensetracker.shared.viewmodel.EditRecurringExpenseViewModel.onTemplateSelected]).
++ */
++@Composable
++fun QuickTemplatesRow(
++    onTemplateSelected: (ExpenseTemplate) -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    Column(
++        modifier =
++            modifier
++                .fillMaxWidth()
++                .padding(top = 8.dp),
++    ) {
++        Text(
++            text = stringResource(Res.string.edit_expense_quick_templates),
++            style = MaterialTheme.typography.titleSmall,
++        )
++        Text(
++            text = stringResource(Res.string.edit_expense_quick_templates_hint),
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(top = 2.dp),
++        )
++        Row(
++            horizontalArrangement = Arrangement.spacedBy(8.dp),
++            modifier =
++                Modifier
++                    .fillMaxWidth()
++                    .horizontalScroll(rememberScrollState())
++                    .padding(vertical = 8.dp),
++        ) {
++            ExpenseTemplates.quickTemplates.forEach { template ->
++                val service = remember(template.serviceId) { ExpenseServiceCatalog.find(template.serviceId) }
++                AssistChip(
++                    onClick = { onTemplateSelected(template) },
++                    label = { Text(text = template.name) },
++                    leadingIcon = {
++                        ServiceAvatar(
++                            service = service,
++                            size = 20.dp,
++                            iconSize = 12.dp,
++                        )
++                    },
++                )
++            }
++        }
++    }
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/ServiceOption.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/ServiceOption.kt
+index 0601ec5..945ee10 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/ServiceOption.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/ServiceOption.kt
+@@ -156,7 +156,7 @@ fun ServiceOption(
+ }
+ 
+ @Composable
+-private fun ServiceAvatar(
++internal fun ServiceAvatar(
+     service: ExpenseService?,
+     size: Dp,
+     iconSize: Dp,
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt
+index 713f322..b36d3ac 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt
+@@ -11,6 +11,9 @@ import androidx.lifecycle.ViewModel
+ import androidx.lifecycle.viewModelScope
+ import de.dbauer.expensetracker.shared.data.CurrencyOption
+ import de.dbauer.expensetracker.shared.data.CurrencyValue
++import de.dbauer.expensetracker.shared.data.ExpenseServiceCatalog
++import de.dbauer.expensetracker.shared.data.ExpenseServiceNameMatcher
++import de.dbauer.expensetracker.shared.data.ExpenseTemplate
+ import de.dbauer.expensetracker.shared.data.Recurrence
+ import de.dbauer.expensetracker.shared.data.RecurringExpenseData
+ import de.dbauer.expensetracker.shared.data.Reminder
+@@ -45,6 +48,16 @@ class EditRecurringExpenseViewModel(
+         private set
+     var selectedRecurrence by mutableStateOf(Recurrence.Monthly)
+     var selectedServiceId: String? by mutableStateOf(null)
++
++    /** True once the user picked an icon (or "no icon") in the picker; auto matching stops then. */
++    var isServiceManuallySelected by mutableStateOf(false)
++        private set
++
++    // The icon that was last picked automatically from the expense name, if any.
++    private var autoSelectedServiceId: String? = null
++
++    // The icon inferred once from the name of an existing expense that had no icon stored.
++    private var inferredInitialServiceId: String? = null
+     var firstPaymentDate: Instant? by mutableStateOf(null)
+     var endDate: Instant? by mutableStateOf(null)
+     var archivedDate: Instant? by mutableStateOf(null)
+@@ -101,6 +114,16 @@ class EditRecurringExpenseViewModel(
+                         everyXRecurrenceState = expense.everyXRecurrence.toString()
+                         selectedRecurrence = expense.recurrence
+                         selectedServiceId = expense.serviceId
++                        if (expense.serviceId == null) {
++                            // Existing expenses saved before icons existed: infer one from the
++                            // name once, without making the user save the expense again.
++                            val inferred = ExpenseServiceNameMatcher.find(expense.name)?.id
++                            if (inferred != null) {
++                                selectedServiceId = inferred
++                                autoSelectedServiceId = inferred
++                                inferredInitialServiceId = inferred
++                            }
++                        }
+                         firstPaymentDate = expense.firstPayment
+                         endDate = expense.endDate
+                         archivedDate = expense.archivedDate
+@@ -146,6 +169,7 @@ class EditRecurringExpenseViewModel(
+                     everyXRecurrenceState,
+                     selectedRecurrence,
+                     selectedServiceId,
++                    isServiceManuallySelected,
+                     firstPaymentDate,
+                     endDate,
+                     notifyForExpense,
+@@ -175,6 +199,51 @@ class EditRecurringExpenseViewModel(
+         _tags[tag] = !existingState
+     }
+ 
++    /**
++     * Updates the name and, as long as the user did not pick an icon manually, keeps the
++     * selected icon in sync with the name (for example "Netflix" -> Netflix icon).
++     */
++    fun onNameChanged(name: String) {
++        nameState = name
++        if (isServiceManuallySelected) return
++
++        val matched = ExpenseServiceNameMatcher.find(name)
++        if (matched == null) {
++            // Forget an icon that was only inferred from a name the user just replaced.
++            if (selectedServiceId != null && selectedServiceId == autoSelectedServiceId) {
++                selectedServiceId = null
++                autoSelectedServiceId = null
++            }
++            return
++        }
++        // Never overwrite an icon that came from the database or the user.
++        if (selectedServiceId != null && selectedServiceId != autoSelectedServiceId) return
++
++        selectedServiceId = matched.id
++        autoSelectedServiceId = matched.id
++    }
++
++    /** Called when the user taps an icon in the picker, including the "no icon" entry. */
++    fun onServiceSelected(serviceId: String?) {
++        selectedServiceId = serviceId
++        isServiceManuallySelected = true
++        autoSelectedServiceId = null
++    }
++
++    /**
++     * Applies a quick template: name, icon, monthly price and the default monthly recurrence.
++     * Deliberately overwrites the fields so one tap always results in a consistent expense.
++     */
++    fun onTemplateSelected(template: ExpenseTemplate) {
++        nameState = template.name
++        selectedServiceId = template.serviceId.takeIf { ExpenseServiceCatalog.find(it) != null }
++        isServiceManuallySelected = true
++        autoSelectedServiceId = null
++        priceState = template.monthlyPrice.toLocalString()
++        everyXRecurrenceState = "1"
++        selectedRecurrence = Recurrence.Monthly
++    }
++
+     fun onNotifyForExpenseChange(enabled: Boolean) {
+         notifyForExpense = enabled
+ 
+@@ -456,7 +525,18 @@ class EditRecurringExpenseViewModel(
+             if (selectedCurrencyOption.currencyCode != expense.price.currencyCode) return true
+             if (everyXRecurrenceState != expense.everyXRecurrence.toString()) return true
+             if (selectedRecurrence != expense.recurrence) return true
+-            if (selectedServiceId != expense.serviceId) return true
++            // An icon inferred from the name of a legacy expense is not an unsaved change.
++            val serviceIdChanged =
++                if (expense.serviceId == null &&
++                    inferredInitialServiceId != null &&
++                    selectedServiceId == inferredInitialServiceId &&
++                    !isServiceManuallySelected
++                ) {
++                    false
++                } else {
++                    selectedServiceId != expense.serviceId
++                }
++            if (serviceIdChanged) return true
+             if (firstPaymentDate != expense.firstPayment) return true
+             if (endDate != expense.endDate) return true
+             if (notifyForExpense != expense.notifyForExpense) return true
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt
+new file mode 100644
+index 0000000..b21d6db
+--- /dev/null
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt
+@@ -0,0 +1,141 @@
++package de.dbauer.expensetracker.shared.data
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertNull
++
++class ExpenseServiceNameMatcherTest {
++    private fun serviceId(name: String): String? = ExpenseServiceNameMatcher.find(name)?.id
++
++    @Test
++    fun `streaming brands are matched`() {
++        assertEquals("netflix", serviceId("Netflix"))
++        assertEquals("netflix", serviceId("Netflix Premium"))
++        assertEquals("netflix", serviceId("My Netflix subscription"))
++        assertEquals("youtube", serviceId("YouTube Premium"))
++        assertEquals("youtubemusic", serviceId("YouTube Music"))
++        assertEquals("primevideo", serviceId("Prime Video"))
++        assertEquals("primevideo", serviceId("Amazon Prime Video"))
++        assertEquals("appletv", serviceId("Apple TV+"))
++        assertEquals("max", serviceId("HBO Max"))
++        assertEquals("max", serviceId("Max"))
++        assertEquals("hulu", serviceId("Hulu"))
++        assertEquals("paramountplus", serviceId("Paramount+"))
++        assertEquals("twitch", serviceId("Twitch Turbo"))
++        assertEquals("crunchyroll", serviceId("Crunchyroll"))
++    }
++
++    @Test
++    fun `music and audio brands are matched`() {
++        assertEquals("spotify", serviceId("Spotify Premium"))
++        assertEquals("applemusic", serviceId("Apple Music"))
++        assertEquals("deezer", serviceId("Deezer"))
++        assertEquals("tidal", serviceId("Tidal HiFi"))
++        assertEquals("soundcloud", serviceId("SoundCloud Go"))
++        assertEquals("audible", serviceId("Audible"))
++    }
++
++    @Test
++    fun `ai and work brands are matched`() {
++        assertEquals("openai", serviceId("ChatGPT"))
++        assertEquals("openai", serviceId("ChatGPT Plus"))
++        assertEquals("openai", serviceId("OpenAI API"))
++        assertEquals("openai", serviceId("GPT-4"))
++        assertEquals("claude", serviceId("Claude Pro"))
++        assertEquals("notion", serviceId("Notion"))
++        assertEquals("evernote", serviceId("Evernote"))
++        assertEquals("todoist", serviceId("Todoist Pro"))
++        assertEquals("clickup", serviceId("ClickUp"))
++        assertEquals("msteams", serviceId("Microsoft Teams"))
++        assertEquals("adobe", serviceId("Adobe Creative Cloud"))
++        assertEquals("figma", serviceId("Figma"))
++        assertEquals("canva", serviceId("Canva Pro"))
++        assertEquals("github", serviceId("GitHub Copilot"))
++        assertEquals("jetbrains", serviceId("IntelliJ IDEA"))
++    }
++
++    @Test
++    fun `cloud security and gaming brands are matched`() {
++        assertEquals("googledrive", serviceId("Google Drive"))
++        assertEquals("googleone", serviceId("Google One"))
++        assertEquals("dropbox", serviceId("Dropbox"))
++        assertEquals("onedrive", serviceId("OneDrive"))
++        assertEquals("apple", serviceId("iCloud"))
++        assertEquals("1password", serviceId("1Password"))
++        assertEquals("1password", serviceId("1 Password"))
++        assertEquals("bitwarden", serviceId("Bitwarden"))
++        assertEquals("nordvpn", serviceId("NordVPN"))
++        assertEquals("protonvpn", serviceId("Proton Mail"))
++        assertEquals("xbox", serviceId("Xbox Game Pass"))
++        assertEquals("playstation", serviceId("PlayStation Plus"))
++        assertEquals("nintendo", serviceId("Nintendo Switch Online"))
++        assertEquals("steam", serviceId("Steam Wallet"))
++    }
++
++    @Test
++    fun `social finance and other brands are matched`() {
++        assertEquals("x", serviceId("Twitter Blue"))
++        assertEquals("x", serviceId("X Premium"))
++        assertEquals("reddit", serviceId("Reddit Premium"))
++        assertEquals("snapchat", serviceId("Snapchat+"))
++        assertEquals("facebook", serviceId("Facebook"))
++        assertEquals("instagram", serviceId("Instagram"))
++        assertEquals("apple", serviceId("Apple One"))
++        assertEquals("uber", serviceId("Uber Eats"))
++        assertEquals("tinder", serviceId("Tinder Gold"))
++        assertEquals("nytimes", serviceId("The New York Times"))
++        assertEquals("amazon", serviceId("Amazon"))
++        assertEquals("paypal", serviceId("PayPal"))
++        assertEquals("patreon", serviceId("Patreon"))
++        assertEquals("substack", serviceId("Substack"))
++        assertEquals("duolingo", serviceId("Duolingo Super"))
++        assertEquals("strava", serviceId("Strava Premium"))
++    }
++
++    @Test
++    fun `non brand names are not matched`() {
++        assertNull(serviceId("Rent"))
++        assertNull(serviceId("Groceries"))
++        assertNull(serviceId("Internet"))
++        assertNull(serviceId("Gym membership"))
++        assertNull(serviceId(""))
++        assertNull(serviceId("   "))
++        assertNull(serviceId("!!!"))
++    }
++
++    @Test
++    fun `partial words are not matched`() {
++        assertNull(serviceId("Netflixx"))
++        assertNull(serviceId("Maximum"))
++        assertNull(serviceId("TV licence"))
++        assertNull(serviceId("Spotification"))
++        assertNull(serviceId("Renting a car"))
++    }
++
++    @Test
++    fun `short aliases are only matched at the beginning of a name`() {
++        assertEquals("max", serviceId("Max"))
++        assertEquals("max", serviceId("Max subscription"))
++        assertNull(serviceId("Super Max"))
++        assertEquals("x", serviceId("X"))
++        assertNull(serviceId("Box set"))
++    }
++
++    @Test
++    fun `brands without a built in icon resolve to null`() {
++        assertNull(serviceId("Disney+"))
++    }
++
++    @Test
++    fun `catalog extension works`() {
++        assertEquals("spotify", ExpenseServiceCatalog.findByName("Spotify Family")?.id)
++        assertNull(ExpenseServiceCatalog.findByName("Rent"))
++    }
++
++    @Test
++    fun `normalization removes punctuation and casing`() {
++        assertEquals("youtube music", ExpenseServiceNameMatcher.normalize("  YouTube   Music!! "))
++        assertEquals("1password", ExpenseServiceNameMatcher.normalize("1Password"))
++        assertEquals("", ExpenseServiceNameMatcher.normalize("…"))
++    }
++}
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt
+index 3469e10..2bdbeac 100644
+--- a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt
+@@ -1,12 +1,14 @@
+ package de.dbauer.expensetracker.shared.viewmodel
+ 
+ import de.dbauer.expensetracker.shared.data.CurrencyValue
++import de.dbauer.expensetracker.shared.data.ExpenseTemplates
+ import de.dbauer.expensetracker.shared.data.Recurrence
+ import de.dbauer.expensetracker.shared.data.RecurringExpenseData
+ import de.dbauer.expensetracker.shared.data.Reminder
+ import de.dbauer.expensetracker.shared.model.FakeCurrencyProvider
+ import de.dbauer.expensetracker.shared.model.database.FakeExpenseRepository
+ import de.dbauer.expensetracker.shared.model.datastore.FakeUserPreferencesRepository
++import de.dbauer.expensetracker.shared.toFloatLocaleAware
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.ExperimentalCoroutinesApi
+ import kotlinx.coroutines.flow.first
+@@ -20,6 +22,7 @@ import kotlin.test.BeforeTest
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
+ import kotlin.test.assertFalse
++import kotlin.test.assertNull
+ import kotlin.test.assertTrue
+ 
+ @OptIn(ExperimentalCoroutinesApi::class)
+@@ -817,4 +820,200 @@ class EditRecurringExpenseViewModelTest {
+             assertFalse(viewModel.notifyForExpense)
+             assertEquals(0, viewModel.reminders.size)
+         }
++
++    @Test
++    fun `typing a brand name selects the matching icon automatically`() =
++        runTest {
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = null,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            viewModel.onNameChanged("Netflix Premium")
++
++            assertEquals("netflix", viewModel.selectedServiceId)
++            assertFalse(viewModel.isServiceManuallySelected)
++        }
++
++    @Test
++    fun `manual icon selection is never overwritten by the name`() =
++        runTest {
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = null,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            viewModel.onNameChanged("Netflix")
++            viewModel.onServiceSelected("spotify")
++            viewModel.onNameChanged("Netflix Premium")
++
++            assertEquals("spotify", viewModel.selectedServiceId)
++            assertTrue(viewModel.isServiceManuallySelected)
++        }
++
++    @Test
++    fun `manual no icon selection is kept when the name matches`() =
++        runTest {
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = null,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            viewModel.onNameChanged("Netflix")
++            viewModel.onServiceSelected(null)
++            viewModel.onNameChanged("Netflix Premium")
++
++            assertNull(viewModel.selectedServiceId)
++            assertTrue(viewModel.isServiceManuallySelected)
++        }
++
++    @Test
++    fun `automatic icon is cleared when the name stops matching`() =
++        runTest {
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = null,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            viewModel.onNameChanged("Netflix")
++            assertEquals("netflix", viewModel.selectedServiceId)
++
++            viewModel.onNameChanged("Rent")
++
++            assertNull(viewModel.selectedServiceId)
++            assertFalse(viewModel.isServiceManuallySelected)
++        }
++
++    @Test
++    fun `quick template fills name icon price and recurrence`() =
++        runTest {
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = null,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            val template = ExpenseTemplates.quickTemplates.first { it.name == "ChatGPT" }
++            viewModel.onTemplateSelected(template)
++
++            assertEquals("ChatGPT", viewModel.nameState)
++            assertEquals("openai", viewModel.selectedServiceId)
++            assertEquals(Recurrence.Monthly, viewModel.selectedRecurrence)
++            assertEquals("1", viewModel.everyXRecurrenceState)
++            assertEquals(template.monthlyPrice, viewModel.priceState.toFloatLocaleAware())
++            assertTrue(viewModel.isServiceManuallySelected)
++        }
++
++    @Test
++    fun `template icon survives typing more text`() =
++        runTest {
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = null,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            viewModel.onTemplateSelected(ExpenseTemplates.quickTemplates.first { it.name == "Netflix" })
++            viewModel.onNameChanged("Netflix Premium")
++
++            assertEquals("netflix", viewModel.selectedServiceId)
++            assertTrue(viewModel.isServiceManuallySelected)
++        }
++
++    @Test
++    fun `editing legacy expense without icon infers one without unsaved changes`() =
++        runTest {
++            val existingExpense =
++                RecurringExpenseData(
++                    id = 1,
++                    name = "Spotify",
++                    description = "",
++                    price = CurrencyValue(9.99f, "USD"),
++                    monthlyPrice = CurrencyValue(9.99f, "USD"),
++                    everyXRecurrence = 1,
++                    recurrence = Recurrence.Monthly,
++                    tags = emptyList(),
++                    firstPayment = null,
++                    notifyForExpense = true,
++                    reminders = emptyList(),
++                )
++
++            expenseRepository.insert(existingExpense)
++
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = 1,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            assertEquals("spotify", viewModel.selectedServiceId)
++            assertFalse(viewModel.hasUnsavedChanges)
++        }
++
++    @Test
++    fun `existing service icon is not replaced by the name`() =
++        runTest {
++            val existingExpense =
++                RecurringExpenseData(
++                    id = 1,
++                    name = "Netflix",
++                    description = "",
++                    price = CurrencyValue(9.99f, "USD"),
++                    monthlyPrice = CurrencyValue(9.99f, "USD"),
++                    everyXRecurrence = 1,
++                    recurrence = Recurrence.Monthly,
++                    tags = emptyList(),
++                    firstPayment = null,
++                    notifyForExpense = true,
++                    reminders = emptyList(),
++                    serviceId = "spotify",
++                )
++
++            expenseRepository.insert(existingExpense)
++
++            val viewModel =
++                EditRecurringExpenseViewModel(
++                    expenseId = 1,
++                    expenseRepository = expenseRepository,
++                    currencyProvider = currencyProvider,
++                    userPreferencesRepository = userPreferencesRepository,
++                )
++
++            advanceUntilIdle()
++
++            assertEquals("spotify", viewModel.selectedServiceId)
++            assertFalse(viewModel.hasUnsavedChanges)
++        }
+ }

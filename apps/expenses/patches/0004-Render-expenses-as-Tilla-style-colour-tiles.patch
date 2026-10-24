@@ -1,0 +1,855 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 07:46:21 +0800
+Subject: [PATCH] Render expenses as Tilla-style colour tiles
+
+---
+ .../values-zh-rCN/strings.xml                 |  16 +-
+ .../composeResources/values/strings.xml       |  16 +-
+ .../shared/data/ExpenseService.kt             |   4 +-
+ .../expensetracker/shared/ui/MainContent.kt   |  47 ++-
+ .../shared/ui/RecurringExpenseOverview.kt     | 276 +---------------
+ .../shared/ui/TillaExpenseCard.kt             | 303 ++++++++++++++++++
+ 6 files changed, 378 insertions(+), 284 deletions(-)
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+
+diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+index 8cbfb26..f2e5269 100644
+--- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
++++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+@@ -118,12 +118,20 @@
+     <!-- Tilla style home & service icons -->
+     <string name="home_summary_total">总支出</string>
+     <string name="home_summary_per_month">每月</string>
++        <plurals name="home_card_days">
++        <item quantity="one">%1$d 天</item>
++        <item quantity="other">%1$d 天</item>
++    </plurals>
++    <plurals name="home_card_months">
++        <item quantity="one">%1$d 个月</item>
++        <item quantity="other">%1$d 个月</item>
++    </plurals>
++    <plurals name="home_card_years">
++        <item quantity="one">%1$d 年</item>
++        <item quantity="other">%1$d 年</item>
++    </plurals>
+     <string name="home_card_today">今天</string>
+     <string name="home_card_tomorrow">明天</string>
+-    <string name="home_card_days">%1$d 天</string>
+-    <string name="home_card_months">%1$d 个月</string>
+-    <string name="home_card_years">%1$d 年</string>
+-    <string name="home_card_no_cycle">一次性</string>
+     <string name="edit_expense_service_title">图标</string>
+     <string name="edit_expense_service_summary">选择服务图标</string>
+     <string name="edit_expense_service_none">无图标</string>
+diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
+index 3421792..255f0df 100644
+--- a/shared/src/commonMain/composeResources/values/strings.xml
++++ b/shared/src/commonMain/composeResources/values/strings.xml
+@@ -185,12 +185,20 @@
+     <!-- Tilla style home & service icons -->
+     <string name="home_summary_total">Total expenses</string>
+     <string name="home_summary_per_month">per month</string>
++        <plurals name="home_card_days">
++        <item quantity="one">%1$d DAY</item>
++        <item quantity="other">%1$d DAYS</item>
++    </plurals>
++    <plurals name="home_card_months">
++        <item quantity="one">%1$d MONTH</item>
++        <item quantity="other">%1$d MONTHS</item>
++    </plurals>
++    <plurals name="home_card_years">
++        <item quantity="one">%1$d YEAR</item>
++        <item quantity="other">%1$d YEARS</item>
++    </plurals>
+     <string name="home_card_today">TODAY</string>
+     <string name="home_card_tomorrow">TOMORROW</string>
+-    <string name="home_card_days">%1$d DAYS</string>
+-    <string name="home_card_months">%1$d MONTHS</string>
+-    <string name="home_card_years">%1$d YEARS</string>
+-    <string name="home_card_no_cycle">one-time</string>
+     <string name="edit_expense_service_title">Icon</string>
+     <string name="edit_expense_service_summary">Choose a service icon</string>
+     <string name="edit_expense_service_none">No icon</string>
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt
+index caf1554..93479e4 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt
+@@ -18,6 +18,7 @@ import androidx.compose.material.icons.rounded.ReceiptLong
+ import androidx.compose.material.icons.rounded.School
+ import androidx.compose.material.icons.rounded.Shield
+ import androidx.compose.material.icons.rounded.ShoppingBag
++import androidx.compose.material.icons.rounded.SmartDisplay
+ import androidx.compose.material.icons.rounded.Smartphone
+ import androidx.compose.material.icons.rounded.Wifi
+ import androidx.compose.ui.graphics.Color
+@@ -158,7 +159,7 @@ object ExpenseServiceCatalog {
+             category = ExpenseServiceCategory.STREAMING,
+             backgroundColor = Color(0xFF00A8E1),
+             iconTint = null,
+-            icon = ExpenseServiceIcon.Brand(Res.drawable.ic_service_primevideo),
++            icon = ExpenseServiceIcon.Material(Icons.Rounded.SmartDisplay),
+         ),
+         ExpenseService(
+             id = "hulu",
+@@ -213,7 +214,6 @@ object ExpenseServiceCatalog {
+             name = "Spotify",
+             category = ExpenseServiceCategory.MUSIC,
+             backgroundColor = Color(0xFF1ED760),
+-            iconTint = Color(0xFF0B1B12),
+             icon = ExpenseServiceIcon.Brand(Res.drawable.ic_service_spotify),
+         ),
+         ExpenseService(
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+index 479c5e4..1ec217e 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+@@ -18,8 +18,10 @@ import androidx.compose.material.icons.filled.Close
+ import androidx.compose.material.icons.filled.FilterList
+ import androidx.compose.material.icons.filled.Search
+ import androidx.compose.material.icons.rounded.Add
++import androidx.compose.material3.CenterAlignedTopAppBar
+ import androidx.compose.material3.ExperimentalMaterial3Api
+ import androidx.compose.material3.FilterChip
++import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material3.FloatingActionButton
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
+@@ -36,6 +38,7 @@ import androidx.compose.material3.SnackbarResult
+ import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TopAppBar
++import androidx.compose.material3.TopAppBarDefaults
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.collectAsState
+@@ -50,6 +53,8 @@ import androidx.compose.ui.focus.FocusRequester
+ import androidx.compose.ui.focus.focusRequester
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.platform.LocalLayoutDirection
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.luminance
+ import androidx.compose.ui.tooling.preview.Preview
+ import androidx.compose.ui.unit.LayoutDirection
+ import androidx.compose.ui.unit.dp
+@@ -123,9 +128,16 @@ fun MainContent(
+     val navController = rememberNavController()
+     val backStackEntry by navController.currentBackStackEntryAsState()
+     val snackbarHostState = remember { SnackbarHostState() }
++    val pageBackground =
++        if (MaterialTheme.colorScheme.background.luminance() > 0.5f) {
++            TillaBackgroundLight
++        } else {
++            TillaBackgroundDark
++        }
+ 
+     Scaffold(
+         modifier = modifier,
++        containerColor = pageBackground,
+         topBar = {
+             mainNavigationViewModel.topAppBar()
+         },
+@@ -148,6 +160,9 @@ fun MainContent(
+                     onClick = {
+                         navController.navigate(EditExpensePane())
+                     },
++                    shape = RoundedCornerShape(20.dp),
++                    containerColor = Color(0xFF2EE6D6),
++                    contentColor = Color(0xFF00201D),
+                 ) {
+                     Icon(
+                         imageVector = Icons.Rounded.Add,
+@@ -252,12 +267,27 @@ fun MainContent(
+                         }
+                     } else {
+                         mainNavigationViewModel.topAppBar = {
+-                            TopAppBar(
++                            CenterAlignedTopAppBar(
+                                 title = {
+                                     Text(
+                                         text = stringResource(Res.string.home_title),
++                                        style = MaterialTheme.typography.titleLarge,
+                                     )
+                                 },
++                                navigationIcon = {
++                                    IconToggleButton(
++                                        checked = isFilterRowVisible,
++                                        onCheckedChange = { checked ->
++                                            recurringExpenseViewModel.onFilterRowVisibilityChange(checked)
++                                        },
++                                    ) {
++                                        Icon(
++                                            imageVector = Icons.Filled.FilterList,
++                                            contentDescription =
++                                                stringResource(Res.string.home_filter_content_desc),
++                                        )
++                                    }
++                                },
+                                 actions = {
+                                     IconButton(
+                                         onClick = { isSearchActive = true },
+@@ -272,19 +302,10 @@ fun MainContent(
+                                         onToggleGridMode = toggleGridMode,
+                                         isGridMode = isGridMode,
+                                     )
+-                                    IconToggleButton(
+-                                        checked = isFilterRowVisible,
+-                                        onCheckedChange = { checked ->
+-                                            recurringExpenseViewModel.onFilterRowVisibilityChange(checked)
+-                                        },
+-                                    ) {
+-                                        Icon(
+-                                            imageVector = Icons.Filled.FilterList,
+-                                            contentDescription =
+-                                                stringResource(Res.string.home_filter_content_desc),
+-                                        )
+-                                    }
+                                 },
++                                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
++                                    containerColor = pageBackground,
++                                ),
+                             )
+                         }
+                     }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+index 6988229..acc517e 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+@@ -1,52 +1,29 @@
+ package de.dbauer.expensetracker.shared.ui
+ 
+ import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.PaddingValues
+-import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+ import androidx.compose.foundation.lazy.staggeredgrid.items
+ import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+-import androidx.compose.material3.Card
+-import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.Surface
+-import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
+-import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+-import androidx.compose.ui.text.style.TextAlign
+-import androidx.compose.ui.text.style.TextOverflow
+-import androidx.compose.ui.tooling.preview.Preview
+-import androidx.compose.ui.tooling.preview.PreviewParameter
+-import androidx.compose.ui.tooling.preview.PreviewParameterProvider
+ import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.dp
+ import androidx.navigation.NavController
+-import androidx.navigation.compose.rememberNavController
+ import de.dbauer.expensetracker.shared.data.EditExpensePane
+-import de.dbauer.expensetracker.shared.data.Recurrence
+-import de.dbauer.expensetracker.shared.data.RecurringExpenseData
+ import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
+ import de.dbauer.expensetracker.shared.toCurrencyString
+-import de.dbauer.expensetracker.shared.ui.home.HorizontalAssignedTagColorsList
+-import de.dbauer.expensetracker.shared.ui.home.HorizontalAssignedTagList
+-import de.dbauer.expensetracker.shared.ui.theme.ExpenseTrackerThemePreview
+ import de.dbauer.expensetracker.shared.viewmodel.RecurringExpenseViewModel
+-import org.jetbrains.compose.resources.stringResource
+ import org.koin.compose.koinInject
+ import org.koin.compose.viewmodel.koinViewModel
+-import recurringexpensetracker.shared.generated.resources.Res
+-import recurringexpensetracker.shared.generated.resources.home_summary_monthly
+-import recurringexpensetracker.shared.generated.resources.home_summary_weekly
+-import recurringexpensetracker.shared.generated.resources.home_summary_yearly
+ 
+ @Composable
+ fun RecurringExpenseOverview(
+@@ -75,44 +52,33 @@ fun RecurringExpenseOverview(
+     LazyVerticalStaggeredGrid(
+         columns =
+             if (isGridMode) {
+-                StaggeredGridCells.Adaptive(160.dp)
++                StaggeredGridCells.Adaptive(170.dp)
+             } else {
+                 StaggeredGridCells.Fixed(1)
+             },
+         state = if (isGridMode) gridState else listState,
+-        verticalItemSpacing = 8.dp,
+-        horizontalArrangement =
+-            Arrangement.spacedBy(8.dp),
++        verticalItemSpacing = 10.dp,
++        horizontalArrangement = Arrangement.spacedBy(10.dp),
+         contentPadding = contentPadding,
+-        modifier =
+-            modifier
+-                .fillMaxWidth(),
++        modifier = modifier.fillMaxWidth(),
+     ) {
+         item(span = StaggeredGridItemSpan.FullLine) {
+-            RecurringExpenseSummary(
+-                weeklyExpense = weeklyExpense,
++            TillaExpenseSummary(
+                 monthlyExpense = monthlyExpense,
++                weeklyExpense = weeklyExpense,
+                 yearlyExpense = yearlyExpense,
+-                modifier = Modifier.padding(bottom = 8.dp),
++                modifier = Modifier.padding(bottom = 6.dp),
+             )
+         }
+ 
+         items(items = recurringExpenseViewModel.filteredRecurringExpenseData) { recurringExpenseData ->
+-            if (isGridMode) {
+-                GridRecurringExpense(
+-                    recurringExpenseData = recurringExpenseData,
+-                    onClick = {
+-                        navController.navigate(EditExpensePane(recurringExpenseData.id))
+-                    },
+-                )
+-            } else {
+-                RecurringExpense(
+-                    recurringExpenseData = recurringExpenseData,
+-                    onClick = {
+-                        navController.navigate(EditExpensePane(recurringExpenseData.id))
+-                    },
+-                )
+-            }
++            TillaExpenseCard(
++                expense = recurringExpenseData,
++                compact = isGridMode,
++                onClick = {
++                    navController.navigate(EditExpensePane(recurringExpenseData.id))
++                },
++            )
+         }
+ 
+         item(span = StaggeredGridItemSpan.FullLine) {
+@@ -125,215 +91,3 @@ fun RecurringExpenseOverview(
+         }
+     }
+ }
+-
+-@Composable
+-private fun RecurringExpenseSummary(
+-    weeklyExpense: String,
+-    monthlyExpense: String,
+-    yearlyExpense: String,
+-    modifier: Modifier = Modifier,
+-) {
+-    Column(
+-        horizontalAlignment = Alignment.CenterHorizontally,
+-        modifier =
+-            modifier
+-                .fillMaxWidth()
+-                .padding(8.dp),
+-    ) {
+-        Text(
+-            text = stringResource(Res.string.home_summary_monthly),
+-            style = MaterialTheme.typography.titleLarge,
+-        )
+-        Text(
+-            text = monthlyExpense,
+-            style = MaterialTheme.typography.titleMedium,
+-        )
+-        Spacer(modifier = Modifier.size(8.dp))
+-        Row {
+-            Column(
+-                horizontalAlignment = Alignment.CenterHorizontally,
+-                modifier = Modifier.weight(1f),
+-            ) {
+-                Text(
+-                    text = stringResource(Res.string.home_summary_weekly),
+-                    style = MaterialTheme.typography.bodyLarge,
+-                )
+-                Text(
+-                    text = weeklyExpense,
+-                    style = MaterialTheme.typography.bodyLarge,
+-                )
+-            }
+-            Column(
+-                horizontalAlignment = Alignment.CenterHorizontally,
+-                modifier = Modifier.weight(1f),
+-            ) {
+-                Text(
+-                    text = stringResource(Res.string.home_summary_yearly),
+-                    style = MaterialTheme.typography.bodyLarge,
+-                )
+-                Text(
+-                    text = yearlyExpense,
+-                    style = MaterialTheme.typography.bodyLarge,
+-                )
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun GridRecurringExpense(
+-    recurringExpenseData: RecurringExpenseData,
+-    onClick: () -> Unit,
+-    modifier: Modifier = Modifier,
+-) {
+-    Card(
+-        onClick = onClick,
+-        modifier = modifier,
+-    ) {
+-        Column(
+-            modifier =
+-                Modifier
+-                    .padding(8.dp)
+-                    .fillMaxWidth()
+-                    .align(Alignment.CenterHorizontally),
+-            verticalArrangement = Arrangement.spacedBy(2.dp),
+-        ) {
+-            Text(
+-                text = recurringExpenseData.name,
+-                style = MaterialTheme.typography.titleMedium,
+-                maxLines = 1,
+-                overflow = TextOverflow.Ellipsis,
+-            )
+-            if (recurringExpenseData.description.isNotBlank()) {
+-                Text(
+-                    text = recurringExpenseData.description,
+-                    style = MaterialTheme.typography.bodyMedium,
+-                )
+-            }
+-            Row(
+-                horizontalArrangement = Arrangement.End,
+-                verticalAlignment = Alignment.CenterVertically,
+-                modifier = Modifier.align(Alignment.End),
+-            ) {
+-                Column(
+-                    modifier =
+-                        Modifier
+-                            .weight(1f)
+-                            .padding(end = 4.dp),
+-                ) {
+-                    if (recurringExpenseData.recurrence != Recurrence.Monthly ||
+-                        recurringExpenseData.everyXRecurrence != 1
+-                    ) {
+-                        Text(
+-                            text =
+-                                "${recurringExpenseData.price.toCurrencyString()} / " +
+-                                    "${recurringExpenseData.everyXRecurrence} " +
+-                                    stringResource(recurringExpenseData.recurrence.shortStringRes),
+-                            style = MaterialTheme.typography.bodySmall,
+-                        )
+-                        Spacer(modifier = Modifier.size(4.dp))
+-                    }
+-                    HorizontalAssignedTagColorsList(
+-                        tags = recurringExpenseData.tags,
+-                    )
+-                }
+-                Text(
+-                    text = recurringExpenseData.monthlyPrice.toCurrencyString(),
+-                    style = MaterialTheme.typography.titleMedium,
+-                    maxLines = 1,
+-                    overflow = TextOverflow.Ellipsis,
+-                )
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun RecurringExpense(
+-    recurringExpenseData: RecurringExpenseData,
+-    onClick: () -> Unit,
+-    modifier: Modifier = Modifier,
+-) {
+-    Card(
+-        onClick = onClick,
+-        modifier = modifier,
+-    ) {
+-        Row(
+-            verticalAlignment = Alignment.CenterVertically,
+-            modifier =
+-                Modifier
+-                    .padding(horizontal = 16.dp)
+-                    // The conditional padding needed to work around the inner padding of the FilterChip of the tag
+-                    .padding(top = 16.dp, bottom = if (recurringExpenseData.tags.isEmpty()) 16.dp else 8.dp),
+-        ) {
+-            Column(
+-                modifier =
+-                    Modifier
+-                        .padding(end = 16.dp)
+-                        .weight(1f),
+-            ) {
+-                Text(
+-                    text = recurringExpenseData.name,
+-                    style = MaterialTheme.typography.titleMedium,
+-                    maxLines = 1,
+-                    overflow = TextOverflow.Ellipsis,
+-                )
+-                if (recurringExpenseData.description.isNotBlank()) {
+-                    Text(
+-                        text = recurringExpenseData.description,
+-                        style = MaterialTheme.typography.bodyLarge,
+-                        maxLines = 2,
+-                        overflow = TextOverflow.Ellipsis,
+-                    )
+-                }
+-                HorizontalAssignedTagList(
+-                    tags = recurringExpenseData.tags,
+-                    onTagClick = { onClick() },
+-                )
+-            }
+-            Column(
+-                horizontalAlignment = Alignment.End,
+-                modifier =
+-                    Modifier
+-                        // The conditional padding needed to work around the inner padding of the FilterChip of the tag
+-                        .padding(bottom = if (recurringExpenseData.tags.isEmpty()) 0.dp else 8.dp),
+-            ) {
+-                Text(
+-                    text = recurringExpenseData.monthlyPrice.toCurrencyString(),
+-                    style = MaterialTheme.typography.titleLarge,
+-                )
+-                if (recurringExpenseData.recurrence != Recurrence.Monthly ||
+-                    recurringExpenseData.everyXRecurrence != 1
+-                ) {
+-                    Text(
+-                        text =
+-                            "${recurringExpenseData.price.toCurrencyString()} / " +
+-                                "${recurringExpenseData.everyXRecurrence} " +
+-                                stringResource(recurringExpenseData.recurrence.shortStringRes),
+-                        style = MaterialTheme.typography.bodyLarge,
+-                        textAlign = TextAlign.End,
+-                    )
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-private class GridLayoutParameterProvider : PreviewParameterProvider<Boolean> {
+-    override val values = sequenceOf(false, true)
+-}
+-
+-@Preview
+-@Composable
+-private fun RecurringExpenseOverviewPreview(
+-    @PreviewParameter(GridLayoutParameterProvider::class) isGridMode: Boolean,
+-) {
+-    ExpenseTrackerThemePreview {
+-        Surface(modifier = Modifier.fillMaxWidth()) {
+-            RecurringExpenseOverview(
+-                isGridMode = isGridMode,
+-                navController = rememberNavController(),
+-            )
+-        }
+-    }
+-}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+new file mode 100644
+index 0000000..3d4a487
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+@@ -0,0 +1,303 @@
++package de.dbauer.expensetracker.shared.ui
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.Category
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.luminance
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import de.dbauer.expensetracker.shared.data.ExpenseService
++import de.dbauer.expensetracker.shared.data.ExpenseServiceCatalog
++import de.dbauer.expensetracker.shared.data.ExpenseServiceIcon
++import de.dbauer.expensetracker.shared.data.RecurringExpenseData
++import kotlinx.datetime.TimeZone
++import kotlinx.datetime.toLocalDateTime
++import org.jetbrains.compose.resources.painterResource
++import org.jetbrains.compose.resources.pluralStringResource
++import org.jetbrains.compose.resources.stringResource
++import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.home_card_days
++import recurringexpensetracker.shared.generated.resources.home_card_months
++import recurringexpensetracker.shared.generated.resources.home_card_today
++import recurringexpensetracker.shared.generated.resources.home_card_years
++import recurringexpensetracker.shared.generated.resources.home_card_tomorrow
++import recurringexpensetracker.shared.generated.resources.home_summary_per_month
++import recurringexpensetracker.shared.generated.resources.home_summary_total
++import recurringexpensetracker.shared.generated.resources.home_summary_weekly
++import recurringexpensetracker.shared.generated.resources.home_summary_yearly
++import kotlin.time.Clock
++
++private val TillaCardShape = RoundedCornerShape(26.dp)
++
++/** Muted mint / deep green page backgrounds used by Tilla. */
++val TillaBackgroundLight = Color(0xFFEFF6F2)
++val TillaBackgroundDark = Color(0xFF0E1513)
++
++private val fallbackCardColors =
++    listOf(
++        Color(0xFF2F5D57),
++        Color(0xFF4E5A78),
++        Color(0xFF6B4A5E),
++        Color(0xFF5A6040),
++        Color(0xFF3E6274),
++        Color(0xFF72513E),
++        Color(0xFF4A4E66),
++        Color(0xFF3F6552),
++    )
++
++internal fun fallbackCardColor(name: String): Color {
++    val index = (name.hashCode() and Int.MAX_VALUE) % fallbackCardColors.size
++    return fallbackCardColors[index]
++}
++
++@Composable
++fun ExpenseServiceIconView(
++    service: ExpenseService?,
++    tint: Color,
++    modifier: Modifier = Modifier,
++) {
++    val iconTint = service?.iconTint ?: tint
++    val contentDescription = service?.name
++    when (val icon = service?.icon) {
++        is ExpenseServiceIcon.Brand ->
++            Icon(
++                painter = painterResource(icon.drawable),
++                contentDescription = contentDescription,
++                tint = iconTint,
++                modifier = modifier,
++            )
++
++        is ExpenseServiceIcon.Material ->
++            Icon(
++                imageVector = icon.imageVector,
++                contentDescription = contentDescription,
++                tint = iconTint,
++                modifier = modifier,
++            )
++
++        null ->
++            Icon(
++                imageVector = Icons.Rounded.Category,
++                contentDescription = null,
++                tint = tint,
++                modifier = modifier,
++            )
++    }
++}
++
++/**
++ * A full-bleed, colour-coded expense tile inspired by Tilla.
++ */
++@Composable
++fun TillaExpenseCard(
++    expense: RecurringExpenseData,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier,
++    compact: Boolean = false,
++) {
++    val service = ExpenseServiceCatalog.find(expense.serviceId)
++    val background = service?.backgroundColor ?: remember(expense.name) { fallbackCardColor(expense.name) }
++    val foreground =
++        service?.foregroundColor ?: if (background.luminance() > 0.5f) Color(0xFF151719) else Color.White
++    val iconTint = service?.iconTint ?: foreground
++
++    Surface(
++        modifier =
++            modifier
++                .fillMaxWidth()
++                .clip(TillaCardShape)
++                .clickable(onClick = onClick),
++        shape = TillaCardShape,
++        color = background,
++        contentColor = foreground,
++    ) {
++        Row(
++            modifier =
++                Modifier
++                    .fillMaxWidth()
++                    .padding(
++                        horizontal = if (compact) 14.dp else 18.dp,
++                        vertical = if (compact) 14.dp else 17.dp,
++                    ),
++            verticalAlignment = Alignment.CenterVertically,
++        ) {
++            ExpenseServiceIconView(
++                service = service,
++                tint = iconTint,
++                modifier = Modifier.size(if (compact) 28.dp else 32.dp),
++            )
++            Spacer(modifier = Modifier.size(if (compact) 10.dp else 14.dp))
++            Column(
++                modifier = Modifier.weight(1f),
++                verticalArrangement = Arrangement.Center,
++            ) {
++                Text(
++                    text = expense.name,
++                    fontSize = if (compact) 15.sp else 16.sp,
++                    fontWeight = FontWeight.SemiBold,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++                if (!compact && expense.description.isNotBlank()) {
++                    Text(
++                        text = expense.description,
++                        fontSize = 12.sp,
++                        maxLines = 1,
++                        overflow = TextOverflow.Ellipsis,
++                        modifier = Modifier.padding(top = 2.dp),
++                        color = foreground.copy(alpha = 0.72f),
++                    )
++                }
++                if (expense.tags.isNotEmpty()) {
++                    Row(
++                        horizontalArrangement = Arrangement.spacedBy(3.dp),
++                        modifier = Modifier.padding(top = if (compact) 3.dp else 5.dp),
++                    ) {
++                        expense.tags.take(6).forEach { tag ->
++                            Box(
++                                modifier =
++                                    Modifier
++                                        .size(if (compact) 4.dp else 5.dp)
++                                        .background(Color(tag.color), CircleShape),
++                            )
++                        }
++                    }
++                }
++            }
++            Spacer(modifier = Modifier.size(8.dp))
++            Column(horizontalAlignment = Alignment.End) {
++                Text(
++                    text = expense.monthlyPrice.toCurrencyString(),
++                    fontSize = if (compact) 15.sp else 17.sp,
++                    fontWeight = FontWeight.Bold,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++                Text(
++                    text = remainingLabel(expense).uppercase(),
++                    fontSize = if (compact) 9.sp else 10.sp,
++                    fontWeight = FontWeight.Medium,
++                    letterSpacing = 0.4.sp,
++                    color = foreground.copy(alpha = 0.78f),
++                    maxLines = 1,
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun remainingLabel(expense: RecurringExpenseData): String {
++    val today = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date
++    val nextPayment = expense.getNextPaymentDay()
++    if (nextPayment == null) {
++        return stringResource(expense.recurrence.fullStringRes)
++    }
++
++    val days = (nextPayment.toEpochDays() - today.toEpochDays()).toInt()
++    return when {
++        days <= 0 -> stringResource(Res.string.home_card_today)
++        days == 1 -> stringResource(Res.string.home_card_tomorrow)
++        days < 30 -> pluralStringResource(Res.plurals.home_card_days, days, days)
++        days < 365 -> {
++            val months = (days / 30).coerceAtLeast(1)
++            pluralStringResource(Res.plurals.home_card_months, months, months)
++        }
++        else -> {
++            val years = (days / 365).coerceAtLeast(1)
++            pluralStringResource(Res.plurals.home_card_years, years, years)
++        }
++    }
++}
++
++@Composable
++fun TillaExpenseSummary(
++    monthlyExpense: String,
++    weeklyExpense: String,
++    yearlyExpense: String,
++    modifier: Modifier = Modifier,
++) {
++    Surface(
++        modifier = modifier.fillMaxWidth(),
++        shape = RoundedCornerShape(24.dp),
++        color = MaterialTheme.colorScheme.surfaceContainerHigh,
++    ) {
++        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Column(modifier = Modifier.weight(1f)) {
++                    Text(
++                        text = stringResource(Res.string.home_summary_total),
++                        style = MaterialTheme.typography.titleMedium,
++                        fontWeight = FontWeight.SemiBold,
++                    )
++                    Text(
++                        text = stringResource(Res.string.home_summary_per_month),
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                        modifier = Modifier.padding(top = 2.dp),
++                    )
++                }
++                Text(
++                    text = monthlyExpense,
++                    style = MaterialTheme.typography.headlineSmall,
++                    fontWeight = FontWeight.Bold,
++                )
++            }
++            Spacer(modifier = Modifier.height(10.dp))
++            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
++                SummaryMiniValue(
++                    label = stringResource(Res.string.home_summary_weekly),
++                    value = weeklyExpense,
++                )
++                SummaryMiniValue(
++                    label = stringResource(Res.string.home_summary_yearly),
++                    value = yearlyExpense,
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun SummaryMiniValue(
++    label: String,
++    value: String,
++) {
++    Row(verticalAlignment = Alignment.CenterVertically) {
++        Text(
++            text = label,
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++        )
++        Text(
++            text = value,
++            style = MaterialTheme.typography.bodyMedium,
++            fontWeight = FontWeight.Medium,
++            modifier = Modifier.padding(start = 6.dp),
++        )
++    }
++}

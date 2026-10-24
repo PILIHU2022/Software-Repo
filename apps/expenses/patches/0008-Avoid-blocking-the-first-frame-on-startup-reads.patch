@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:11:38 +0800
+Subject: [PATCH] Avoid blocking the first frame on startup reads
+
+---
+ .../ExpenseTrackerApplication.kt              | 29 ++++++++++++-------
+ .../de/dbauer/expensetracker/MainActivity.kt  | 24 +++++++++------
+ .../expensetracker/shared/ui/MainContent.kt   | 17 +++++++++++
+ 3 files changed, 50 insertions(+), 20 deletions(-)
+
+diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/ExpenseTrackerApplication.kt b/app/src/main/kotlin/de/dbauer/expensetracker/ExpenseTrackerApplication.kt
+index dc8c3a8..1dde240 100644
+--- a/app/src/main/kotlin/de/dbauer/expensetracker/ExpenseTrackerApplication.kt
++++ b/app/src/main/kotlin/de/dbauer/expensetracker/ExpenseTrackerApplication.kt
+@@ -7,13 +7,17 @@ import de.dbauer.expensetracker.di.appModule
+ import de.dbauer.expensetracker.shared.di.platformModule
+ import de.dbauer.expensetracker.shared.di.sharedModule
+ import de.dbauer.expensetracker.widget.UpcomingPaymentsWidgetReceiver
+-import kotlinx.coroutines.MainScope
+-import kotlinx.coroutines.cancel
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
+ import org.koin.android.ext.koin.androidContext
+ import org.koin.core.context.startKoin
+ 
+ class ExpenseTrackerApplication : Application() {
++    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++
+     override fun onCreate() {
+         super.onCreate()
+ 
+@@ -26,15 +30,18 @@ class ExpenseTrackerApplication : Application() {
+             )
+         }
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+-            val mainScope = MainScope()
+-            mainScope
+-                .launch {
+-                    GlanceAppWidgetManager(
+-                        applicationContext,
+-                    ).setWidgetPreviews(UpcomingPaymentsWidgetReceiver::class)
+-                }.invokeOnCompletion {
+-                    mainScope.cancel()
+-                }
++            // Only needed for the widget picker; keep it off the cold-start critical path and
++            // off the main thread so it cannot compete with the first frame.
++            applicationScope.launch {
++                delay(WIDGET_PREVIEW_DELAY_MS)
++                GlanceAppWidgetManager(
++                    applicationContext,
++                ).setWidgetPreviews(UpcomingPaymentsWidgetReceiver::class)
++            }
+         }
+     }
++
++    private companion object {
++        const val WIDGET_PREVIEW_DELAY_MS = 5_000L
++    }
+ }
+diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
+index d7beaae..fb9ad63 100644
+--- a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
++++ b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
+@@ -61,7 +61,6 @@ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.flow.collectLatest
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.launch
+-import kotlinx.coroutines.runBlocking
+ import kotlinx.serialization.json.Json
+ import org.jetbrains.compose.resources.stringResource
+ import org.koin.android.ext.android.get
+@@ -155,19 +154,24 @@ class MainActivity : AppCompatActivity() {
+         }
+ 
+         val canUseBiometric = biometricPromptManager.canUseAuthenticator()
+-        val startRoute: MainNavRoute =
++        val startRouteFromIntent: MainNavRoute? =
+             IntentCompat
+                 .getSerializableExtra(intent, EXTRA_START_ROUTE, String::class.java)
+                 ?.let { jsonString ->
+                     Json.decodeFromString(jsonString)
+                 }
+-                ?: runBlocking {
+-                    when (userPreferencesRepository.defaultTab.get().first()) {
+-                        DefaultTab.Home.value -> HomePane()
+-                        DefaultTab.Upcoming.value -> UpcomingPane
+-                        else -> HomePane()
+-                    }
++
++        // Never block the first frame on DataStore. Home is the start destination, and if the
++        // stored default tab is Upcoming we navigate there once the preference is known. An
++        // explicit intent route (notification, deep link) always wins and skips this lookup.
++        val deferredStartRoute = mutableStateOf<MainNavRoute?>(null)
++        if (startRouteFromIntent == null && savedInstanceState == null) {
++            lifecycleScope.launch {
++                if (userPreferencesRepository.defaultTab.get().first() == DefaultTab.Upcoming.value) {
++                    deferredStartRoute.value = UpcomingPane
+                 }
++            }
++        }
+ 
+         val invalidExpenseId = -1
+         val expenseId = intent.getIntExtra(EXTRA_EXPENSE_ID, invalidExpenseId)
+@@ -329,7 +333,9 @@ class MainActivity : AppCompatActivity() {
+                                     }
+                                 }
+                             },
+-                            startRoute = startRoute,
++                            startRoute = startRouteFromIntent ?: HomePane(),
++                            deferredStartRoute = deferredStartRoute.value,
++                            onDeferredStartRouteApplied = { deferredStartRoute.value = null },
+                         )
+                     }
+                 }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+index 7ed4599..c705c10 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+@@ -59,6 +59,7 @@ import androidx.compose.ui.tooling.preview.Preview
+ import androidx.compose.ui.unit.LayoutDirection
+ import androidx.compose.ui.unit.dp
+ import androidx.navigation.NavDestination.Companion.hasRoute
++import androidx.navigation.NavGraph.Companion.findStartDestination
+ import androidx.navigation.compose.NavHost
+ import androidx.navigation.compose.composable
+ import androidx.navigation.compose.currentBackStackEntryAsState
+@@ -122,6 +123,8 @@ fun MainContent(
+     updateWidget: () -> Unit,
+     modifier: Modifier = Modifier,
+     startRoute: MainNavRoute = HomePane(),
++    deferredStartRoute: MainNavRoute? = null,
++    onDeferredStartRouteApplied: () -> Unit = {},
+     mainNavigationViewModel: MainNavigationViewModel = koinViewModel<MainNavigationViewModel>(),
+     whatsNew: IWhatsNew = koinInject<IWhatsNew>(),
+ ) {
+@@ -139,6 +142,20 @@ fun MainContent(
+         { navController.navigate(EditExpensePane()) }
+     }
+ 
++    // Home is always the first frame. If the stored default tab is Upcoming, MainActivity
++    // resolves that preference off the main thread and hands it over here; we then navigate
++    // once, replacing the start destination so back still exits the app.
++    LaunchedEffect(deferredStartRoute) {
++        val route = deferredStartRoute ?: return@LaunchedEffect
++        navController.navigate(route) {
++            popUpTo(navController.graph.findStartDestination().id) {
++                inclusive = true
++            }
++            launchSingleTop = true
++        }
++        onDeferredStartRouteApplied()
++    }
++
+     Scaffold(
+         modifier = modifier,
+         containerColor = pageBackground,

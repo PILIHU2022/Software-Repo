@@ -1,0 +1,745 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 07:46:24 +0800
+Subject: [PATCH] Persist daily screen usage history in a local SQLite database
+
+---
+ .gitignore                                    |   3 +
+ .../data/database/ScreenTimeDatabase.kt       |  65 ++++++++
+ .../data/database/UsageHistoryDao.kt          | 153 ++++++++++++++++++
+ .../UsageHistoryRepositoryImpl.kt             | 126 +++++++++++++++
+ .../data/workers/UsageHistoryScheduler.kt     |  46 ++++++
+ .../data/workers/UsageHistoryWorker.kt        |  22 +++
+ .../domain/entities/analysis/UsageAnalysis.kt |  73 +++++++++
+ .../repositories/UsageHistoryRepository.kt    |  27 ++++
+ .../domain/usecases/UsageHistoryUseCase.kt    | 149 +++++++++++++++++
+ 9 files changed, 664 insertions(+)
+ create mode 100644 app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryWorker.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/domain/entities/analysis/UsageAnalysis.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt
+
+diff --git a/.gitignore b/.gitignore
+index aa724b7..e9b953d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,3 +13,6 @@
+ .externalNativeBuild
+ .cxx
+ local.properties
++
++# Kotlin
++.kotlin
+diff --git a/app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt b/app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt
+new file mode 100644
+index 0000000..f310bac
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt
+@@ -0,0 +1,65 @@
++package com.atharok.screentime.data.database
++
++import android.content.Context
++import android.database.sqlite.SQLiteDatabase
++import android.database.sqlite.SQLiteOpenHelper
++
++/**
++ * Local, append-only history of screen usage.
++ *
++ * The system usage event log is limited (and uninstalling an app removes its events), so the
++ * values are copied here once per day and kept forever. The database is intentionally small and
++ * dependency free: it only stores aggregate durations.
++ */
++class ScreenTimeDatabase(context: Context) : SQLiteOpenHelper(
++    context.applicationContext,
++    DATABASE_NAME,
++    null,
++    DATABASE_VERSION
++) {
++
++    override fun onCreate(db: SQLiteDatabase) {
++        db.execSQL(
++            """
++            CREATE TABLE IF NOT EXISTS usage_day (
++                day_start INTEGER NOT NULL PRIMARY KEY,
++                total_duration INTEGER NOT NULL,
++                updated_at INTEGER NOT NULL
++            )
++            """.trimIndent()
++        )
++        db.execSQL(
++            """
++            CREATE TABLE IF NOT EXISTS usage_hour (
++                day_start INTEGER NOT NULL,
++                hour INTEGER NOT NULL,
++                duration INTEGER NOT NULL,
++                PRIMARY KEY (day_start, hour)
++            )
++            """.trimIndent()
++        )
++        db.execSQL(
++            """
++            CREATE TABLE IF NOT EXISTS usage_app_day (
++                day_start INTEGER NOT NULL,
++                package_name TEXT NOT NULL,
++                app_name TEXT NOT NULL,
++                duration INTEGER NOT NULL,
++                PRIMARY KEY (day_start, package_name)
++            )
++            """.trimIndent()
++        )
++        db.execSQL(
++            "CREATE INDEX IF NOT EXISTS index_usage_app_day_package ON usage_app_day(package_name)"
++        )
++    }
++
++    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
++        // Version 1 is the initial schema. Future migrations go here.
++    }
++
++    companion object {
++        const val DATABASE_NAME = "screen_time_history.db"
++        const val DATABASE_VERSION = 1
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt b/app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt
+new file mode 100644
+index 0000000..dcc0ffa
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt
+@@ -0,0 +1,153 @@
++package com.atharok.screentime.data.database
++
++import android.content.ContentValues
++import android.database.sqlite.SQLiteDatabase
++import com.atharok.screentime.domain.entities.analysis.AppUsageTotal
++
++data class AppUsageEntry(
++    val packageName: String,
++    val appName: String,
++    val duration: Long
++)
++
++class UsageHistoryDao(private val database: ScreenTimeDatabase) {
++
++    fun getDayTotal(dayStart: Long): Long? {
++        database.readableDatabase.rawQuery(
++            "SELECT total_duration FROM usage_day WHERE day_start = ? LIMIT 1",
++            arrayOf(dayStart.toString())
++        ).use { cursor ->
++            return if (cursor.moveToFirst()) cursor.getLong(0) else null
++        }
++    }
++
++    fun replaceDay(
++        dayStart: Long,
++        totalDuration: Long,
++        hourlyDurations: LongArray,
++        apps: List<AppUsageEntry>,
++        updatedAt: Long
++    ) {
++        val db = database.writableDatabase
++        db.beginTransaction()
++        try {
++            db.insertWithOnConflict(
++                "usage_day",
++                null,
++                ContentValues().apply {
++                    put("day_start", dayStart)
++                    put("total_duration", totalDuration)
++                    put("updated_at", updatedAt)
++                },
++                SQLiteDatabase.CONFLICT_REPLACE
++            )
++            db.delete("usage_hour", "day_start = ?", arrayOf(dayStart.toString()))
++            db.delete("usage_app_day", "day_start = ?", arrayOf(dayStart.toString()))
++
++            for (hour in hourlyDurations.indices) {
++                val duration = hourlyDurations[hour]
++                if (duration <= 0L) continue
++                db.insertWithOnConflict(
++                    "usage_hour",
++                    null,
++                    ContentValues().apply {
++                        put("day_start", dayStart)
++                        put("hour", hour)
++                        put("duration", duration)
++                    },
++                    SQLiteDatabase.CONFLICT_REPLACE
++                )
++            }
++
++            apps.forEach { app ->
++                if (app.duration <= 0L) return@forEach
++                db.insertWithOnConflict(
++                    "usage_app_day",
++                    null,
++                    ContentValues().apply {
++                        put("day_start", dayStart)
++                        put("package_name", app.packageName)
++                        put("app_name", app.appName)
++                        put("duration", app.duration)
++                    },
++                    SQLiteDatabase.CONFLICT_REPLACE
++                )
++            }
++
++            db.setTransactionSuccessful()
++        } finally {
++            db.endTransaction()
++        }
++    }
++
++    fun getDayTotals(startDay: Long, endDay: Long): Map<Long, Long> {
++        val result = LinkedHashMap<Long, Long>()
++        database.readableDatabase.rawQuery(
++            "SELECT day_start, total_duration FROM usage_day " +
++                "WHERE day_start BETWEEN ? AND ? ORDER BY day_start",
++            arrayOf(startDay.toString(), endDay.toString())
++        ).use { cursor ->
++            while (cursor.moveToNext()) {
++                result[cursor.getLong(0)] = cursor.getLong(1)
++            }
++        }
++        return result
++    }
++
++    fun getHourlyTotals(startDay: Long, endDay: Long): Map<Long, LongArray> {
++        val result = LinkedHashMap<Long, LongArray>()
++        database.readableDatabase.rawQuery(
++            "SELECT day_start, hour, duration FROM usage_hour " +
++                "WHERE day_start BETWEEN ? AND ? ORDER BY day_start, hour",
++            arrayOf(startDay.toString(), endDay.toString())
++        ).use { cursor ->
++            while (cursor.moveToNext()) {
++                val day = cursor.getLong(0)
++                val hour = cursor.getInt(1)
++                val duration = cursor.getLong(2)
++                if (hour in 0..23) {
++                    result.getOrPut(day) { LongArray(24) }[hour] = duration
++                }
++            }
++        }
++        return result
++    }
++
++    fun getAppTotals(startDay: Long, endDay: Long, limit: Int): List<AppUsageTotal> {
++        val result = mutableListOf<AppUsageTotal>()
++        database.readableDatabase.rawQuery(
++            "SELECT package_name, MAX(app_name), SUM(duration), COUNT(DISTINCT day_start) " +
++                "FROM usage_app_day WHERE day_start BETWEEN ? AND ? " +
++                "GROUP BY package_name ORDER BY SUM(duration) DESC LIMIT ?",
++            arrayOf(startDay.toString(), endDay.toString(), limit.toString())
++        ).use { cursor ->
++            while (cursor.moveToNext()) {
++                result += AppUsageTotal(
++                    packageName = cursor.getString(0),
++                    appName = cursor.getString(1) ?: cursor.getString(0),
++                    duration = cursor.getLong(2),
++                    daysUsed = cursor.getInt(3)
++                )
++            }
++        }
++        return result
++    }
++
++    fun getEarliestDay(): Long? {
++        database.readableDatabase.rawQuery(
++            "SELECT MIN(day_start) FROM usage_day WHERE total_duration > 0",
++            null
++        ).use { cursor ->
++            return if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
++        }
++    }
++
++    fun getLastUpdated(): Long? {
++        database.readableDatabase.rawQuery(
++            "SELECT MAX(updated_at) FROM usage_day",
++            null
++        ).use { cursor ->
++            return if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt b/app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt
+new file mode 100644
+index 0000000..0f67839
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt
+@@ -0,0 +1,126 @@
++package com.atharok.screentime.data.repositories
++
++import android.content.Context
++import com.atharok.screentime.common.extensions.getApplicationName
++import com.atharok.screentime.common.utils.DateTimeUtils
++import com.atharok.screentime.data.database.AppUsageEntry
++import com.atharok.screentime.data.database.UsageHistoryDao
++import com.atharok.screentime.data.statsTracker.UsageStatsTracker
++import com.atharok.screentime.domain.entities.analysis.AppUsageTotal
++import com.atharok.screentime.domain.repositories.UsageHistoryRepository
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.IO
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import kotlinx.coroutines.withContext
++
++class UsageHistoryRepositoryImpl(
++    private val context: Context,
++    private val tracker: UsageStatsTracker,
++    private val dao: UsageHistoryDao
++) : UsageHistoryRepository {
++
++    private val refreshMutex = Mutex()
++    private var lastRefreshAt: Long = 0L
++
++    override suspend fun refreshHistory(
++        days: Int,
++        ignoreSystemApps: Boolean,
++        ignoredPackages: List<String>,
++        force: Boolean
++    ): Boolean = withContext(Dispatchers.IO) {
++        refreshMutex.withLock {
++            val now = System.currentTimeMillis()
++            if (!force && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) {
++                return@withLock false
++            }
++
++            val today = DateTimeUtils.truncateToDay(now)
++            val lastPersistedDay = dao.getLastUpdated()?.let { DateTimeUtils.truncateToDay(it) }
++            val scanDays = if (lastPersistedDay == null) {
++                days
++            } else {
++                val daysSinceLastUpdate = ((today - lastPersistedDay) / MILLIS_IN_A_DAY).toInt() + 2
++                daysSinceLastUpdate.coerceIn(MIN_SCAN_DAYS, days)
++            }
++            val start = DateTimeUtils.addDaysToTimestamp(today, -(scanDays - 1))
++
++            val usageIntervals = tracker.calculateUsageIntervalsByPackage(
++                startTimestamp = start,
++                endTimestamp = now,
++                ignoreSystemApps = ignoreSystemApps,
++                ignoredPackages = ignoredPackages
++            )
++            val durationsPerPackage = tracker.getDurationPerPackageByDayAndHour(
++                startTimestamp = start,
++                endTimestamp = now,
++                usageIntervalsByPackage = usageIntervals
++            )
++            val totalByDay = tracker.getTotalDurationByDayAndHour(
++                startTimestamp = start,
++                endTimestamp = now,
++                usageIntervalsByPackage = usageIntervals
++            )
++
++            val nameCache = HashMap<String, String>()
++            totalByDay.forEach { (dayStart, hourlyDurations) ->
++                val totalDuration = hourlyDurations.sum()
++                val existing = dao.getDayTotal(dayStart)
++                val isToday = dayStart == today
++
++                // Never replace an existing historical value with a lower one: the system
++                // event log is finite and uninstalling an app removes its events.
++                if (!isToday && existing != null && totalDuration <= existing) {
++                    return@forEach
++                }
++                if (!isToday && existing == null && totalDuration <= 0L) {
++                    return@forEach
++                }
++
++                val apps = durationsPerPackage.mapNotNull { (packageName, durationsByDay) ->
++                    val duration = durationsByDay[dayStart]?.sum() ?: 0L
++                    if (duration <= 0L) {
++                        null
++                    } else {
++                        val appName = nameCache.getOrPut(packageName) {
++                            context.packageManager.getApplicationName(packageName) ?: packageName
++                        }
++                        AppUsageEntry(packageName, appName, duration)
++                    }
++                }
++
++                dao.replaceDay(
++                    dayStart = dayStart,
++                    totalDuration = totalDuration,
++                    hourlyDurations = hourlyDurations,
++                    apps = apps,
++                    updatedAt = now
++                )
++            }
++
++            lastRefreshAt = now
++            true
++        }
++    }
++
++    override suspend fun getDayTotals(startDay: Long, endDay: Long): Map<Long, Long> =
++        withContext(Dispatchers.IO) { dao.getDayTotals(startDay, endDay) }
++
++    override suspend fun getHourlyTotals(startDay: Long, endDay: Long): Map<Long, LongArray> =
++        withContext(Dispatchers.IO) { dao.getHourlyTotals(startDay, endDay) }
++
++    override suspend fun getAppTotals(startDay: Long, endDay: Long, limit: Int): List<AppUsageTotal> =
++        withContext(Dispatchers.IO) { dao.getAppTotals(startDay, endDay, limit) }
++
++    override suspend fun getEarliestDay(): Long? =
++        withContext(Dispatchers.IO) { dao.getEarliestDay() }
++
++    override suspend fun getLastUpdated(): Long? =
++        withContext(Dispatchers.IO) { dao.getLastUpdated() }
++
++    companion object {
++        private const val MIN_REFRESH_INTERVAL_MS = 15L * 60L * 1000L
++        private const val MIN_SCAN_DAYS = 2
++        private const val MILLIS_IN_A_DAY = 24L * 60L * 60L * 1000L
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt b/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt
+new file mode 100644
+index 0000000..ae5b053
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt
+@@ -0,0 +1,46 @@
++package com.atharok.screentime.data.workers
++
++import android.content.Context
++import androidx.work.Constraints
++import androidx.work.ExistingPeriodicWorkPolicy
++import androidx.work.PeriodicWorkRequestBuilder
++import androidx.work.WorkManager
++import java.util.Calendar
++import java.util.concurrent.TimeUnit
++
++object UsageHistoryScheduler {
++
++    private const val WORK_NAME = "usage_history_periodic_work"
++
++    fun schedule(context: Context) {
++        val request = PeriodicWorkRequestBuilder<UsageHistoryWorker>(24, TimeUnit.HOURS)
++            .setInitialDelay(millisUntilNextRun(), TimeUnit.MILLISECONDS)
++            .setConstraints(
++                Constraints.Builder()
++                    .setRequiresBatteryNotLow(true)
++                    .build()
++            )
++            .build()
++
++        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
++            WORK_NAME,
++            ExistingPeriodicWorkPolicy.UPDATE,
++            request
++        )
++    }
++
++    private fun millisUntilNextRun(): Long {
++        val now = System.currentTimeMillis()
++        val target = Calendar.getInstance().apply {
++            timeInMillis = now
++            set(Calendar.HOUR_OF_DAY, 0)
++            set(Calendar.MINUTE, 5)
++            set(Calendar.SECOND, 0)
++            set(Calendar.MILLISECOND, 0)
++        }
++        if (target.timeInMillis <= now) {
++            target.add(Calendar.DAY_OF_YEAR, 1)
++        }
++        return target.timeInMillis - now
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryWorker.kt b/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryWorker.kt
+new file mode 100644
+index 0000000..39a94b1
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryWorker.kt
+@@ -0,0 +1,22 @@
++package com.atharok.screentime.data.workers
++
++import android.content.Context
++import androidx.work.CoroutineWorker
++import androidx.work.WorkerParameters
++import com.atharok.screentime.domain.usecases.UsageHistoryUseCase
++import org.koin.core.context.GlobalContext
++
++class UsageHistoryWorker(
++    appContext: Context,
++    params: WorkerParameters
++) : CoroutineWorker(appContext, params) {
++
++    override suspend fun doWork(): Result {
++        return try {
++            GlobalContext.get().get<UsageHistoryUseCase>().refresh(force = true)
++            Result.success()
++        } catch (e: Exception) {
++            Result.retry()
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/domain/entities/analysis/UsageAnalysis.kt b/app/src/main/java/com/atharok/screentime/domain/entities/analysis/UsageAnalysis.kt
+new file mode 100644
+index 0000000..b3e6f16
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/domain/entities/analysis/UsageAnalysis.kt
+@@ -0,0 +1,73 @@
++package com.atharok.screentime.domain.entities.analysis
++
++enum class AnalysisRange(val days: Int?) {
++    WEEK(7),
++    MONTH(30),
++    QUARTER(90),
++    ALL(null)
++}
++
++data class DailyUsagePoint(
++    val dayStart: Long,
++    val duration: Long
++)
++
++data class AppUsageTotal(
++    val packageName: String,
++    val appName: String,
++    val duration: Long,
++    val daysUsed: Int
++)
++
++data class UsageAnalysis(
++    val range: AnalysisRange,
++    val startDay: Long,
++    val endDay: Long,
++    val daily: List<DailyUsagePoint>,
++    val hourlyAverage: LongArray,
++    val weekdayAverage: LongArray,
++    val topApps: List<AppUsageTotal>,
++    val totalDuration: Long,
++    val averageDaily: Long,
++    val previousAverageDaily: Long?,
++    val bestDay: DailyUsagePoint?,
++    val daysWithData: Int,
++    val lastUpdated: Long?
++) {
++    val hasData: Boolean get() = totalDuration > 0
++
++    override fun equals(other: Any?): Boolean {
++        if (this === other) return true
++        if (other !is UsageAnalysis) return false
++        return range == other.range &&
++            startDay == other.startDay &&
++            endDay == other.endDay &&
++            daily == other.daily &&
++            hourlyAverage.contentEquals(other.hourlyAverage) &&
++            weekdayAverage.contentEquals(other.weekdayAverage) &&
++            topApps == other.topApps &&
++            totalDuration == other.totalDuration &&
++            averageDaily == other.averageDaily &&
++            previousAverageDaily == other.previousAverageDaily &&
++            bestDay == other.bestDay &&
++            daysWithData == other.daysWithData &&
++            lastUpdated == other.lastUpdated
++    }
++
++    override fun hashCode(): Int {
++        var result = range.hashCode()
++        result = 31 * result + startDay.hashCode()
++        result = 31 * result + endDay.hashCode()
++        result = 31 * result + daily.hashCode()
++        result = 31 * result + hourlyAverage.contentHashCode()
++        result = 31 * result + weekdayAverage.contentHashCode()
++        result = 31 * result + topApps.hashCode()
++        result = 31 * result + totalDuration.hashCode()
++        result = 31 * result + averageDaily.hashCode()
++        result = 31 * result + (previousAverageDaily?.hashCode() ?: 0)
++        result = 31 * result + (bestDay?.hashCode() ?: 0)
++        result = 31 * result + daysWithData
++        result = 31 * result + (lastUpdated?.hashCode() ?: 0)
++        return result
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt b/app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt
+new file mode 100644
+index 0000000..85b93ca
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt
+@@ -0,0 +1,27 @@
++package com.atharok.screentime.domain.repositories
++
++import com.atharok.screentime.domain.entities.analysis.AppUsageTotal
++
++interface UsageHistoryRepository {
++
++    /**
++     * Scans the system usage events and persists per-day, per-hour and per-app totals.
++     * Historical rows are never downgraded, so data survives event retention limits.
++     */
++    suspend fun refreshHistory(
++        days: Int,
++        ignoreSystemApps: Boolean,
++        ignoredPackages: List<String>,
++        force: Boolean = false
++    ): Boolean
++
++    suspend fun getDayTotals(startDay: Long, endDay: Long): Map<Long, Long>
++
++    suspend fun getHourlyTotals(startDay: Long, endDay: Long): Map<Long, LongArray>
++
++    suspend fun getAppTotals(startDay: Long, endDay: Long, limit: Int): List<AppUsageTotal>
++
++    suspend fun getEarliestDay(): Long?
++
++    suspend fun getLastUpdated(): Long?
++}
+diff --git a/app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt b/app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt
+new file mode 100644
+index 0000000..2668362
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt
+@@ -0,0 +1,149 @@
++package com.atharok.screentime.domain.usecases
++
++import com.atharok.screentime.common.utils.DateTimeUtils
++import com.atharok.screentime.domain.entities.analysis.AnalysisRange
++import com.atharok.screentime.domain.entities.analysis.DailyUsagePoint
++import com.atharok.screentime.domain.entities.analysis.UsageAnalysis
++import com.atharok.screentime.domain.repositories.UsageHistoryRepository
++import kotlinx.coroutines.flow.first
++import java.util.Calendar
++
++class UsageHistoryUseCase(
++    private val repository: UsageHistoryRepository,
++    private val settingsUseCase: SettingsUseCase
++) {
++
++    suspend fun refresh(force: Boolean = false, days: Int = DEFAULT_HISTORY_DAYS): Boolean {
++        val ignoreSystemApps = settingsUseCase.shouldIgnoreSystemApps().first()
++        val ignoredPackages = try {
++            settingsUseCase.getIgnoredPackages().first()
++        } catch (_: Exception) {
++            emptyList()
++        }
++        return repository.refreshHistory(
++            days = days,
++            ignoreSystemApps = ignoreSystemApps,
++            ignoredPackages = ignoredPackages,
++            force = force
++        )
++    }
++
++    suspend fun getLastUpdated(): Long? = repository.getLastUpdated()
++
++    suspend fun getAnalysis(range: AnalysisRange): UsageAnalysis {
++        val today = DateTimeUtils.truncateToDay(System.currentTimeMillis())
++        val earliest = repository.getEarliestDay()
++        val dayCount = when (val requested = range.days) {
++            null -> {
++                earliest?.let { calculateDayCount(it, today) } ?: 0
++            }
++            else -> requested
++        }
++
++        if (dayCount <= 0) {
++            return emptyAnalysis(range, today)
++        }
++
++        val start = DateTimeUtils.addDaysToTimestamp(today, -(dayCount - 1))
++        val totals = repository.getDayTotals(start, today)
++        val hourlyTotals = repository.getHourlyTotals(start, today)
++        val topApps = repository.getAppTotals(start, today, TOP_APPS_LIMIT)
++        val lastUpdated = repository.getLastUpdated()
++
++        val daily = ArrayList<DailyUsagePoint>(dayCount)
++        var cursor = start
++        while (cursor <= today) {
++            daily += DailyUsagePoint(cursor, totals[cursor] ?: 0L)
++            cursor = DateTimeUtils.addDaysToTimestamp(cursor, 1)
++        }
++
++        val totalDuration = daily.sumOf { it.duration }
++        val averageDaily = if (daily.isEmpty()) 0L else totalDuration / daily.size
++
++        val weekdaySums = LongArray(7)
++        val weekdayCounts = IntArray(7)
++        daily.forEach { point ->
++            val index = weekdayIndex(point.dayStart)
++            weekdaySums[index] += point.duration
++            weekdayCounts[index]++
++        }
++        val weekdayAverage = LongArray(7) { index ->
++            if (weekdayCounts[index] == 0) 0L else weekdaySums[index] / weekdayCounts[index]
++        }
++
++        val hourSums = LongArray(24)
++        hourlyTotals.values.forEach { hours ->
++            for (hour in 0..23) {
++                hourSums[hour] += hours[hour]
++            }
++        }
++        val hourlyAverage = LongArray(24) { hour ->
++            if (daily.isEmpty()) 0L else hourSums[hour] / daily.size
++        }
++
++        val previousAverage = if (range.days != null) {
++            val previousEnd = DateTimeUtils.addDaysToTimestamp(start, -1)
++            val previousStart = DateTimeUtils.addDaysToTimestamp(previousEnd, -(dayCount - 1))
++            val previousTotals = repository.getDayTotals(previousStart, previousEnd)
++            if (previousTotals.isEmpty()) null else previousTotals.values.sum() / dayCount
++        } else {
++            null
++        }
++
++        return UsageAnalysis(
++            range = range,
++            startDay = start,
++            endDay = today,
++            daily = daily,
++            hourlyAverage = hourlyAverage,
++            weekdayAverage = weekdayAverage,
++            topApps = topApps,
++            totalDuration = totalDuration,
++            averageDaily = averageDaily,
++            previousAverageDaily = previousAverage,
++            bestDay = daily.maxByOrNull { it.duration },
++            daysWithData = daily.count { it.duration > 0L },
++            lastUpdated = lastUpdated
++        )
++    }
++
++    private fun calculateDayCount(earliestDay: Long, today: Long): Int {
++        var count = 1
++        var cursor = earliestDay
++        while (cursor < today && count < MAX_HISTORY_DAYS) {
++            cursor = DateTimeUtils.addDaysToTimestamp(cursor, 1)
++            count++
++        }
++        return count
++    }
++
++    private fun weekdayIndex(dayStart: Long): Int {
++        val calendar = Calendar.getInstance().apply { timeInMillis = dayStart }
++        // Calendar.SUNDAY == 1 … Calendar.SATURDAY == 7. Monday-first index:
++        return (calendar.get(Calendar.DAY_OF_WEEK) + 5) % 7
++    }
++
++    private fun emptyAnalysis(range: AnalysisRange, today: Long): UsageAnalysis {
++        return UsageAnalysis(
++            range = range,
++            startDay = today,
++            endDay = today,
++            daily = emptyList(),
++            hourlyAverage = LongArray(24),
++            weekdayAverage = LongArray(7),
++            topApps = emptyList(),
++            totalDuration = 0L,
++            averageDaily = 0L,
++            previousAverageDaily = null,
++            bestDay = null,
++            daysWithData = 0,
++            lastUpdated = null
++        )
++    }
++
++    companion object {
++        const val DEFAULT_HISTORY_DAYS = 90
++        private const val MAX_HISTORY_DAYS = 3650
++        private const val TOP_APPS_LIMIT = 10
++    }
++}

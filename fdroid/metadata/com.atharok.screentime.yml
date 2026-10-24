@@ -1,0 +1,32 @@
+Categories:
+  - System
+  - Time Tracker
+License: GPL-3.0-or-later
+AuthorName: Atharok
+AuthorEmail: atharok@duck.com
+Name: Screen Time
+Summary: Easily track the time you spend on your device and apps.
+Description: |
+  Screen Time is a simple app that lets you easily track the time you spend on your device and apps.
+  
+  Features:
+  
+  - Displays total screen time for your device over the past week or for a chosen day.
+  - Comparative graph showing screen time across different days of the week.
+  - Comparative graph displaying screen time for each hour of the day.
+  - Ability to view screen time and comparative graphs for each individual app.
+  - Comparative list of screen time for each app, sorted from the most used to the least used during the chosen period.
+  - Simple and modern interface.
+  - Home screen widget.
+  - No ads.
+  - No data collection (internet permissions disabled).
+  - Open source.
+  - Developed in Kotlin with Jetpack Compose and Material 3.
+  
+  The source code is available here: https://gitlab.com/Atharok/ScreenTime
+SourceCode: https://gitlab.com/Atharok/ScreenTime
+IssueTracker: https://gitlab.com/Atharok/ScreenTime/-/issues
+RepoType: git
+Repo: https://gitlab.com/Atharok/ScreenTime.git
+UpdateCheckMode: None
+AutoUpdateMode: None

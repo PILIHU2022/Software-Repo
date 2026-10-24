@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:30:48 +0800
+Subject: [PATCH] Fix chart bars using hours on a minutes axis
+
+---
+ app/src/main/java/com/atharok/screentime/ui/views/Chart.kt | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+index 1d22874..358a896 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+@@ -178,7 +178,8 @@ fun Chart(
+         val radius = CornerRadius(radiusPx, radiusPx)
+         values.forEachIndexed { index, value ->
+             if (value <= 0f) return@forEachIndexed
+-            val barHeight = (value / maxMinutes) * plotHeight
++            // Chart values are durations in hours; the axis is in minutes.
++            val barHeight = (value * 60f / maxMinutes) * plotHeight
+             if (barHeight <= 0f) return@forEachIndexed
+             val left = plotLeft + index * slot + (slot - barWidth) / 2f
+             drawRoundRect(

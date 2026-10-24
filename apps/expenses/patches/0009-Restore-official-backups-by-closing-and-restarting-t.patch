@@ -1,0 +1,245 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:46:12 +0800
+Subject: [PATCH] Restore official backups by closing and restarting the
+ database process
+
+---
+ app/build.gradle.kts                          |  1 +
+ .../de/dbauer/expensetracker/MainActivity.kt  | 47 ++++++++++++++--
+ .../model/DatabaseBackupRestore.kt            | 55 ++++++++++++++++---
+ .../dbauer/expensetracker/shared/di/Module.kt |  5 +-
+ 4 files changed, 92 insertions(+), 16 deletions(-)
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index d87ad8b..8c40201 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -78,6 +78,7 @@ androidComponents {
+ 
+ dependencies {
+     implementation(project(":shared"))
++    implementation(libs.room.runtime)
+ 
+     implementation(libs.compose.components.resources)
+     implementation(libs.compose.foundation)
+diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
+index fb9ad63..8b0f812 100644
+--- a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
++++ b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
+@@ -2,6 +2,8 @@ package de.dbauer.expensetracker
+ 
+ import Constants
+ import android.Manifest
++import android.app.AlarmManager
++import android.app.PendingIntent
+ import android.content.ActivityNotFoundException
+ import android.content.Context
+ import android.content.Intent
+@@ -50,6 +52,7 @@ import de.dbauer.expensetracker.shared.data.HomePane
+ import de.dbauer.expensetracker.shared.data.MainNavRoute
+ import de.dbauer.expensetracker.shared.data.UpcomingPane
+ import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
++import de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase
+ import de.dbauer.expensetracker.shared.model.notification.ExpenseNotificationManager
+ import de.dbauer.expensetracker.shared.ui.DefaultTab
+ import de.dbauer.expensetracker.shared.ui.MainContent
+@@ -73,10 +76,12 @@ import recurringexpensetracker.shared.generated.resources.settings_backup_not_cr
+ import recurringexpensetracker.shared.generated.resources.settings_backup_not_restored_toast
+ import recurringexpensetracker.shared.generated.resources.settings_backup_restored_toast
+ import java.io.File
++import kotlin.system.exitProcess
+ 
+ class MainActivity : AppCompatActivity() {
+     private val databasePath by lazy { getDatabasePath(Constants.DATABASE_NAME).path }
+     private val userPreferencesRepository = get<IUserPreferencesRepository>()
++    private val database = get<RecurringExpenseDatabase>()
+     private val expenseNotificationManager = get<ExpenseNotificationManager>()
+     private val mainActivityViewModel: MainActivityViewModel by viewModels()
+ 
+@@ -240,11 +245,11 @@ class MainActivity : AppCompatActivity() {
+                                 }.asString()
+                             Toast.makeText(this@MainActivity, toastString, Toast.LENGTH_LONG).show()
+ 
+-                            if (backupRestored) {
+-                                // Restart Activity after restoring backup to make sure the repository is updated
+-                                finish()
+-                                startActivity(Intent(this@MainActivity, MainActivity::class.java))
+-                            }
++                            // The live Room connection was closed before the database files were
++                            // replaced. Only a fresh process can reopen the restored (possibly
++                            // older-schema) database and run its migrations, so relaunch the app
++                            // in a new process instead of just recreating the Activity.
++                            restartApplicationProcess()
+                         }
+                     }
+                 }
+@@ -322,7 +327,14 @@ class MainActivity : AppCompatActivity() {
+                                 backupPathLauncher.launch(Constants.DEFAULT_BACKUP_NAME)
+                             },
+                             onClickRestore = {
+-                                importPathLauncher.launch(arrayOf(Constants.BACKUP_MIME_TYPE))
++                                importPathLauncher.launch(
++                                arrayOf(
++                                    Constants.BACKUP_MIME_TYPE,
++                                    "application/zip",
++                                    "application/x-zip-compressed",
++                                    "*/*",
++                                ),
++                            )
+                             },
+                             updateWidget = {
+                                 lifecycleScope.launch(Dispatchers.Main.immediate) {
+@@ -343,6 +355,29 @@ class MainActivity : AppCompatActivity() {
+         }
+     }
+ 
++    private fun restartApplicationProcess() {
++        val launchIntent =
++            packageManager.getLaunchIntentForPackage(packageName)?.apply {
++                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
++            }
++        if (launchIntent != null) {
++            val pendingIntent =
++                PendingIntent.getActivity(
++                    this,
++                    0,
++                    launchIntent,
++                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
++                )
++            getSystemService(AlarmManager::class.java).set(
++                AlarmManager.RTC,
++                System.currentTimeMillis() + 800L,
++                pendingIntent,
++            )
++        }
++        finishAffinity()
++        exitProcess(0)
++    }
++
+     private suspend fun triggerAuthPrompt() {
+         biometricPromptManager.showBiometricPrompt(
+             title = Res.string.biometric_prompt_manager_title.asString(),
+diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/model/DatabaseBackupRestore.kt b/app/src/main/kotlin/de/dbauer/expensetracker/model/DatabaseBackupRestore.kt
+index efdf98f..8f9f9ef 100644
+--- a/app/src/main/kotlin/de/dbauer/expensetracker/model/DatabaseBackupRestore.kt
++++ b/app/src/main/kotlin/de/dbauer/expensetracker/model/DatabaseBackupRestore.kt
+@@ -1,8 +1,10 @@
+ package de.dbauer.expensetracker.model
+ 
++import Constants
+ import android.content.Context
+ import android.net.Uri
+ import de.dbauer.expensetracker.shared.forEachEntry
++import de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+ import java.io.File
+@@ -10,7 +12,9 @@ import java.util.zip.ZipEntry
+ import java.util.zip.ZipInputStream
+ import java.util.zip.ZipOutputStream
+ 
+-class DatabaseBackupRestore {
++class DatabaseBackupRestore(
++    private val database: RecurringExpenseDatabase? = null,
++) {
+     suspend fun exportDatabaseFile(
+         databasePath: String,
+         targetUri: Uri,
+@@ -30,22 +34,57 @@ class DatabaseBackupRestore {
+             }
+         }
+ 
++    /**
++     * Restores a backup into the live database.
++     *
++     * The backup is a zip of the SQLite files (main + wal/shm). We extract it to a temporary
++     * directory first, then close the open Room connection and replace the files. Replacing
++     * files while Room still has the old database open leaves the app reading stale data (the
++     * official backup database is schema v11, while this build is v12 and must migrate on the
++     * next open). The caller must restart the process after this method returns.
++     */
+     suspend fun importDatabaseFile(
+         srcZipUri: Uri,
+         targetPath: String,
+         applicationContext: Context,
+     ): Boolean =
+         withContext(Dispatchers.IO) {
++            val tempDir = File(applicationContext.cacheDir, "expense-restore-${System.nanoTime()}")
+             return@withContext try {
+-                extractZipToDirectory(
+-                    srcZipUri,
+-                    targetPath,
+-                    applicationContext,
+-                )
++                tempDir.mkdirs()
++                extractZipToDirectory(srcZipUri, tempDir.absolutePath, applicationContext)
++                val backupDatabase = File(tempDir, Constants.DATABASE_NAME)
++                if (!backupDatabase.isFile) {
++                    throw IllegalStateException("Backup does not contain ${Constants.DATABASE_NAME}")
++                }
++
++                // Stop Room from touching the files while they are replaced. The process is
++                // restarted by the caller immediately afterwards.
++                runCatching { database?.close() }
++
++                val targetDirectory = File(targetPath)
++                // Stale sidecar files belong to the old database connection and must not be
++                // replayed against the restored main file.
++                listOf("-wal", "-shm", "-journal").forEach { suffix ->
++                    File(targetDirectory, "${Constants.DATABASE_NAME}$suffix").delete()
++                }
++                backupDatabase.parentFile
++                    ?.listFiles()
++                    .orEmpty()
++                    .filter { it.name == Constants.DATABASE_NAME || it.name.startsWith("${Constants.DATABASE_NAME}-") }
++                    .forEach { source ->
++                        source.inputStream().use { input ->
++                            File(targetDirectory, source.name).outputStream().use { output ->
++                                input.copyTo(output)
++                            }
++                        }
++                    }
+                 true
+             } catch (e: Exception) {
+                 e.printStackTrace()
+                 false
++            } finally {
++                tempDir.deleteRecursively()
+             }
+         }
+ 
+@@ -58,6 +97,7 @@ class DatabaseBackupRestore {
+         ZipOutputStream(outputStream).use { zipOutputStream ->
+             files.forEach { file ->
+                 val inputFile = File(file)
++                if (!inputFile.isFile) return@forEach
+                 val fileName = inputFile.name
+ 
+                 zipOutputStream.putNextEntry(ZipEntry(fileName))
+@@ -74,7 +114,8 @@ class DatabaseBackupRestore {
+         targetPath: String,
+         applicationContext: Context,
+     ) {
+-        val inputStream = applicationContext.contentResolver.openInputStream(srcZipUri) ?: return
++        val inputStream = applicationContext.contentResolver.openInputStream(srcZipUri)
++            ?: throw IllegalStateException("Cannot open backup file")
+         ZipInputStream(inputStream).use { zipInputStream ->
+             zipInputStream.forEachEntry { entry ->
+                 val outputFile = File(targetPath, entry.name)
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt
+index 1797890..048d3df 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt
+@@ -33,9 +33,8 @@ expect val platformModule: Module
+ val sharedModule =
+     module {
+         singleOf(::ExpenseRepository).bind<IExpenseRepository>()
+-        single {
+-            RecurringExpenseDatabase.getRecurringExpenseDatabase(get()).recurringExpenseDao()
+-        }.bind<RecurringExpenseDao>()
++        single { RecurringExpenseDatabase.getRecurringExpenseDatabase(get()) }
++        single { get<RecurringExpenseDatabase>().recurringExpenseDao() }.bind<RecurringExpenseDao>()
+         viewModelOf(::RecurringExpenseViewModel)
+         viewModelOf(::UpcomingPaymentsViewModel)
+         viewModel { (expenseId: Int?) ->

@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:55:02 +0800
+Subject: [PATCH] Infer icons for restored expenses and generic categories
+
+---
+ .../shared/data/ExpenseServiceNameMatcher.kt  | 40 ++++++++++++++++++-
+ .../RecurringExpenseWithTagsMapper.kt         |  6 ++-
+ .../data/ExpenseServiceNameMatcherTest.kt     | 19 +++++++--
+ .../EditRecurringExpenseViewModelTest.kt      |  2 +-
+ 4 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt
+index f251875..2dd8087 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcher.kt
+@@ -25,7 +25,14 @@ object ExpenseServiceNameMatcher {
+     private val aliases: List<Alias> =
+         buildAliases()
+             .filter { ExpenseServiceCatalog.find(it.serviceId) != null }
+-            .sortedWith(compareByDescending<Alias> { it.words.size }.thenByDescending { it.text.length })
++            .sortedWith(
++                // Brand aliases always win over generic category words ("Netflix subscription"
++                // must remain Netflix, not generic_subscription), then prefer the most specific
++                // alias (more words, longer text).
++                compareBy<Alias> { it.serviceId.startsWith("generic_") }
++                    .thenByDescending { it.words.size }
++                    .thenByDescending { it.text.length },
++            )
+ 
+     /**
+      * Returns the built-in service whose brand is mentioned in [name], or `null` when there is
+@@ -185,6 +192,37 @@ object ExpenseServiceNameMatcher {
+         service("uber", "uber", "uber one", "uber eats", "ubereats")
+         service("tinder", "tinder", "tinder plus", "tinder gold", "tinder platinum")
+ 
++        // Generic categories for names that are not a specific subscription brand. These are
++        // intentionally conservative words (no "tv"/"max"/"app") so a custom expense name is
++        // not assigned a misleading brand icon.
++        service(
++            "generic_cloud",
++            "vps",
++            "服务器",
++            "云服务器",
++            "域名",
++            "网盘",
++            "云盘",
++            "云存储",
++            "百度网盘",
++            "百度网盘svip",
++            "百度云",
++            "阿里云盘",
++            "腾讯微云",
++            "夸克网盘",
++            "spaceship",
++            "racknerd",
++            "cloud storage",
++        )
++        service("generic_phone", "vodafone", "沃达丰", "话费", "流量", "运营商", "手机套餐")
++        service("generic_shopping", "闲鱼", "闲鱼充值", "充值", "购物", "淘宝", "京东")
++        service("generic_subscription", "会员", "订阅", "subscription")
++        service("generic_bank", "银行", "信用卡", "bank", "credit card")
++        service("generic_health", "保险", "insurance", "医疗")
++        service("generic_home", "房租", "租金", "rent")
++        service("generic_internet", "宽带", "internet", "wifi")
++        service("generic_utilities", "水电", "电费", "水费", "utilities")
++
+         return aliases
+     }
+ }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+index fcb1c38..f637334 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+@@ -1,6 +1,7 @@
+ package de.dbauer.expensetracker.shared.model.database
+ 
+ import de.dbauer.expensetracker.shared.data.CurrencyValue
++import de.dbauer.expensetracker.shared.data.ExpenseServiceNameMatcher
+ import de.dbauer.expensetracker.shared.data.Recurrence
+ import de.dbauer.expensetracker.shared.data.RecurringExpenseData
+ import kotlin.time.Instant
+@@ -29,7 +30,10 @@ internal fun RecurringExpenseWithTagsEntry.toRecurringExpenseData(
+         requireManualConfirmation = this.expense.requireManualConfirmation,
+         endDate = this.expense.endDate?.let { Instant.fromEpochMilliseconds(it) },
+         archivedDate = this.expense.archivedDate?.let { Instant.fromEpochMilliseconds(it) },
+-        serviceId = this.expense.serviceId,
++        // Backups created before the icon feature have no serviceId. Infer a sensible icon
++        // from the name for display; it is persisted the next time the expense is edited.
++        serviceId = this.expense.serviceId
++            ?: ExpenseServiceNameMatcher.find(this.expense.name.orEmpty())?.id,
+     )
+ }
+ 
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt
+index b21d6db..6a46e0d 100644
+--- a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt
+@@ -94,15 +94,27 @@ class ExpenseServiceNameMatcherTest {
+ 
+     @Test
+     fun `non brand names are not matched`() {
+-        assertNull(serviceId("Rent"))
++        assertEquals("generic_home", serviceId("Rent"))
+         assertNull(serviceId("Groceries"))
+-        assertNull(serviceId("Internet"))
++        assertEquals("generic_internet", serviceId("Internet"))
+         assertNull(serviceId("Gym membership"))
+         assertNull(serviceId(""))
+         assertNull(serviceId("   "))
+         assertNull(serviceId("!!!"))
+     }
+ 
++    @Test
++    fun `generic categories are matched for non brand names`() {
++        assertEquals("generic_cloud", serviceId("百度网盘SVIP"))
++        assertEquals("generic_cloud", serviceId("Racknerd VPS"))
++        assertEquals("generic_cloud", serviceId("Spaceship 域名"))
++        assertEquals("generic_shopping", serviceId("闲鱼充值"))
++        assertEquals("generic_phone", serviceId("Vodafone NL"))
++        assertEquals("generic_home", serviceId("房租"))
++        assertEquals("generic_health", serviceId("保险"))
++        assertEquals("generic_bank", serviceId("信用卡"))
++    }
++
+     @Test
+     fun `partial words are not matched`() {
+         assertNull(serviceId("Netflixx"))
+@@ -129,7 +141,8 @@ class ExpenseServiceNameMatcherTest {
+     @Test
+     fun `catalog extension works`() {
+         assertEquals("spotify", ExpenseServiceCatalog.findByName("Spotify Family")?.id)
+-        assertNull(ExpenseServiceCatalog.findByName("Rent"))
++        assertEquals("generic_home", ExpenseServiceCatalog.findByName("Rent")?.id)
++        assertNull(ExpenseServiceCatalog.findByName("Groceries"))
+     }
+ 
+     @Test
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt
+index 2bdbeac..a1ed05d 100644
+--- a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModelTest.kt
+@@ -898,7 +898,7 @@ class EditRecurringExpenseViewModelTest {
+             viewModel.onNameChanged("Netflix")
+             assertEquals("netflix", viewModel.selectedServiceId)
+ 
+-            viewModel.onNameChanged("Rent")
++            viewModel.onNameChanged("Groceries")
+ 
+             assertNull(viewModel.selectedServiceId)
+             assertFalse(viewModel.isServiceManuallySelected)

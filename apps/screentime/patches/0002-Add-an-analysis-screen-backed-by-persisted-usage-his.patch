@@ -1,0 +1,1125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 07:46:24 +0800
+Subject: [PATCH] Add an analysis screen backed by persisted usage history
+
+---
+ .../screentime/ScreenTimeApplication.kt       |  17 +
+ .../screentime/common/injections/Modules.kt   |  39 ++
+ .../screentime/common/utils/DateTimeUtils.kt  |  10 +
+ .../data/workers/UsageHistoryScheduler.kt     |   2 +-
+ .../viewmodel/AnalysisViewModel.kt            |  71 +++
+ .../atharok/screentime/ui/app/ComposeRoot.kt  |  17 +
+ .../atharok/screentime/ui/components/Text.kt  |   6 +-
+ .../screentime/ui/components/TopBarActions.kt |  14 +
+ .../ui/navigation/AppNavDestination.kt        |   1 +
+ .../screentime/ui/navigation/AppNavHost.kt    |  11 +
+ .../screentime/ui/screens/AnalysisScreen.kt   | 596 ++++++++++++++++++
+ .../ui/screens/DeviceUsageScreen.kt           |   7 +
+ app/src/main/res/values-zh-rCN/strings.xml    |  26 +
+ app/src/main/res/values/strings.xml           |  26 +
+ 14 files changed, 840 insertions(+), 3 deletions(-)
+ create mode 100644 app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt
+ create mode 100644 app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+
+diff --git a/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt b/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
+index d0b1e8d..757868a 100644
+--- a/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
++++ b/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
+@@ -2,15 +2,32 @@ package com.atharok.screentime
+ 
+ import android.app.Application
+ import com.atharok.screentime.common.injections.appModules
++import com.atharok.screentime.data.workers.UsageHistoryScheduler
++import com.atharok.screentime.domain.usecases.UsageHistoryUseCase
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.launch
+ import org.koin.android.ext.koin.androidContext
++import org.koin.core.context.GlobalContext
+ import org.koin.core.context.startKoin
+ 
+ class ScreenTimeApplication: Application() {
++
++    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++
+     override fun onCreate() {
+         super.onCreate()
+         startKoin {
+             androidContext(this@ScreenTimeApplication)
+             modules(appModules)
+         }
++
++        UsageHistoryScheduler.schedule(this)
++        applicationScope.launch {
++            runCatching {
++                GlobalContext.get().get<UsageHistoryUseCase>().refresh(force = false)
++            }
++        }
+     }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/common/injections/Modules.kt b/app/src/main/java/com/atharok/screentime/common/injections/Modules.kt
+index 611246a..4e99dfa 100644
+--- a/app/src/main/java/com/atharok/screentime/common/injections/Modules.kt
++++ b/app/src/main/java/com/atharok/screentime/common/injections/Modules.kt
+@@ -13,16 +13,22 @@ import com.atharok.screentime.common.utils.KOIN_SIMPLE_DATE_FORMAT
+ import com.atharok.screentime.common.utils.KOIN_SIMPLE_DAY_FORMAT
+ import com.atharok.screentime.common.utils.KOIN_SIMPLE_HOUR_FORMAT
+ import com.atharok.screentime.data.dataStore.SettingsDataStore
++import com.atharok.screentime.data.database.ScreenTimeDatabase
++import com.atharok.screentime.data.database.UsageHistoryDao
+ import com.atharok.screentime.data.repositories.DeviceUsageRepositoryImpl
++import com.atharok.screentime.data.repositories.UsageHistoryRepositoryImpl
+ import com.atharok.screentime.data.repositories.GlanceTodayDeviceUsageRepositoryImpl
+ import com.atharok.screentime.data.repositories.SettingsRepositoryImpl
+ import com.atharok.screentime.data.statsTracker.UsageStatsTracker
+ import com.atharok.screentime.domain.repositories.DeviceUsageRepository
++import com.atharok.screentime.domain.repositories.UsageHistoryRepository
+ import com.atharok.screentime.domain.repositories.GlanceTodayDeviceUsageRepository
+ import com.atharok.screentime.domain.repositories.SettingsRepository
+ import com.atharok.screentime.domain.usecases.DeviceUsageUseCase
++import com.atharok.screentime.domain.usecases.UsageHistoryUseCase
+ import com.atharok.screentime.domain.usecases.GlanceTodayDeviceUsageUseCase
+ import com.atharok.screentime.domain.usecases.SettingsUseCase
++import com.atharok.screentime.presentation.viewmodel.AnalysisViewModel
+ import com.atharok.screentime.presentation.viewmodel.DeviceUsageViewModel
+ import com.atharok.screentime.presentation.viewmodel.InstalledPackagesViewModel
+ import com.atharok.screentime.presentation.viewmodel.SettingsViewModel
+@@ -130,6 +136,12 @@ private val viewModelModule: Module = module {
+     viewModel {
+         InstalledPackagesViewModel()
+     }
++
++    viewModel {
++        AnalysisViewModel(
++            useCase = get<UsageHistoryUseCase>()
++        )
++    }
+ }
+ 
+ private val useCaseModule: Module = module {
+@@ -150,6 +162,13 @@ private val useCaseModule: Module = module {
+             repository = get<SettingsRepository>()
+         )
+     }
++
++    single {
++        UsageHistoryUseCase(
++            repository = get<UsageHistoryRepository>(),
++            settingsUseCase = get<SettingsUseCase>()
++        )
++    }
+ }
+ 
+ private val repositoryModule: Module = module {
+@@ -172,6 +191,14 @@ private val repositoryModule: Module = module {
+             settingsDataStore = get<SettingsDataStore>()
+         )
+     }
++
++    single<UsageHistoryRepository> {
++        UsageHistoryRepositoryImpl(
++            context = androidContext(),
++            tracker = get<UsageStatsTracker>(),
++            dao = get<UsageHistoryDao>()
++        )
++    }
+ }
+ 
+ private val dataModule: Module = module {
+@@ -188,4 +215,16 @@ private val dataModule: Module = module {
+             context = androidContext()
+         )
+     }
++
++    single {
++        ScreenTimeDatabase(
++            context = androidContext()
++        )
++    }
++
++    single {
++        UsageHistoryDao(
++            database = get<ScreenTimeDatabase>()
++        )
++    }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/common/utils/DateTimeUtils.kt b/app/src/main/java/com/atharok/screentime/common/utils/DateTimeUtils.kt
+index 33b937c..16f9360 100644
+--- a/app/src/main/java/com/atharok/screentime/common/utils/DateTimeUtils.kt
++++ b/app/src/main/java/com/atharok/screentime/common/utils/DateTimeUtils.kt
+@@ -80,6 +80,16 @@ object DateTimeUtils {
+     fun convertToHourDouble(timestamp: Long): Double = timestamp / MILLIS_IN_A_HOUR.toDouble()
+     fun convertToHourFloat(timestamp: Long): Float = timestamp / MILLIS_IN_A_HOUR.toFloat()
+ 
++    /**
++     * Format example (index 0 = Monday):
++     * - (en): Mon | Tue | Wed | Thu | Fri | Sat | Sun
++     */
++    fun formatWeekdayByIndex(index: Int): String {
++        calendar.set(2024, Calendar.JANUARY, 1, 12, 0, 0)
++        calendar.add(Calendar.DAY_OF_YEAR, index)
++        return formatToDayOfTheWeek(calendar.timeInMillis)
++    }
++
+     /**
+      * Format example:
+      * - (en): Today | Yesterday | 2 days ago | 1 week ago
+diff --git a/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt b/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt
+index ae5b053..d0eebe0 100644
+--- a/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt
++++ b/app/src/main/java/com/atharok/screentime/data/workers/UsageHistoryScheduler.kt
+@@ -24,7 +24,7 @@ object UsageHistoryScheduler {
+ 
+         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+             WORK_NAME,
+-            ExistingPeriodicWorkPolicy.UPDATE,
++            ExistingPeriodicWorkPolicy.KEEP,
+             request
+         )
+     }
+diff --git a/app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt
+new file mode 100644
+index 0000000..71c6931
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt
+@@ -0,0 +1,71 @@
++package com.atharok.screentime.presentation.viewmodel
++
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.setValue
++import androidx.lifecycle.ViewModel
++import androidx.lifecycle.viewModelScope
++import com.atharok.screentime.domain.entities.analysis.AnalysisRange
++import com.atharok.screentime.domain.entities.analysis.UsageAnalysis
++import com.atharok.screentime.domain.resources.Resource
++import com.atharok.screentime.domain.usecases.UsageHistoryUseCase
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.launch
++
++class AnalysisViewModel(
++    private val useCase: UsageHistoryUseCase
++) : ViewModel() {
++
++    var selectedRange by mutableStateOf(AnalysisRange.WEEK)
++        private set
++
++    private val _analysisFlow = MutableStateFlow<Resource<UsageAnalysis>>(Resource.loading())
++    val analysisFlow: StateFlow<Resource<UsageAnalysis>> = _analysisFlow
++
++    var isRefreshing by mutableStateOf(false)
++        private set
++
++    init {
++        loadAnalysis(showLoading = true)
++        viewModelScope.launch(Dispatchers.IO) {
++            runCatching { useCase.refresh(force = false) }
++            loadAnalysis(showLoading = false)
++        }
++    }
++
++    fun selectRange(range: AnalysisRange) {
++        if (range == selectedRange) return
++        selectedRange = range
++        loadAnalysis(showLoading = true)
++    }
++
++    fun refresh() {
++        viewModelScope.launch {
++            isRefreshing = true
++            try {
++                useCase.refresh(force = true)
++                loadAnalysis(showLoading = false)
++            } catch (e: Exception) {
++                _analysisFlow.value = Resource.failure(e)
++            } finally {
++                isRefreshing = false
++            }
++        }
++    }
++
++    private fun loadAnalysis(showLoading: Boolean) {
++        viewModelScope.launch(Dispatchers.Default) {
++            val previous = (_analysisFlow.value as? Resource.Success)?.data
++            if (showLoading) {
++                _analysisFlow.value = Resource.loading(previous)
++            }
++            try {
++                _analysisFlow.value = Resource.success(useCase.getAnalysis(selectedRange))
++            } catch (e: Exception) {
++                _analysisFlow.value = Resource.failure(e, previous)
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/ui/app/ComposeRoot.kt b/app/src/main/java/com/atharok/screentime/ui/app/ComposeRoot.kt
+index f17a902..6b24e39 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/app/ComposeRoot.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/app/ComposeRoot.kt
+@@ -16,6 +16,7 @@ import com.atharok.screentime.presentation.viewmodel.SettingsViewModel
+ import com.atharok.screentime.ui.navigation.AppNavDestination
+ import com.atharok.screentime.ui.navigation.AppNavHost
+ import com.atharok.screentime.ui.navigation.navigateTo
++import com.atharok.screentime.ui.screens.AnalysisScreen
+ import com.atharok.screentime.ui.screens.ApplicationUsageScreen
+ import com.atharok.screentime.ui.screens.DeviceUsageScreen
+ import com.atharok.screentime.ui.screens.IgnoredAppsScreen
+@@ -72,7 +73,23 @@ fun ComposeRoot(
+                                 "${AppNavDestination.ApplicationUsageDestination.route}/$appPackageName"
+                             )
+                         },
++                        openAnalysisScreen = {
++                            navController.navigateTo(AppNavDestination.AnalysisDestination.route)
++                        },
++                        openSettingsScreen = openSettings,
++                        modifier = Modifier
++                    )
++                },
++
++                analysisScreen = {
++                    AnalysisScreen(
++                        navigateUp = { navController.navigateUp() },
+                         openSettingsScreen = openSettings,
++                        openApplicationUsageScreen = { appPackageName: String ->
++                            navController.navigateTo(
++                                "${AppNavDestination.ApplicationUsageDestination.route}/$appPackageName"
++                            )
++                        },
+                         modifier = Modifier
+                     )
+                 },
+diff --git a/app/src/main/java/com/atharok/screentime/ui/components/Text.kt b/app/src/main/java/com/atharok/screentime/ui/components/Text.kt
+index 9eb2b1a..5ea3c62 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/components/Text.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/components/Text.kt
+@@ -135,13 +135,15 @@ fun TextNormalSecondary(
+ fun TextSmall(
+     text: String,
+     modifier: Modifier = Modifier,
+-    textAlign: TextAlign? = null
++    textAlign: TextAlign? = null,
++    maxLines: Int = Int.MAX_VALUE
+ ) {
+     TextNormal(
+         text = text,
+         modifier = modifier,
+         color = MaterialTheme.colorScheme.onSurfaceVariant,
+         style = Typography.bodySmall,
+-        textAlign = textAlign
++        textAlign = textAlign,
++        maxLines = maxLines
+     )
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt b/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt
+index f86b217..7799ef9 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt
+@@ -2,6 +2,7 @@ package com.atharok.screentime.ui.components
+ 
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
++import androidx.compose.material.icons.rounded.Insights
+ import androidx.compose.material.icons.rounded.Refresh
+ import androidx.compose.material.icons.rounded.Settings
+ import androidx.compose.material3.Icon
+@@ -58,6 +59,19 @@ fun SettingsAction(
+     )
+ }
+ 
++@Composable
++fun AnalysisAction(
++    openAnalysisScreen: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    TopAppBarAction(
++        onClick = openAnalysisScreen,
++        image = Icons.Rounded.Insights,
++        contentDescription = stringResource(id = R.string.analysis),
++        modifier = modifier
++    )
++}
++
+ @Composable
+ fun RefreshAction(
+     refresh: () -> Unit,
+diff --git a/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavDestination.kt b/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavDestination.kt
+index 24a03db..7a265b3 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavDestination.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavDestination.kt
+@@ -6,6 +6,7 @@ import androidx.navigation.navArgument
+ sealed class AppNavDestination(val route: String) {
+     data object PermissionDestination: AppNavDestination(route = "permission_route")
+     data object DeviceUsageDestination: AppNavDestination(route = "device_usage_route")
++    data object AnalysisDestination: AppNavDestination(route = "analysis_route")
+     data object ApplicationUsageDestination: AppNavDestination(route = "application_usage_route") {
+         const val APP_PACKAGE_ARG = "appPackageArg"
+         val routeWithArgs = "$route/{$APP_PACKAGE_ARG}"
+diff --git a/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavHost.kt b/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavHost.kt
+index 2f90a65..146859f 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavHost.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/navigation/AppNavHost.kt
+@@ -42,6 +42,7 @@ fun AppNavHost(
+     startDestination: String,
+     permissionScreen: @Composable () -> Unit,
+     deviceUsageScreen: @Composable () -> Unit,
++    analysisScreen: @Composable () -> Unit,
+     applicationUsageScreen: @Composable (appPackageName: String?) -> Unit,
+     settingsScreen: @Composable () -> Unit,
+     ignoredAppsScreen: @Composable () -> Unit,
+@@ -80,6 +81,16 @@ fun AppNavHost(
+             deviceUsageScreen()
+         }
+ 
++        composable(
++            route = AppNavDestination.AnalysisDestination.route,
++            enterTransition = enterTransition,
++            exitTransition = exitTransition,
++            popEnterTransition = popEnterTransition,
++            popExitTransition = popExitTransition
++        ) {
++            analysisScreen()
++        }
++
+         composable(
+             route = AppNavDestination.ApplicationUsageDestination.routeWithArgs,
+             arguments = AppNavDestination.ApplicationUsageDestination.arguments,
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+new file mode 100644
+index 0000000..c5994a3
+--- /dev/null
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+@@ -0,0 +1,596 @@
++package com.atharok.screentime.ui.screens
++
++import android.content.pm.PackageManager
++import androidx.compose.foundation.Canvas
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.Insights
++import androidx.compose.material3.Button
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.FilterChip
++import androidx.compose.material3.Icon
++import androidx.compose.material3.LinearProgressIndicator
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.remember
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.geometry.CornerRadius
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.geometry.Size
++import androidx.compose.ui.graphics.PathEffect
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.dimensionResource
++import androidx.compose.ui.res.pluralStringResource
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.unit.dp
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import com.atharok.screentime.R
++import com.atharok.screentime.common.extensions.getApplicationIconSafety
++import com.atharok.screentime.common.utils.DateTimeUtils
++import com.atharok.screentime.domain.entities.analysis.AnalysisRange
++import com.atharok.screentime.domain.entities.analysis.DailyUsagePoint
++import com.atharok.screentime.domain.entities.analysis.UsageAnalysis
++import com.atharok.screentime.domain.resources.Resource
++import com.atharok.screentime.presentation.viewmodel.AnalysisViewModel
++import com.atharok.screentime.ui.components.AppScaffold
++import com.atharok.screentime.ui.components.ApplicationIcon
++import com.atharok.screentime.ui.components.NavigateUpAction
++import com.atharok.screentime.ui.components.OutlinedCard
++import com.atharok.screentime.ui.components.RefreshAction
++import com.atharok.screentime.ui.components.SettingsAction
++import com.atharok.screentime.ui.components.TextExtraLarge
++import com.atharok.screentime.ui.components.TextMedium
++import com.atharok.screentime.ui.components.TextNormal
++import com.atharok.screentime.ui.components.TextNormalSecondary
++import com.atharok.screentime.ui.components.TextSmall
++import org.koin.androidx.compose.koinViewModel
++
++@Composable
++fun AnalysisScreen(
++    navigateUp: () -> Unit,
++    openSettingsScreen: () -> Unit,
++    openApplicationUsageScreen: (String) -> Unit,
++    modifier: Modifier = Modifier,
++    viewModel: AnalysisViewModel = koinViewModel()
++) {
++    val analysisResource: Resource<UsageAnalysis> by viewModel.analysisFlow.collectAsStateWithLifecycle()
++
++    AppScaffold(
++        title = stringResource(id = R.string.analysis),
++        navigateUp = { NavigateUpAction(navigateUp = navigateUp) },
++        topBarActions = {
++            RefreshAction(refresh = viewModel::refresh)
++            SettingsAction(openSettingsScreen = openSettingsScreen)
++        },
++        modifier = modifier
++    ) { innerPadding ->
++        AnalysisContent(
++            analysisResource = analysisResource,
++            selectedRange = viewModel.selectedRange,
++            isRefreshing = viewModel.isRefreshing,
++            onRangeSelected = viewModel::selectRange,
++            onRefresh = viewModel::refresh,
++            openApplicationUsageScreen = openApplicationUsageScreen,
++            innerPadding = innerPadding
++        )
++    }
++}
++
++@Composable
++private fun AnalysisContent(
++    analysisResource: Resource<UsageAnalysis>,
++    selectedRange: AnalysisRange,
++    isRefreshing: Boolean,
++    onRangeSelected: (AnalysisRange) -> Unit,
++    onRefresh: () -> Unit,
++    openApplicationUsageScreen: (String) -> Unit,
++    innerPadding: PaddingValues
++) {
++    LazyColumn(
++        contentPadding = innerPadding,
++        verticalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_medium)),
++        modifier = Modifier.fillMaxWidth()
++    ) {
++        item {
++            AnalysisRangeSelector(
++                selectedRange = selectedRange,
++                onRangeSelected = onRangeSelected,
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                    .padding(top = dimensionResource(id = R.dimen.padding_small))
++            )
++        }
++
++        if (isRefreshing) {
++            item {
++                LinearProgressIndicator(
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                )
++            }
++        }
++
++        when (analysisResource) {
++            is Resource.Failure -> item {
++                FailureMessage(analysisResource.throwable)
++            }
++            is Resource.Progress -> item {
++                Box(
++                    contentAlignment = Alignment.Center,
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .height(240.dp)
++                ) {
++                    CircularProgressIndicator()
++                }
++            }
++            is Resource.Success -> {
++                val analysis = analysisResource.data
++                if (!analysis.hasData) {
++                    item {
++                        EmptyHistory(
++                            onRefresh = onRefresh,
++                            modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                        )
++                    }
++                } else {
++                    item {
++                        SummaryCard(
++                            analysis = analysis,
++                            modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                        )
++                    }
++                    item {
++                        DailyChartCard(
++                            analysis = analysis,
++                            modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                        )
++                    }
++                    item {
++                        WeekdayCard(
++                            analysis = analysis,
++                            modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                        )
++                    }
++                    item {
++                        HourlyCard(
++                            analysis = analysis,
++                            modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                        )
++                    }
++                    if (analysis.topApps.isNotEmpty()) {
++                        item {
++                            TopAppsCard(
++                                analysis = analysis,
++                                openApplicationUsageScreen = openApplicationUsageScreen,
++                                modifier = Modifier.padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                            )
++                        }
++                    }
++                    analysis.lastUpdated?.let { updatedAt ->
++                        item {
++                            TextSmall(
++                                text = stringResource(
++                                    id = R.string.data_updated,
++                                    DateTimeUtils.formatToMediumDateTime(updatedAt)
++                                ),
++                                modifier = Modifier.padding(
++                                    start = dimensionResource(id = R.dimen.padding_medium),
++                                    end = dimensionResource(id = R.dimen.padding_medium),
++                                    bottom = dimensionResource(id = R.dimen.padding_large)
++                                )
++                            )
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun AnalysisRangeSelector(
++    selectedRange: AnalysisRange,
++    onRangeSelected: (AnalysisRange) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    Row(
++        modifier = modifier,
++        horizontalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.padding_small))
++    ) {
++        AnalysisRange.entries.forEach { range ->
++            FilterChip(
++                selected = range == selectedRange,
++                onClick = { onRangeSelected(range) },
++                label = {
++                    Text(
++                        text = stringResource(id = range.labelRes()),
++                        textAlign = TextAlign.Center,
++                        modifier = Modifier.fillMaxWidth()
++                    )
++                },
++                modifier = Modifier.weight(1f)
++            )
++        }
++    }
++}
++
++@Composable
++private fun SummaryCard(
++    analysis: UsageAnalysis,
++    modifier: Modifier = Modifier
++) {
++    OutlinedCard(modifier = modifier) {
++        Column(
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(dimensionResource(id = R.dimen.padding_large))
++        ) {
++            TextSmall(text = stringResource(id = R.string.analysis_daily_average))
++            TextExtraLarge(
++                text = DateTimeUtils.formatToDuration(analysis.averageDaily),
++                modifier = Modifier.padding(top = dimensionResource(id = R.dimen.padding_small))
++            )
++            Spacer(modifier = Modifier.height(dimensionResource(id = R.dimen.padding_medium)))
++            Row(modifier = Modifier.fillMaxWidth()) {
++                SummaryValue(
++                    label = stringResource(id = R.string.analysis_total),
++                    value = DateTimeUtils.formatToDuration(analysis.totalDuration),
++                    modifier = Modifier.weight(1f)
++                )
++                SummaryValue(
++                    label = stringResource(id = R.string.analysis_best_day),
++                    value = analysis.bestDay?.let { DateTimeUtils.formatToDuration(it.duration) } ?: "-",
++                    modifier = Modifier.weight(1f)
++                )
++            }
++            Spacer(modifier = Modifier.height(dimensionResource(id = R.dimen.padding_normal)))
++            TextSmall(
++                text = pluralStringResource(
++                    id = R.plurals.analysis_recorded_days,
++                    count = analysis.daysWithData,
++                    analysis.daysWithData
++                )
++            )
++            analysis.previousAverageDaily?.let { previous ->
++                if (previous > 0) {
++                    val percent = ((analysis.averageDaily - previous) * 100f / previous).toInt()
++                    val sign = if (percent >= 0) "+" else ""
++                    TextNormal(
++                        text = stringResource(
++                            id = R.string.analysis_vs_previous,
++                            "$sign$percent%"
++                        ),
++                        color = if (percent <= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
++                        modifier = Modifier.padding(top = dimensionResource(id = R.dimen.padding_small))
++                    )
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun SummaryValue(
++    label: String,
++    value: String,
++    modifier: Modifier = Modifier
++) {
++    Column(modifier = modifier) {
++        TextSmall(text = label)
++        TextNormal(
++            text = value,
++            modifier = Modifier.padding(top = dimensionResource(id = R.dimen.padding_small))
++        )
++    }
++}
++
++@Composable
++private fun DailyChartCard(
++    analysis: UsageAnalysis,
++    modifier: Modifier = Modifier
++) {
++    OutlinedCard(modifier = modifier) {
++        Column(
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(dimensionResource(id = R.dimen.padding_large))
++        ) {
++            TextMedium(text = stringResource(id = R.string.analysis_daily_screen_time))
++            SimpleBarChart(
++                values = analysis.daily.map { it.duration },
++                average = analysis.averageDaily,
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .height(150.dp)
++                    .padding(top = dimensionResource(id = R.dimen.padding_large))
++            )
++            Spacer(modifier = Modifier.height(dimensionResource(id = R.dimen.padding_small)))
++            DailyChartLabels(points = analysis.daily)
++        }
++    }
++}
++
++@Composable
++private fun DailyChartLabels(points: List<DailyUsagePoint>) {
++    if (points.isEmpty()) return
++    if (points.size <= 7) {
++        Row(modifier = Modifier.fillMaxWidth()) {
++            points.forEach { point ->
++                TextSmall(
++                    text = DateTimeUtils.formatToDayOfTheWeek(point.dayStart),
++                    textAlign = TextAlign.Center,
++                    modifier = Modifier.weight(1f)
++                )
++            }
++        }
++    } else {
++        Row(modifier = Modifier.fillMaxWidth()) {
++            TextSmall(text = DateTimeUtils.formatToMediumDate(points.first().dayStart))
++            Spacer(modifier = Modifier.weight(1f))
++            TextSmall(text = DateTimeUtils.formatToMediumDate(points.last().dayStart))
++        }
++    }
++}
++
++@Composable
++private fun WeekdayCard(
++    analysis: UsageAnalysis,
++    modifier: Modifier = Modifier
++) {
++    val max = analysis.weekdayAverage.maxOrNull() ?: 0L
++    OutlinedCard(modifier = modifier) {
++        Column(
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(dimensionResource(id = R.dimen.padding_large))
++        ) {
++            TextMedium(text = stringResource(id = R.string.analysis_by_weekday))
++            analysis.weekdayAverage.forEachIndexed { index, duration ->
++                Row(
++                    verticalAlignment = Alignment.CenterVertically,
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .padding(top = dimensionResource(id = R.dimen.padding_normal))
++                ) {
++                    TextSmall(
++                        text = DateTimeUtils.formatWeekdayByIndex(index),
++                        modifier = Modifier.width(52.dp)
++                    )
++                    LinearProgressIndicator(
++                        progress = { if (max == 0L) 0f else duration.toFloat() / max },
++                        modifier = Modifier
++                            .weight(1f)
++                            .height(8.dp)
++                            .clip(CircleShape),
++                        drawStopIndicator = {}
++                    )
++                    TextSmall(
++                        text = DateTimeUtils.formatToDuration(duration),
++                        textAlign = TextAlign.End,
++                        modifier = Modifier.width(80.dp)
++                    )
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun HourlyCard(
++    analysis: UsageAnalysis,
++    modifier: Modifier = Modifier
++) {
++    OutlinedCard(modifier = modifier) {
++        Column(
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(dimensionResource(id = R.dimen.padding_large))
++        ) {
++            TextMedium(text = stringResource(id = R.string.analysis_by_hour))
++            SimpleBarChart(
++                values = analysis.hourlyAverage.toList(),
++                average = null,
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .height(90.dp)
++                    .padding(top = dimensionResource(id = R.dimen.padding_large))
++            )
++            Spacer(modifier = Modifier.height(dimensionResource(id = R.dimen.padding_small)))
++            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
++                listOf(0, 6, 12, 18, 23).forEach { hour ->
++                    TextSmall(text = DateTimeUtils.formatToHour(hour))
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun TopAppsCard(
++    analysis: UsageAnalysis,
++    openApplicationUsageScreen: (String) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val context = LocalContext.current
++    OutlinedCard(modifier = modifier) {
++        Column(
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(dimensionResource(id = R.dimen.padding_large))
++        ) {
++            TextMedium(text = stringResource(id = R.string.analysis_top_apps))
++            analysis.topApps.forEach { app ->
++                Row(
++                    verticalAlignment = Alignment.CenterVertically,
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .clickable { openApplicationUsageScreen(app.packageName) }
++                        .padding(vertical = dimensionResource(id = R.dimen.padding_normal))
++                ) {
++                    val icon = remember(app.packageName) {
++                        context.packageManager.getApplicationIconSafety(app.packageName)
++                    }
++                    ApplicationIcon(
++                        drawable = icon,
++                        contentDescription = app.appName,
++                        modifier = Modifier.size(dimensionResource(id = R.dimen.icon_medium_size))
++                    )
++                    Column(
++                        modifier = Modifier
++                            .weight(1f)
++                            .padding(horizontal = dimensionResource(id = R.dimen.padding_medium))
++                    ) {
++                        TextNormal(text = app.appName, maxLines = 1)
++                        TextSmall(text = app.packageName, maxLines = 1)
++                    }
++                    Column(horizontalAlignment = Alignment.End) {
++                        TextNormal(text = DateTimeUtils.formatToDuration(app.duration), maxLines = 1)
++                        TextSmall(
++                            text = pluralStringResource(
++                                id = R.plurals.analysis_days_used,
++                                count = app.daysUsed,
++                                app.daysUsed
++                            ),
++                            maxLines = 1
++                        )
++                    }
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun EmptyHistory(
++    onRefresh: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    OutlinedCard(modifier = modifier) {
++        Column(
++            horizontalAlignment = Alignment.CenterHorizontally,
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(dimensionResource(id = R.dimen.padding_large))
++        ) {
++            Icon(
++                imageVector = Icons.Rounded.Insights,
++                contentDescription = null,
++                modifier = Modifier.size(dimensionResource(id = R.dimen.icon_large_size))
++            )
++            TextMedium(
++                text = stringResource(id = R.string.analysis_no_history_title),
++                modifier = Modifier.padding(top = dimensionResource(id = R.dimen.padding_medium))
++            )
++            TextNormalSecondary(
++                text = stringResource(id = R.string.analysis_no_history_message),
++                textAlign = TextAlign.Center,
++                modifier = Modifier.padding(
++                    top = dimensionResource(id = R.dimen.padding_small),
++                    bottom = dimensionResource(id = R.dimen.padding_medium)
++                )
++            )
++            Button(onClick = onRefresh) {
++                Text(text = stringResource(id = R.string.refresh))
++            }
++        }
++    }
++}
++
++@Composable
++private fun FailureMessage(throwable: Throwable) {
++    Column(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(dimensionResource(id = R.dimen.padding_large))
++    ) {
++        TextNormal(text = stringResource(id = R.string.analysis_error))
++        TextSmall(text = throwable.message ?: throwable.toString())
++    }
++}
++
++@Composable
++private fun SimpleBarChart(
++    values: List<Long>,
++    average: Long?,
++    modifier: Modifier = Modifier
++) {
++    if (values.isEmpty()) return
++    val barColor = MaterialTheme.colorScheme.primary
++    val averageColor = MaterialTheme.colorScheme.tertiary
++    val gridColor = MaterialTheme.colorScheme.outlineVariant
++
++    Canvas(modifier = modifier) {
++        val maxValue = maxOf(values.maxOrNull() ?: 1L, average ?: 0L, 1L)
++        val chartHeight = size.height
++
++        for (line in 0..3) {
++            val y = chartHeight * line / 3f
++            drawLine(
++                color = gridColor,
++                start = Offset(0f, y),
++                end = Offset(size.width, y),
++                strokeWidth = 1f
++            )
++        }
++
++        average?.let { averageValue ->
++            if (averageValue > 0L) {
++                val y = chartHeight - (averageValue.toFloat() / maxValue) * chartHeight
++                drawLine(
++                    color = averageColor,
++                    start = Offset(0f, y),
++                    end = Offset(size.width, y),
++                    strokeWidth = 2f,
++                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))
++                )
++            }
++        }
++
++        val slot = size.width / values.size
++        val barWidth = (slot * 0.62f).coerceAtLeast(2f)
++        val radius = CornerRadius(3f, 3f)
++
++        values.forEachIndexed { index, value ->
++            val height = (value.toFloat() / maxValue) * chartHeight
++            val left = index * slot + (slot - barWidth) / 2f
++            val top = chartHeight - height
++            drawRoundRect(
++                color = barColor.copy(alpha = if (value > 0L) 0.9f else 0.2f),
++                topLeft = Offset(left, top),
++                size = Size(barWidth, height.coerceAtLeast(2f)),
++                cornerRadius = radius
++            )
++        }
++    }
++}
++
++private fun AnalysisRange.labelRes(): Int {
++    return when (this) {
++        AnalysisRange.WEEK -> R.string.analysis_range_week
++        AnalysisRange.MONTH -> R.string.analysis_range_month
++        AnalysisRange.QUARTER -> R.string.analysis_range_quarter
++        AnalysisRange.ALL -> R.string.analysis_range_all
++    }
++}
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+index 0d44da1..0faa00b 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+@@ -32,6 +32,7 @@ import com.atharok.screentime.domain.entities.Period
+ import com.atharok.screentime.domain.entities.usage.DeviceUsage
+ import com.atharok.screentime.domain.resources.Resource
+ import com.atharok.screentime.presentation.viewmodel.DeviceUsageViewModel
++import com.atharok.screentime.ui.components.AnalysisAction
+ import com.atharok.screentime.ui.components.AppScaffold
+ import com.atharok.screentime.ui.components.ApplicationIcon
+ import com.atharok.screentime.ui.components.LoadingDialog
+@@ -48,6 +49,7 @@ import com.patrykandpatrick.vico.compose.cartesian.data.CartesianChartModelProdu
+ fun DeviceUsageScreen(
+     viewModel: DeviceUsageViewModel,
+     openApplicationUsageScreen: (appPackageName: String) -> Unit,
++    openAnalysisScreen: () -> Unit,
+     openSettingsScreen: () -> Unit,
+     modifier: Modifier = Modifier
+ ) {
+@@ -76,6 +78,7 @@ fun DeviceUsageScreen(
+         },
+         deviceUsageResource = deviceUsageResource,
+         openApplicationUsageScreen = openApplicationUsageScreen,
++        openAnalysisScreen = openAnalysisScreen,
+         openSettingsScreen = openSettingsScreen,
+         refresh = {
+             when(it) {
+@@ -97,6 +100,7 @@ private fun StatelessDeviceUsageScreen(
+     onSelectedCentralTendencyChange: (CentralTendency) -> Unit,
+     deviceUsageResource: Resource<DeviceUsage<*>>,
+     openApplicationUsageScreen: (appPackageName: String) -> Unit,
++    openAnalysisScreen: () -> Unit,
+     openSettingsScreen: () -> Unit,
+     refresh: (Period) -> Unit,
+     modifier: Modifier = Modifier,
+@@ -106,6 +110,7 @@ private fun StatelessDeviceUsageScreen(
+         title = stringResource(id = R.string.app_name),
+         modifier = modifier,
+         topBarActions = {
++            AnalysisAction(openAnalysisScreen = openAnalysisScreen)
+             RefreshAction(refresh = { refresh(period) })
+             SettingsAction(openSettingsScreen = openSettingsScreen)
+         }
+@@ -134,6 +139,7 @@ private fun StatelessDeviceUsageScreen(
+                 onSelectedCentralTendencyChange = onSelectedCentralTendencyChange,
+                 deviceUsageResource = deviceUsageResource,
+                 openApplicationUsageScreen = openApplicationUsageScreen,
++                openAnalysisScreen = openAnalysisScreen,
+                 innerPadding = innerPadding,
+                 modelProducer = modelProducer
+             )
+@@ -151,6 +157,7 @@ private fun PortraitDeviceUsageScreen(
+     onSelectedCentralTendencyChange: (CentralTendency) -> Unit,
+     deviceUsageResource: Resource<DeviceUsage<*>>,
+     openApplicationUsageScreen: (appPackageName: String) -> Unit,
++    openAnalysisScreen: () -> Unit,
+     innerPadding: PaddingValues,
+     modelProducer: CartesianChartModelProducer,
+     modifier: Modifier = Modifier
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 5cbcaf7..242e298 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -70,4 +70,30 @@
+     <string name="source_code">源代码</string>
+     <string name="code_version">版本 %1$s</string>
+     <string name="unknown">未知</string>
++    <!-- Analysis -->
++    <plurals name="analysis_recorded_days">
++        <item quantity="one">%1$d 天有使用记录</item>
++        <item quantity="other">%1$d 天有使用记录</item>
++    </plurals>
++    <plurals name="analysis_days_used">
++        <item quantity="one">%1$d 天</item>
++        <item quantity="other">%1$d 天</item>
++    </plurals>
++
++    <string name="analysis">分析</string>
++    <string name="analysis_range_week">7天</string>
++    <string name="analysis_range_month">30天</string>
++    <string name="analysis_range_quarter">90天</string>
++    <string name="analysis_range_all">全部</string>
++    <string name="analysis_daily_average">日均屏幕使用</string>
++    <string name="analysis_total">总计</string>
++    <string name="analysis_best_day">最多的一天</string>
++    <string name="analysis_vs_previous">%1$s，相比上一周期</string>
++    <string name="analysis_daily_screen_time">每日屏幕使用时间</string>
++    <string name="analysis_by_weekday">按星期平均</string>
++    <string name="analysis_by_hour">按小时平均</string>
++    <string name="analysis_top_apps">最常使用的应用</string>
++    <string name="analysis_no_history_title">暂无历史记录</string>
++    <string name="analysis_no_history_message">屏幕使用时间每天会自动保存。点击刷新以扫描最近 90 天的系统使用数据。</string>
++    <string name="analysis_error">分析加载失败。</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 59c260a..3011ff3 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -132,4 +132,30 @@
+     <string name="kotlin_serialization_name" translatable="false">Kotlin Serialization</string>
+     <string name="kotlin_serialization_id" translatable="false">org.jetbrains.kotlinx:kotlinx-serialization-json</string>
+     <string name="kotlin_serialization_url" translatable="false">https://github.com/Kotlin/kotlinx.serialization</string>
++    <!-- Analysis -->
++    <plurals name="analysis_recorded_days">
++        <item quantity="one">%1$d day with usage</item>
++        <item quantity="other">%1$d days with usage</item>
++    </plurals>
++    <plurals name="analysis_days_used">
++        <item quantity="one">%1$d day</item>
++        <item quantity="other">%1$d days</item>
++    </plurals>
++
++    <string name="analysis">Analysis</string>
++    <string name="analysis_range_week">7D</string>
++    <string name="analysis_range_month">30D</string>
++    <string name="analysis_range_quarter">90D</string>
++    <string name="analysis_range_all">All</string>
++    <string name="analysis_daily_average">Daily average</string>
++    <string name="analysis_total">Total</string>
++    <string name="analysis_best_day">Best day</string>
++    <string name="analysis_vs_previous">%1$s vs previous period</string>
++    <string name="analysis_daily_screen_time">Daily screen time</string>
++    <string name="analysis_by_weekday">Average by weekday</string>
++    <string name="analysis_by_hour">Average by hour</string>
++    <string name="analysis_top_apps">Most used apps</string>
++    <string name="analysis_no_history_title">No history yet</string>
++    <string name="analysis_no_history_message">Screen time is saved automatically every day. Tap refresh to scan the last 90 days of system usage data.</string>
++    <string name="analysis_error">Failed to load analysis.</string>
+ </resources>
+\ No newline at end of file

@@ -1,0 +1,525 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 08:41:57 +0800
+Subject: [PATCH] Import pre-database screen time history into SQLite
+
+Bump the history database to version 2 and add a usage_meta key/value
+table (the v1 rows are kept by onUpgrade). A one-off backfill flag,
+history_backfill_v1, is written only after a successful full scan.
+
+refreshHistory() gains fullScan, which scans the whole requested window
+instead of shrinking it to the days since the last refresh; this is what
+allows a database that already contains today's row to recover older
+days from the system usage event log. The migration runs from the
+application IO scope and, as a fallback, when the analysis screen opens
+(so it also works right after usage access is granted). Historical rows
+are still never downgraded.
+
+The analysis screen also gets an explicit 'Re-import system history'
+top bar action with a confirmation dialog, which forces a full rebuild.
+---
+ .../screentime/ScreenTimeApplication.kt       |  6 +-
+ .../data/database/ScreenTimeDatabase.kt       | 26 ++++++++-
+ .../data/database/UsageHistoryDao.kt          | 23 ++++++++
+ .../UsageHistoryRepositoryImpl.kt             | 36 +++++++++---
+ .../repositories/UsageHistoryRepository.kt    | 16 +++++-
+ .../domain/usecases/UsageHistoryUseCase.kt    | 51 ++++++++++++++++-
+ .../viewmodel/AnalysisViewModel.kt            | 56 +++++++++++++++----
+ .../screentime/ui/components/TopBarActions.kt | 14 +++++
+ .../screentime/ui/screens/AnalysisScreen.kt   | 22 +++++++-
+ app/src/main/res/values-zh-rCN/strings.xml    |  4 ++
+ app/src/main/res/values/strings.xml           |  4 ++
+ 11 files changed, 233 insertions(+), 25 deletions(-)
+
+diff --git a/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt b/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
+index 757868a..6737494 100644
+--- a/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
++++ b/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
+@@ -26,7 +26,11 @@ class ScreenTimeApplication: Application() {
+         UsageHistoryScheduler.schedule(this)
+         applicationScope.launch {
+             runCatching {
+-                GlobalContext.get().get<UsageHistoryUseCase>().refresh(force = false)
++                val useCase = GlobalContext.get().get<UsageHistoryUseCase>()
++                // One-off import of the usage history that existed before the local database.
++                // It is a no-op once the flag is stored, or when usage access is not granted.
++                useCase.ensureHistoryMigrated()
++                useCase.refresh(force = false)
+             }
+         }
+     }
+diff --git a/app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt b/app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt
+index f310bac..2bf6613 100644
+--- a/app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt
++++ b/app/src/main/java/com/atharok/screentime/data/database/ScreenTimeDatabase.kt
+@@ -19,6 +19,19 @@ class ScreenTimeDatabase(context: Context) : SQLiteOpenHelper(
+ ) {
+ 
+     override fun onCreate(db: SQLiteDatabase) {
++        createUsageTables(db)
++        createMetaTable(db)
++    }
++
++    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
++        // Version 1 is the initial schema. Version 2 adds a tiny key/value table used to remember
++        // one-off migrations (the existing usage rows must be kept as they are).
++        if (oldVersion < 2) {
++            createMetaTable(db)
++        }
++    }
++
++    private fun createUsageTables(db: SQLiteDatabase) {
+         db.execSQL(
+             """
+             CREATE TABLE IF NOT EXISTS usage_day (
+@@ -54,12 +67,19 @@ class ScreenTimeDatabase(context: Context) : SQLiteOpenHelper(
+         )
+     }
+ 
+-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+-        // Version 1 is the initial schema. Future migrations go here.
++    private fun createMetaTable(db: SQLiteDatabase) {
++        db.execSQL(
++            """
++            CREATE TABLE IF NOT EXISTS usage_meta (
++                key TEXT NOT NULL PRIMARY KEY,
++                value TEXT NOT NULL
++            )
++            """.trimIndent()
++        )
+     }
+ 
+     companion object {
+         const val DATABASE_NAME = "screen_time_history.db"
+-        const val DATABASE_VERSION = 1
++        const val DATABASE_VERSION = 2
+     }
+ }
+diff --git a/app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt b/app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt
+index dcc0ffa..acccf41 100644
+--- a/app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt
++++ b/app/src/main/java/com/atharok/screentime/data/database/UsageHistoryDao.kt
+@@ -150,4 +150,27 @@ class UsageHistoryDao(private val database: ScreenTimeDatabase) {
+             return if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+         }
+     }
++
++    // ---- Metadata ----
++
++    fun getMetaValue(key: String): String? {
++        database.readableDatabase.rawQuery(
++            "SELECT value FROM usage_meta WHERE key = ? LIMIT 1",
++            arrayOf(key)
++        ).use { cursor ->
++            return if (cursor.moveToFirst()) cursor.getString(0) else null
++        }
++    }
++
++    fun setMetaValue(key: String, value: String) {
++        database.writableDatabase.insertWithOnConflict(
++            "usage_meta",
++            null,
++            ContentValues().apply {
++                put("key", key)
++                put("value", value)
++            },
++            SQLiteDatabase.CONFLICT_REPLACE
++        )
++    }
+ }
+diff --git a/app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt b/app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt
+index 0f67839..6068597 100644
+--- a/app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt
++++ b/app/src/main/java/com/atharok/screentime/data/repositories/UsageHistoryRepositoryImpl.kt
+@@ -27,21 +27,26 @@ class UsageHistoryRepositoryImpl(
+         days: Int,
+         ignoreSystemApps: Boolean,
+         ignoredPackages: List<String>,
+-        force: Boolean
++        force: Boolean,
++        fullScan: Boolean
+     ): Boolean = withContext(Dispatchers.IO) {
+         refreshMutex.withLock {
+             val now = System.currentTimeMillis()
+-            if (!force && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) {
++            if (!force && !fullScan && now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) {
+                 return@withLock false
+             }
+ 
+             val today = DateTimeUtils.truncateToDay(now)
+             val lastPersistedDay = dao.getLastUpdated()?.let { DateTimeUtils.truncateToDay(it) }
+-            val scanDays = if (lastPersistedDay == null) {
+-                days
+-            } else {
+-                val daysSinceLastUpdate = ((today - lastPersistedDay) / MILLIS_IN_A_DAY).toInt() + 2
+-                daysSinceLastUpdate.coerceIn(MIN_SCAN_DAYS, days)
++            // A full scan must cover the whole requested window even when the database already
++            // contains recent rows; this is what imports history that predates the database.
++            val scanDays = when {
++                fullScan -> days
++                lastPersistedDay == null -> days
++                else -> {
++                    val daysSinceLastUpdate = ((today - lastPersistedDay) / MILLIS_IN_A_DAY).toInt() + 2
++                    daysSinceLastUpdate.coerceIn(MIN_SCAN_DAYS, days)
++                }
+             }
+             val start = DateTimeUtils.addDaysToTimestamp(today, -(scanDays - 1))
+ 
+@@ -118,7 +123,24 @@ class UsageHistoryRepositoryImpl(
+     override suspend fun getLastUpdated(): Long? =
+         withContext(Dispatchers.IO) { dao.getLastUpdated() }
+ 
++    override suspend fun hasUsagePermission(): Boolean = withContext(Dispatchers.IO) {
++        tracker.hasAppUsagePermission()
++    }
++
++    override suspend fun isHistoryBackfilled(): Boolean = withContext(Dispatchers.IO) {
++        dao.getMetaValue(META_KEY_HISTORY_BACKFILL_V1) == META_VALUE_DONE
++    }
++
++    override suspend fun markHistoryBackfilled() {
++        withContext(Dispatchers.IO) {
++            dao.setMetaValue(META_KEY_HISTORY_BACKFILL_V1, META_VALUE_DONE)
++        }
++    }
++
+     companion object {
++        const val META_KEY_HISTORY_BACKFILL_V1 = "history_backfill_v1"
++        private const val META_VALUE_DONE = "done"
++
+         private const val MIN_REFRESH_INTERVAL_MS = 15L * 60L * 1000L
+         private const val MIN_SCAN_DAYS = 2
+         private const val MILLIS_IN_A_DAY = 24L * 60L * 60L * 1000L
+diff --git a/app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt b/app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt
+index 85b93ca..3e883d1 100644
+--- a/app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt
++++ b/app/src/main/java/com/atharok/screentime/domain/repositories/UsageHistoryRepository.kt
+@@ -7,14 +7,28 @@ interface UsageHistoryRepository {
+     /**
+      * Scans the system usage events and persists per-day, per-hour and per-app totals.
+      * Historical rows are never downgraded, so data survives event retention limits.
++     *
++     * When [fullScan] is true, the whole [days] window is scanned even if the database already
++     * contains recent data. This is required for the one-off import of the usage history that
++     * existed before the database was introduced.
+      */
+     suspend fun refreshHistory(
+         days: Int,
+         ignoreSystemApps: Boolean,
+         ignoredPackages: List<String>,
+-        force: Boolean = false
++        force: Boolean = false,
++        fullScan: Boolean = false
+     ): Boolean
+ 
++    /** Returns true if the app is allowed to read the system usage events. */
++    suspend fun hasUsagePermission(): Boolean
++
++    /** Returns true once the one-off history backfill has completed successfully. */
++    suspend fun isHistoryBackfilled(): Boolean
++
++    /** Persists the flag that marks the one-off history backfill as done. */
++    suspend fun markHistoryBackfilled()
++
+     suspend fun getDayTotals(startDay: Long, endDay: Long): Map<Long, Long>
+ 
+     suspend fun getHourlyTotals(startDay: Long, endDay: Long): Map<Long, LongArray>
+diff --git a/app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt b/app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt
+index 2668362..0fa9e85 100644
+--- a/app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt
++++ b/app/src/main/java/com/atharok/screentime/domain/usecases/UsageHistoryUseCase.kt
+@@ -6,6 +6,8 @@ import com.atharok.screentime.domain.entities.analysis.DailyUsagePoint
+ import com.atharok.screentime.domain.entities.analysis.UsageAnalysis
+ import com.atharok.screentime.domain.repositories.UsageHistoryRepository
+ import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
+ import java.util.Calendar
+ 
+ class UsageHistoryUseCase(
+@@ -13,7 +15,13 @@ class UsageHistoryUseCase(
+     private val settingsUseCase: SettingsUseCase
+ ) {
+ 
+-    suspend fun refresh(force: Boolean = false, days: Int = DEFAULT_HISTORY_DAYS): Boolean {
++    private val backfillMutex = Mutex()
++
++    suspend fun refresh(
++        force: Boolean = false,
++        days: Int = DEFAULT_HISTORY_DAYS,
++        fullScan: Boolean = false
++    ): Boolean {
+         val ignoreSystemApps = settingsUseCase.shouldIgnoreSystemApps().first()
+         val ignoredPackages = try {
+             settingsUseCase.getIgnoredPackages().first()
+@@ -24,10 +32,48 @@ class UsageHistoryUseCase(
+             days = days,
+             ignoreSystemApps = ignoreSystemApps,
+             ignoredPackages = ignoredPackages,
+-            force = force
++            force = force,
++            fullScan = fullScan
+         )
+     }
+ 
++    /**
++     * One-off import of the usage history that existed before the local database was introduced.
++     *
++     * The system usage event log is the only source: it is scanned over [BACKFILL_DAYS] days
++     * (or as far back as the system still keeps events), even if the database already contains
++     * today's data. The migration runs only when usage access is granted and the flag is not
++     * set yet. The flag is written only after a successful scan, so a failure is retried later.
++     */
++    suspend fun ensureHistoryMigrated(): Boolean = backfillMutex.withLock {
++        if (!repository.hasUsagePermission()) return@withLock false
++        if (repository.isHistoryBackfilled()) return@withLock false
++        performFullBackfill()
++    }
++
++    /** True when the one-off backfill is still waiting to run and can run. */
++    suspend fun isHistoryBackfillPending(): Boolean =
++        repository.hasUsagePermission() && !repository.isHistoryBackfilled()
++
++    /**
++     * Explicit full re-import of the system usage history. Existing historical rows are kept
++     * when they contain more usage than the current system event log does.
++     */
++    suspend fun rebuildHistory(): Boolean = backfillMutex.withLock {
++        if (!repository.hasUsagePermission()) return@withLock false
++        performFullBackfill()
++    }
++
++    private suspend fun performFullBackfill(): Boolean {
++        val success = runCatching {
++            refresh(force = true, days = BACKFILL_DAYS, fullScan = true)
++        }.getOrDefault(false)
++        if (success) {
++            runCatching { repository.markHistoryBackfilled() }
++        }
++        return success
++    }
++
+     suspend fun getLastUpdated(): Long? = repository.getLastUpdated()
+ 
+     suspend fun getAnalysis(range: AnalysisRange): UsageAnalysis {
+@@ -143,6 +189,7 @@ class UsageHistoryUseCase(
+ 
+     companion object {
+         const val DEFAULT_HISTORY_DAYS = 90
++        const val BACKFILL_DAYS = 365
+         private const val MAX_HISTORY_DAYS = 3650
+         private const val TOP_APPS_LIMIT = 10
+     }
+diff --git a/app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt
+index 71c6931..898b8a7 100644
+--- a/app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt
++++ b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/AnalysisViewModel.kt
+@@ -27,11 +27,27 @@ class AnalysisViewModel(
+     var isRefreshing by mutableStateOf(false)
+         private set
+ 
++    var isRebuilding by mutableStateOf(false)
++        private set
++
+     init {
+         loadAnalysis(showLoading = true)
+         viewModelScope.launch(Dispatchers.IO) {
+             runCatching { useCase.refresh(force = false) }
+-            loadAnalysis(showLoading = false)
++            loadAnalysisInternal(showLoading = false)
++
++            // Fallback for usage access granted after the app process started: the one-off
++            // import of the system history is also attempted when the analysis screen opens.
++            val backfillPending = runCatching { useCase.isHistoryBackfillPending() }.getOrDefault(false)
++            if (backfillPending) {
++                isRefreshing = true
++                try {
++                    val migrated = runCatching { useCase.ensureHistoryMigrated() }.getOrDefault(false)
++                    if (migrated) loadAnalysisInternal(showLoading = false)
++                } finally {
++                    isRefreshing = false
++                }
++            }
+         }
+     }
+ 
+@@ -46,7 +62,7 @@ class AnalysisViewModel(
+             isRefreshing = true
+             try {
+                 useCase.refresh(force = true)
+-                loadAnalysis(showLoading = false)
++                loadAnalysisInternal(showLoading = false)
+             } catch (e: Exception) {
+                 _analysisFlow.value = Resource.failure(e)
+             } finally {
+@@ -55,17 +71,37 @@ class AnalysisViewModel(
+         }
+     }
+ 
+-    private fun loadAnalysis(showLoading: Boolean) {
+-        viewModelScope.launch(Dispatchers.Default) {
+-            val previous = (_analysisFlow.value as? Resource.Success)?.data
+-            if (showLoading) {
+-                _analysisFlow.value = Resource.loading(previous)
+-            }
++    /** Explicit full re-import of the system usage history, requested by the user. */
++    fun rebuildHistory() {
++        if (isRebuilding) return
++        viewModelScope.launch {
++            isRebuilding = true
+             try {
+-                _analysisFlow.value = Resource.success(useCase.getAnalysis(selectedRange))
++                useCase.rebuildHistory()
++                loadAnalysisInternal(showLoading = false)
+             } catch (e: Exception) {
+-                _analysisFlow.value = Resource.failure(e, previous)
++                _analysisFlow.value = Resource.failure(e)
++            } finally {
++                isRebuilding = false
+             }
+         }
+     }
++
++    private fun loadAnalysis(showLoading: Boolean) {
++        viewModelScope.launch(Dispatchers.Default) {
++            loadAnalysisInternal(showLoading)
++        }
++    }
++
++    private suspend fun loadAnalysisInternal(showLoading: Boolean) {
++        val previous = (_analysisFlow.value as? Resource.Success)?.data
++        if (showLoading) {
++            _analysisFlow.value = Resource.loading(previous)
++        }
++        try {
++            _analysisFlow.value = Resource.success(useCase.getAnalysis(selectedRange))
++        } catch (e: Exception) {
++            _analysisFlow.value = Resource.failure(e, previous)
++        }
++    }
+ }
+diff --git a/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt b/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt
+index 7799ef9..ae26744 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/components/TopBarActions.kt
+@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+ import androidx.compose.material.icons.rounded.Insights
+ import androidx.compose.material.icons.rounded.Refresh
++import androidx.compose.material.icons.rounded.Restore
+ import androidx.compose.material.icons.rounded.Settings
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
+@@ -83,4 +84,17 @@ fun RefreshAction(
+         contentDescription = stringResource(id = R.string.refresh),
+         modifier = modifier
+     )
++}
++
++@Composable
++fun ReimportHistoryAction(
++    reimport: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    TopAppBarAction(
++        onClick = reimport,
++        image = Icons.Rounded.Restore,
++        contentDescription = stringResource(id = R.string.analysis_reimport_history),
++        modifier = modifier
++    )
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+index 1ffda21..a8f31a3 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/AnalysisScreen.kt
+@@ -28,7 +28,9 @@ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+@@ -56,7 +58,9 @@ import com.atharok.screentime.ui.components.ApplicationIcon
+ import com.atharok.screentime.ui.components.NavigateUpAction
+ import com.atharok.screentime.ui.components.OutlinedCard
+ import com.atharok.screentime.ui.components.RefreshAction
++import com.atharok.screentime.ui.components.ReimportHistoryAction
+ import com.atharok.screentime.ui.components.SettingsAction
++import com.atharok.screentime.ui.components.SimpleDialog
+ import com.atharok.screentime.ui.components.TextExtraLarge
+ import com.atharok.screentime.ui.components.TextMedium
+ import com.atharok.screentime.ui.components.TextNormal
+@@ -73,11 +77,13 @@ fun AnalysisScreen(
+     viewModel: AnalysisViewModel = koinViewModel()
+ ) {
+     val analysisResource: Resource<UsageAnalysis> by viewModel.analysisFlow.collectAsStateWithLifecycle()
++    var showReimportDialog by remember { mutableStateOf(false) }
+ 
+     AppScaffold(
+         title = stringResource(id = R.string.analysis),
+         navigateUp = { NavigateUpAction(navigateUp = navigateUp) },
+         topBarActions = {
++            ReimportHistoryAction(reimport = { showReimportDialog = true })
+             RefreshAction(refresh = viewModel::refresh)
+             SettingsAction(openSettingsScreen = openSettingsScreen)
+         },
+@@ -86,13 +92,27 @@ fun AnalysisScreen(
+         AnalysisContent(
+             analysisResource = analysisResource,
+             selectedRange = viewModel.selectedRange,
+-            isRefreshing = viewModel.isRefreshing,
++            isRefreshing = viewModel.isRefreshing || viewModel.isRebuilding,
+             onRangeSelected = viewModel::selectRange,
+             onRefresh = viewModel::refresh,
+             openApplicationUsageScreen = openApplicationUsageScreen,
+             innerPadding = innerPadding
+         )
+     }
++
++    if (showReimportDialog) {
++        SimpleDialog(
++            confirmButtonText = stringResource(id = R.string.analysis_reimport_confirm),
++            dismissButtonText = stringResource(id = android.R.string.cancel),
++            onConfirmation = {
++                showReimportDialog = false
++                viewModel.rebuildHistory()
++            },
++            onDismissRequest = { showReimportDialog = false },
++            dialogTitle = stringResource(id = R.string.analysis_reimport_title),
++            dialogText = stringResource(id = R.string.analysis_reimport_message)
++        )
++    }
+ }
+ 
+ @Composable
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 242e298..f8cbd55 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -96,4 +96,8 @@
+     <string name="analysis_no_history_title">暂无历史记录</string>
+     <string name="analysis_no_history_message">屏幕使用时间每天会自动保存。点击刷新以扫描最近 90 天的系统使用数据。</string>
+     <string name="analysis_error">分析加载失败。</string>
++    <string name="analysis_reimport_history">重新导入系统历史</string>
++    <string name="analysis_reimport_title">重新导入系统历史？</string>
++    <string name="analysis_reimport_message">将扫描最多一年的系统使用数据（以系统实际保留的范围为准）并合并到本地历史。已有日期若记录更多则不会被覆盖。</string>
++    <string name="analysis_reimport_confirm">重新导入</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 3011ff3..db0a350 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -158,4 +158,8 @@
+     <string name="analysis_no_history_title">No history yet</string>
+     <string name="analysis_no_history_message">Screen time is saved automatically every day. Tap refresh to scan the last 90 days of system usage data.</string>
+     <string name="analysis_error">Failed to load analysis.</string>
++    <string name="analysis_reimport_history">Re-import system history</string>
++    <string name="analysis_reimport_title">Re-import system history?</string>
++    <string name="analysis_reimport_message">Scans up to one year of system usage data (as far back as the system keeps it) and merges it into the local history. Days that already contain more usage are kept.</string>
++    <string name="analysis_reimport_confirm">Re-import</string>
+ </resources>
+\ No newline at end of file

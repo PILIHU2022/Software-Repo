@@ -1,0 +1,155 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:15:31 +0800
+Subject: [PATCH] Stop blocking the main thread at startup
+
+DeviceUsageViewModel used runBlocking to read the default period from
+DataStore during construction. It now starts with Period.DAY and reads the
+stored preference on the IO dispatcher; both screens wait for the read
+before triggering the first calculation, so the calculation still happens
+once and with the right period.
+
+WorkManager scheduling and the history backfill/refresh were also running
+immediately in Application.onCreate. They are now deferred by 1.8s in the
+application IO scope so they no longer compete with the first frame and the
+first usage calculation.
+---
+ .../screentime/ScreenTimeApplication.kt       | 12 ++++++++-
+ .../viewmodel/DeviceUsageViewModel.kt         | 27 ++++++++++++++++---
+ .../ui/screens/ApplicationUsageScreen.kt      |  8 +++++-
+ .../ui/screens/DeviceUsageScreen.kt           |  8 +++++-
+ 4 files changed, 49 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt b/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
+index 6737494..fe20dc4 100644
+--- a/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
++++ b/app/src/main/java/com/atharok/screentime/ScreenTimeApplication.kt
+@@ -7,6 +7,7 @@ import com.atharok.screentime.domain.usecases.UsageHistoryUseCase
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
+ import org.koin.android.ext.koin.androidContext
+ import org.koin.core.context.GlobalContext
+@@ -23,8 +24,13 @@ class ScreenTimeApplication: Application() {
+             modules(appModules)
+         }
+ 
+-        UsageHistoryScheduler.schedule(this)
+         applicationScope.launch {
++            // Let the first frame and the first usage calculation start before competing for
++            // CPU/IO. WorkManager scheduling and the history migration can take a while and are
++            // not needed to display the initial screen.
++            delay(STARTUP_DEFERRED_WORK_DELAY_MS)
++
++            runCatching { UsageHistoryScheduler.schedule(this@ScreenTimeApplication) }
+             runCatching {
+                 val useCase = GlobalContext.get().get<UsageHistoryUseCase>()
+                 // One-off import of the usage history that existed before the local database.
+@@ -34,4 +40,8 @@ class ScreenTimeApplication: Application() {
+             }
+         }
+     }
++
++    companion object {
++        private const val STARTUP_DEFERRED_WORK_DELAY_MS = 1_800L
++    }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/com/atharok/screentime/presentation/viewmodel/DeviceUsageViewModel.kt b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/DeviceUsageViewModel.kt
+index b402c4e..762cad0 100644
+--- a/app/src/main/java/com/atharok/screentime/presentation/viewmodel/DeviceUsageViewModel.kt
++++ b/app/src/main/java/com/atharok/screentime/presentation/viewmodel/DeviceUsageViewModel.kt
+@@ -2,8 +2,10 @@ package com.atharok.screentime.presentation.viewmodel
+ 
+ import androidx.compose.runtime.MutableIntState
+ import androidx.compose.runtime.MutableState
++import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.setValue
+ import androidx.lifecycle.ViewModel
+ import androidx.lifecycle.viewModelScope
+ import com.atharok.screentime.common.utils.NUMBER_OF_DAYS
+@@ -18,7 +20,7 @@ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.launch
+-import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withContext
+ 
+ class DeviceUsageViewModel(
+     private val usageUseCase: DeviceUsageUseCase,
+@@ -31,12 +33,31 @@ class DeviceUsageViewModel(
+ 
+     // Usage calculation
+ 
+-    val defaultPeriod: Period = runBlocking { settingsUseCase.getDefaultPeriod().first() }
+-    val periodState: MutableState<Period> = mutableStateOf(defaultPeriod)
++    // The default value is used for the first frame; the stored preference is read in the
++    // background so that the main thread is never blocked. Screens wait for
++    // [isPeriodResolved] before calculating usage, which avoids calculating twice at startup.
++    val periodState: MutableState<Period> = mutableStateOf(Period.DAY)
++    var isPeriodResolved: Boolean by mutableStateOf(false)
++        private set
++
+     val dayIndexState: MutableIntState = mutableIntStateOf(NUMBER_OF_DAYS - 1) // We display 9 days max.
+ 
+     val selectedCentralTendency: MutableState<CentralTendency> = mutableStateOf(CentralTendency.AVERAGE)
+ 
++    init {
++        viewModelScope.launch(Dispatchers.IO) {
++            val storedPeriod = try {
++                settingsUseCase.getDefaultPeriod().first()
++            } catch (_: Exception) {
++                Period.DAY
++            }
++            withContext(Dispatchers.Main) {
++                periodState.value = storedPeriod
++                isPeriodResolved = true
++            }
++        }
++    }
++
+     fun getDeviceUsageFlow(): StateFlow<Resource<DeviceUsage<out AppUsage>>> = usageUseCase.deviceUsageFlow
+ 
+     fun calculateWeekDeviceUsage(useCache: Boolean = true) = viewModelScope.launch(Dispatchers.Default) {
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt
+index 088e0e7..e0c3940 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/ApplicationUsageScreen.kt
+@@ -42,7 +42,13 @@ fun ApplicationUsageScreen(
+ ) {
+     val deviceUsageResource: Resource<DeviceUsage<*>> by viewModel.getDeviceUsageFlow().collectAsStateWithLifecycle()
+ 
+-    LaunchedEffect(viewModel.periodState.value, viewModel.dayIndexState.intValue) {
++    LaunchedEffect(
++        viewModel.isPeriodResolved,
++        viewModel.periodState.value,
++        viewModel.dayIndexState.intValue
++    ) {
++        if (!viewModel.isPeriodResolved) return@LaunchedEffect
++
+         when(viewModel.periodState.value) {
+             Period.WEEK -> viewModel.calculateWeekDeviceUsage(true)
+             Period.DAY -> viewModel.calculateDayDeviceUsage(true)
+diff --git a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+index a139e3c..80e76ca 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/screens/DeviceUsageScreen.kt
+@@ -54,7 +54,13 @@ fun DeviceUsageScreen(
+ 
+     val deviceUsageResource: Resource<DeviceUsage<*>> by viewModel.getDeviceUsageFlow().collectAsStateWithLifecycle()
+ 
+-    LaunchedEffect(viewModel.periodState.value, viewModel.dayIndexState.intValue) {
++    LaunchedEffect(
++        viewModel.isPeriodResolved,
++        viewModel.periodState.value,
++        viewModel.dayIndexState.intValue
++    ) {
++        if (!viewModel.isPeriodResolved) return@LaunchedEffect
++
+         when(viewModel.periodState.value) {
+             Period.WEEK -> viewModel.calculateWeekDeviceUsage(true)
+             Period.DAY -> viewModel.calculateDayDeviceUsage(true)

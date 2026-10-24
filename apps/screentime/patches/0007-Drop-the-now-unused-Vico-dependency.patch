@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 09:24:58 +0800
+Subject: [PATCH] Drop the now-unused Vico dependency
+
+The charts no longer use Vico, so remove the implementation dependency
+and its version-catalog entry. Also drop the Vico entry from the
+third-party libraries screen and the three associated string resources,
+so the About screen no longer lists a library that is not shipped.
+
+Debug APK drops from ~25.3 MB to ~23.9 MB.
+---
+ app/build.gradle.kts                                     | 1 -
+ .../atharok/screentime/domain/entities/ThirdLibrary.kt   | 9 ---------
+ .../main/java/com/atharok/screentime/ui/views/Chart.kt   | 2 +-
+ app/src/main/res/values/strings.xml                      | 5 -----
+ gradle/libs.versions.toml                                | 2 --
+ 5 files changed, 1 insertion(+), 18 deletions(-)
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 91b4d39..36db958 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -89,7 +89,6 @@ dependencies {
+     implementation(libs.androidx.navigation.compose)
+     implementation(libs.androidx.datastore)
+     implementation(libs.koin.androidx.compose)
+-    implementation(libs.vico.compose.m3)
+     implementation(libs.kotlinx.serialization.json)
+     implementation(libs.glance.appwidget)
+     implementation(libs.glance.material3)
+diff --git a/app/src/main/java/com/atharok/screentime/domain/entities/ThirdLibrary.kt b/app/src/main/java/com/atharok/screentime/domain/entities/ThirdLibrary.kt
+index 2ed99e3..58190e0 100644
+--- a/app/src/main/java/com/atharok/screentime/domain/entities/ThirdLibrary.kt
++++ b/app/src/main/java/com/atharok/screentime/domain/entities/ThirdLibrary.kt
+@@ -110,15 +110,6 @@ enum class ThirdLibrary(
+         licenseUrl = R.string.apache_license_2_0_url
+     ),
+ 
+-    VICO(
+-        title = R.string.vico_name,
+-        id = R.string.vico_id,
+-        codeHost = R.string.github,
+-        codeUrl = R.string.vico_url,
+-        license = R.string.apache_license_2_0,
+-        licenseUrl = R.string.apache_license_2_0_url
+-    ),
+-
+     KOTLIN_SERIALIZATION(
+         title = R.string.kotlin_serialization_name,
+         id = R.string.kotlin_serialization_id,
+diff --git a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+index ea9f23c..1d22874 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+@@ -50,7 +50,7 @@ private fun computeChartAxis(maxHours: Double): ChartAxis {
+  * Lightweight bar chart drawn with Compose Canvas.
+  *
+  * [data] keys are the bottom-axis labels and values are durations in hours. The chart keeps the
+- * features of the previous Vico chart: a value axis with duration labels, grid lines, rounded
++ * features of the previous chart: a value axis with duration labels, grid lines, rounded
+  * bars, a dashed average line and per-day/hour labels.
+  */
+ @Composable
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index db0a350..0c26a79 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -123,11 +123,6 @@
+     <string name="koin_id" translatable="false">io.insert-koin:koin-androidx-compose</string>
+     <string name="koin_url" translatable="false">https://github.com/InsertKoinIO/koin</string>
+ 
+-    <!-- Vico Library (charts) -->
+-    <string name="vico_name" translatable="false">Vico</string>
+-    <string name="vico_id" translatable="false">com.patrykandpatrick.vico</string>
+-    <string name="vico_url" translatable="false">https://github.com/patrykandpatrick/vico</string>
+-
+     <!-- Kotlin Serialization Library -->
+     <string name="kotlin_serialization_name" translatable="false">Kotlin Serialization</string>
+     <string name="kotlin_serialization_id" translatable="false">org.jetbrains.kotlinx:kotlinx-serialization-json</string>
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+index dd790ff..c1f1817 100644
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -11,7 +11,6 @@ composeBom = "2026.09.00"
+ navigationCompose = "2.10.1"
+ datastore = "1.2.1"
+ koin = "4.2.2"
+-vico = "3.3.1"
+ kotlinxSerializationJson = "1.11.0"
+ glance = "1.2.0"
+ workRuntimeKtx = "2.11.2"
+@@ -35,7 +34,6 @@ androidx-material-icons-extended = { group = "androidx.compose.material", name =
+ androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+ androidx-datastore = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+ koin-androidx-compose = { group = "io.insert-koin", name = "koin-androidx-compose", version.ref = "koin" }
+-vico-compose-m3 = { group = "com.patrykandpatrick.vico", name = "compose-m3", version.ref = "vico" }
+ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
+ glance-appwidget = { module = "androidx.glance:glance-appwidget", version.ref = "glance" }
+ glance-material3 = { module = "androidx.glance:glance-material3", version.ref = "glance" }

@@ -1,0 +1,440 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 07:46:21 +0800
+Subject: [PATCH] Store the selected service icon on recurring expenses
+
+---
+ .../12.json                                   | 282 ++++++++++++++++++
+ .../shared/data/RecurringExpenseData.kt       |   1 +
+ .../database/RecurringExpenseDatabase.kt      |  11 +-
+ .../model/database/RecurringExpenseEntry.kt   |   1 +
+ .../database/RecurringExpenseEntryMapper.kt   |   1 +
+ .../RecurringExpenseWithTagsMapper.kt         |   1 +
+ .../EditRecurringExpenseViewModel.kt          |   6 +
+ 7 files changed, 302 insertions(+), 1 deletion(-)
+ create mode 100644 shared/schemas/de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase/12.json
+
+diff --git a/shared/schemas/de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase/12.json b/shared/schemas/de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase/12.json
+new file mode 100644
+index 0000000..a06d615
+--- /dev/null
++++ b/shared/schemas/de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase/12.json
+@@ -0,0 +1,282 @@
++{
++  "formatVersion": 1,
++  "database": {
++    "version": 12,
++    "identityHash": "45eb1c00617a200beada29e95c3b07b8",
++    "entities": [
++      {
++        "tableName": "recurring_expenses",
++        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT, `description` TEXT, `price` REAL, `everyXRecurrence` INTEGER, `recurrence` INTEGER, `firstPayment` INTEGER, `currencyCode` TEXT NOT NULL, `notifyForExpense` INTEGER NOT NULL, `requireManualConfirmation` INTEGER NOT NULL, `endDate` INTEGER, `archivedDate` INTEGER, `serviceId` TEXT)",
++        "fields": [
++          {
++            "fieldPath": "id",
++            "columnName": "id",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "name",
++            "columnName": "name",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "description",
++            "columnName": "description",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "price",
++            "columnName": "price",
++            "affinity": "REAL"
++          },
++          {
++            "fieldPath": "everyXRecurrence",
++            "columnName": "everyXRecurrence",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "recurrence",
++            "columnName": "recurrence",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "firstPayment",
++            "columnName": "firstPayment",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "currencyCode",
++            "columnName": "currencyCode",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "notifyForExpense",
++            "columnName": "notifyForExpense",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "requireManualConfirmation",
++            "columnName": "requireManualConfirmation",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "endDate",
++            "columnName": "endDate",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "archivedDate",
++            "columnName": "archivedDate",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "serviceId",
++            "columnName": "serviceId",
++            "affinity": "TEXT"
++          }
++        ],
++        "primaryKey": {
++          "autoGenerate": true,
++          "columnNames": [
++            "id"
++          ]
++        }
++      },
++      {
++        "tableName": "tags",
++        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `color` INTEGER NOT NULL)",
++        "fields": [
++          {
++            "fieldPath": "id",
++            "columnName": "id",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "title",
++            "columnName": "title",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "color",
++            "columnName": "color",
++            "affinity": "INTEGER",
++            "notNull": true
++          }
++        ],
++        "primaryKey": {
++          "autoGenerate": true,
++          "columnNames": [
++            "id"
++          ]
++        }
++      },
++      {
++        "tableName": "ExpenseTagCrossRef",
++        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`expenseId` INTEGER NOT NULL, `tagId` INTEGER NOT NULL, PRIMARY KEY(`expenseId`, `tagId`))",
++        "fields": [
++          {
++            "fieldPath": "expenseId",
++            "columnName": "expenseId",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "tagId",
++            "columnName": "tagId",
++            "affinity": "INTEGER",
++            "notNull": true
++          }
++        ],
++        "primaryKey": {
++          "autoGenerate": false,
++          "columnNames": [
++            "expenseId",
++            "tagId"
++          ]
++        },
++        "indices": [
++          {
++            "name": "index_ExpenseTagCrossRef_tagId",
++            "unique": false,
++            "columnNames": [
++              "tagId"
++            ],
++            "orders": [],
++            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExpenseTagCrossRef_tagId` ON `${TABLE_NAME}` (`tagId`)"
++          },
++          {
++            "name": "index_ExpenseTagCrossRef_expenseId",
++            "unique": false,
++            "columnNames": [
++              "expenseId"
++            ],
++            "orders": [],
++            "createSql": "CREATE INDEX IF NOT EXISTS `index_ExpenseTagCrossRef_expenseId` ON `${TABLE_NAME}` (`expenseId`)"
++          }
++        ]
++      },
++      {
++        "tableName": "reminders",
++        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `expenseId` INTEGER NOT NULL, `daysBeforePayment` INTEGER NOT NULL, `lastNotificationDate` INTEGER, FOREIGN KEY(`expenseId`) REFERENCES `recurring_expenses`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
++        "fields": [
++          {
++            "fieldPath": "id",
++            "columnName": "id",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "expenseId",
++            "columnName": "expenseId",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "daysBeforePayment",
++            "columnName": "daysBeforePayment",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "lastNotificationDate",
++            "columnName": "lastNotificationDate",
++            "affinity": "INTEGER"
++          }
++        ],
++        "primaryKey": {
++          "autoGenerate": true,
++          "columnNames": [
++            "id"
++          ]
++        },
++        "indices": [
++          {
++            "name": "index_reminders_expenseId",
++            "unique": false,
++            "columnNames": [
++              "expenseId"
++            ],
++            "orders": [],
++            "createSql": "CREATE INDEX IF NOT EXISTS `index_reminders_expenseId` ON `${TABLE_NAME}` (`expenseId`)"
++          }
++        ],
++        "foreignKeys": [
++          {
++            "table": "recurring_expenses",
++            "onDelete": "CASCADE",
++            "onUpdate": "NO ACTION",
++            "columns": [
++              "expenseId"
++            ],
++            "referencedColumns": [
++              "id"
++            ]
++          }
++        ]
++      },
++      {
++        "tableName": "payment_records",
++        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `expenseId` INTEGER NOT NULL, `paymentDate` INTEGER NOT NULL, FOREIGN KEY(`expenseId`) REFERENCES `recurring_expenses`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
++        "fields": [
++          {
++            "fieldPath": "id",
++            "columnName": "id",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "expenseId",
++            "columnName": "expenseId",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "paymentDate",
++            "columnName": "paymentDate",
++            "affinity": "INTEGER",
++            "notNull": true
++          }
++        ],
++        "primaryKey": {
++          "autoGenerate": true,
++          "columnNames": [
++            "id"
++          ]
++        },
++        "indices": [
++          {
++            "name": "index_payment_records_expenseId",
++            "unique": false,
++            "columnNames": [
++              "expenseId"
++            ],
++            "orders": [],
++            "createSql": "CREATE INDEX IF NOT EXISTS `index_payment_records_expenseId` ON `${TABLE_NAME}` (`expenseId`)"
++          }
++        ],
++        "foreignKeys": [
++          {
++            "table": "recurring_expenses",
++            "onDelete": "CASCADE",
++            "onUpdate": "NO ACTION",
++            "columns": [
++              "expenseId"
++            ],
++            "referencedColumns": [
++              "id"
++            ]
++          }
++        ]
++      }
++    ],
++    "setupQueries": [
++      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
++      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '45eb1c00617a200beada29e95c3b07b8')"
++    ]
++  }
++}
+\ No newline at end of file
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
+index 478dbf9..66f812f 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
+@@ -42,6 +42,7 @@ data class RecurringExpenseData(
+     val requireManualConfirmation: Boolean = false,
+     val endDate: Instant? = null,
+     val archivedDate: Instant? = null,
++    val serviceId: String? = null,
+ ) {
+     fun getNextPaymentDay(): LocalDate? {
+         if (firstPayment == null) return null
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
+index 249348d..319af89 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
+@@ -24,7 +24,7 @@ expect object RecurringExpenseDatabaseConstructor : RoomDatabaseConstructor<Recu
+         ReminderEntry::class,
+         PaymentRecordEntry::class,
+     ],
+-    version = 11,
++    version = 12,
+ )
+ @ConstructedBy(RecurringExpenseDatabaseConstructor::class)
+ abstract class RecurringExpenseDatabase : RoomDatabase() {
+@@ -43,6 +43,7 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
+                 .addMigrations(migration_8_9)
+                 .addMigrations(migration_9_10)
+                 .addMigrations(migration_10_11)
++                .addMigrations(migration_11_12)
+                 .fallbackToDestructiveMigrationOnDowngrade(true)
+                 .setQueryCoroutineContext(Dispatchers.IO)
+                 .build()
+@@ -340,5 +341,13 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
+                     )
+                 }
+             }
++        val migration_11_12 =
++            object : Migration(11, 12) {
++                override suspend fun migrate(connection: SQLiteConnection) {
++                    connection.execSQL(
++                        "ALTER TABLE recurring_expenses ADD COLUMN serviceId TEXT DEFAULT NULL",
++                    )
++                }
++            }
+     }
+ }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntry.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntry.kt
+index 932b4e8..6fd49a4 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntry.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntry.kt
+@@ -18,6 +18,7 @@ data class RecurringExpenseEntry(
+     @ColumnInfo(name = "requireManualConfirmation") val requireManualConfirmation: Boolean = false,
+     @ColumnInfo(name = "endDate") val endDate: Long? = null,
+     @ColumnInfo(name = "archivedDate") val archivedDate: Long? = null,
++    @ColumnInfo(name = "serviceId") val serviceId: String? = null,
+ ) {
+     fun getMonthlyPrice(): Float {
+         return when (recurrence) {
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntryMapper.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntryMapper.kt
+index d5dcdbe..598cdb0 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntryMapper.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseEntryMapper.kt
+@@ -17,6 +17,7 @@ internal fun RecurringExpenseData.toEntryRecurringExpense(defaultCurrencyCode: S
+         requireManualConfirmation = this.requireManualConfirmation,
+         endDate = this.endDate?.toEpochMilliseconds(),
+         archivedDate = this.archivedDate?.toEpochMilliseconds(),
++        serviceId = this.serviceId,
+     )
+ }
+ 
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+index b40b7c0..fcb1c38 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+@@ -29,6 +29,7 @@ internal fun RecurringExpenseWithTagsEntry.toRecurringExpenseData(
+         requireManualConfirmation = this.expense.requireManualConfirmation,
+         endDate = this.expense.endDate?.let { Instant.fromEpochMilliseconds(it) },
+         archivedDate = this.expense.archivedDate?.let { Instant.fromEpochMilliseconds(it) },
++        serviceId = this.expense.serviceId,
+     )
+ }
+ 
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt
+index 69a90ff..713f322 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/EditRecurringExpenseViewModel.kt
+@@ -44,6 +44,7 @@ class EditRecurringExpenseViewModel(
+     var currencyError by mutableStateOf(false)
+         private set
+     var selectedRecurrence by mutableStateOf(Recurrence.Monthly)
++    var selectedServiceId: String? by mutableStateOf(null)
+     var firstPaymentDate: Instant? by mutableStateOf(null)
+     var endDate: Instant? by mutableStateOf(null)
+     var archivedDate: Instant? by mutableStateOf(null)
+@@ -99,6 +100,7 @@ class EditRecurringExpenseViewModel(
+                         priceState = expense.price.value.toLocalString()
+                         everyXRecurrenceState = expense.everyXRecurrence.toString()
+                         selectedRecurrence = expense.recurrence
++                        selectedServiceId = expense.serviceId
+                         firstPaymentDate = expense.firstPayment
+                         endDate = expense.endDate
+                         archivedDate = expense.archivedDate
+@@ -143,6 +145,7 @@ class EditRecurringExpenseViewModel(
+                     selectedCurrencyOption,
+                     everyXRecurrenceState,
+                     selectedRecurrence,
++                    selectedServiceId,
+                     firstPaymentDate,
+                     endDate,
+                     notifyForExpense,
+@@ -339,6 +342,7 @@ class EditRecurringExpenseViewModel(
+                 ),
+             everyXRecurrence = everyXRecurrenceState.toIntOrNull() ?: 1,
+             recurrence = selectedRecurrence,
++            serviceId = selectedServiceId,
+             tags = tags.filter { it.second }.map { it.first },
+             firstPayment = firstPaymentDate,
+             notifyForExpense = notifyForExpense,
+@@ -438,6 +442,7 @@ class EditRecurringExpenseViewModel(
+                 tags.any { it.second } ||
+                 !notifyForExpense ||
+                 requireManualConfirmation ||
++                selectedServiceId != null ||
+                 reminders.size != 1 ||
+                 reminders.firstOrNull()?.daysBeforePayment != defaultReminderDays
+         } else {
+@@ -451,6 +456,7 @@ class EditRecurringExpenseViewModel(
+             if (selectedCurrencyOption.currencyCode != expense.price.currencyCode) return true
+             if (everyXRecurrenceState != expense.everyXRecurrence.toString()) return true
+             if (selectedRecurrence != expense.recurrence) return true
++            if (selectedServiceId != expense.serviceId) return true
+             if (firstPaymentDate != expense.firstPayment) return true
+             if (endDate != expense.endDate) return true
+             if (notifyForExpense != expense.notifyForExpense) return true

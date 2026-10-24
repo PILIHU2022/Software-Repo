@@ -1,0 +1,10 @@
+repo_url: https://pilihu2022.github.io/Software-Repo/repo
+repo_name: Patchwork
+repo_description: |
+  Personal patchwork builds of ScreenTime and RecurringExpenseTracker.
+keystore: keystore.jks
+repo_keyalias: patchwork
+keystorepass: patchwork123
+keypass: patchwork123
+keydname: CN=Patchwork, OU=Patchwork, O=Patchwork, L=Beijing, ST=Beijing, C=CN
+archive_older: 0
