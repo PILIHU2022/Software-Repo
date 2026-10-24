@@ -29,7 +29,7 @@ issue，而不是继续发布过期代码。
 
 | 应用 | 上游 | 上游提交 | 补丁数 | 已发布 |
 | --- | --- | --- | --- | --- |
-| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) | `82ef9c9` | 15 | `0.21.4-patchwork` (6802) |
+| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) | `82ef9c9` | 17 | `0.21.4-patchwork` (6804) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) | `9ac2520` | 8 | `1.4.1-patchwork` (1301) |
 
 **ScreenTime** —— 每日使用记录持久化到本地 SQLite 数据库，新增基于该历史的分析页；
@@ -42,7 +42,9 @@ issue，而不是继续发布过期代码。
 tab：月历卡片使用 7 列 1:1 日格和按 locale 推断的每周首日；日格显示日期、18dp
 着色服务图标、同一天多笔付款的 `+N` 徽标和已付款对勾；月卡下方是当日详情卡片；
 支持箭头与横向滑动换月；整月投影在主线程之外计算；提供英文、简体中文、繁体中文
-文案。规格见 [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md)。
+文案。后续补丁还加入了 Tilla 风格主界面顶部栏（排序/筛选/菜单）、分析页、
+存档页、暂停/恢复（数据库 v13）、拆分后的设置中心（7 套预设主题、含 Catppuccin）
+以及可自定义的卡片布局。规格见 [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md)。
 
 ## F-Droid 仓库
 
@@ -52,7 +54,7 @@ tab：月历卡片使用 7 列 1:1 日格和按 locale 推断的每周首日；�
 https://software.sparkzh.top/repo
 ```
 
-索引返回 HTTP 200，`index-v2.json` 中列出 `de.dbauer.expensetracker` **6802** 与
+索引返回 HTTP 200，`index-v2.json` 中列出 `de.dbauer.expensetracker` **6804** 与
 `com.atharok.screentime` **1301**。站点首页：<https://software.sparkzh.top/>。
 GitHub Pages 地址 <https://pilihu2022.github.io/Software-Repo/repo> 会 301 跳转到
 这个域名。
@@ -83,7 +85,8 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 
 `build.yml` 每 6 小时运行一次（`23 */6 * * *`），在推送到 `main` 且改动涉及
 `apps/**`、`scripts/**` 或工作流本身时运行，也支持手动触发（可选 `force` 输入）。
-每次运行：
+改动 `apps/*/patches/` 的补丁提交本身就是一次 `apps/**` 推送：**会立即触发构建**
+（无需等定时运行），并按下文的版本号规则自动 +1。每次运行：
 
 1. **check** —— `scripts/check-upstream.sh` 对比上游 `main` 的 SHA 与
    `fdroid/.build-state.json`，生成构建矩阵；
@@ -99,7 +102,7 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
    复现命令。
 
 最近一次完整构建
-（[run 40060044089](https://github.com/PILIHU2022/Software-Repo/actions/runs/40060044089)）
+（[run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167)）
 是绿色的。Pages 需要由仓库所有者手动启用一次（Settings → Pages → Build and
 deployment → Source: “GitHub Actions”）；`GITHUB_TOKEN` 无权创建 Pages 站点。
 站点发布在自定义域名 `software.sparkzh.top` 上（`fdroid/CNAME` 负责保持绑定），
@@ -122,7 +125,7 @@ versionName = "<上游 versionName>-patchwork"
 | 应用 | 上游 versionCode / versionName | 补丁队列提交数 | 构建结果 |
 | --- | --- | --- | --- |
 | ScreenTime | `13` / `"1.4.1"` | 1 | `1301` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 2 | `6802` / `"0.21.4-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 4 | `6804` / `"0.21.4-patchwork"` |
 
 ## 仓库结构
 
@@ -132,7 +135,7 @@ versionName = "<上游 versionName>-patchwork"
 ├── README.zh-CN.md            # 简体中文说明（本文件）
 ├── LICENSE                    # GPL-3.0-only
 ├── apps/
-│   ├── expenses/{app.conf,patches/}     # 0001..0015
+│   ├── expenses/{app.conf,patches/}     # 0001..0017
 │   └── screentime/{app.conf,patches/}   # 0001..0008
 ├── scripts/
 │   ├── build-app.sh           # 拉上游、打补丁、改版本、构建、校验

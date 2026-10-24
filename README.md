@@ -33,7 +33,7 @@ code.
 
 | App | Upstream | Upstream revision | Patches | Published |
 | --- | --- | --- | --- | --- |
-| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) | `82ef9c9` | 15 | `0.21.4-patchwork` (6802) |
+| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) | `82ef9c9` | 17 | `0.21.4-patchwork` (6804) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) | `9ac2520` | 8 | `1.4.1-patchwork` (1301) |
 
 **ScreenTime** — daily usage history persisted in a local SQLite database, a new
@@ -48,7 +48,10 @@ card with 7-column 1:1 day cells and a locale-aware week start; day cells with
 the date, an 18dp tinted service icon, a `+N` badge for multiple payments and a
 paid check; day-detail cards below the month; arrow and swipe month paging; month
 projection off the main thread; English, Simplified and Traditional Chinese
-strings. See [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md).
+strings. Later patches add a Tilla-style home bar (sort/filter/menu), an
+analytics screen, an archive screen, pause/resume (database v13), a redesigned
+settings hub with seven preset themes (including Catppuccin) and a configurable
+card layout. See [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md).
 
 ## F-Droid repository
 
@@ -60,7 +63,7 @@ https://software.sparkzh.top/repo
 ```
 
 The index returns HTTP 200, and `index-v2.json` lists
-`de.dbauer.expensetracker` **6802** and `com.atharok.screentime` **1301**.
+`de.dbauer.expensetracker` **6804** and `com.atharok.screentime` **1301**.
 Landing page: <https://software.sparkzh.top/>. The GitHub Pages URL
 <https://pilihu2022.github.io/Software-Repo/repo> redirects to this domain.
 
@@ -93,7 +96,10 @@ mismatch when the raw URL is used; the content is identical.
 
 `build.yml` runs every 6 hours (`23 */6 * * *`), on pushes to `main` touching
 `apps/**`, `scripts/**` or the workflow itself, and on manual dispatch (optional
-`force` input). Each run:
+`force` input). A push that changes the patch queues under `apps/*/patches/` is
+an ordinary `apps/**` push: it triggers a build immediately (no need to wait for
+the schedule) and the patch-queue commit bumps `versionCode` as described below.
+Each run:
 
 1. **check** — `scripts/check-upstream.sh` compares upstream `main` SHAs with
    `fdroid/.build-state.json` and emits the build matrix;
@@ -109,7 +115,7 @@ mismatch when the raw URL is used; the content is identical.
    the run link and a local reproduction command.
 
 The last full build
-([run 40060044089](https://github.com/PILIHU2022/Software-Repo/actions/runs/40060044089))
+([run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167))
 is green. Pages was enabled once manually (Settings → Pages → Build and
 deployment → Source: “GitHub Actions”); `GITHUB_TOKEN` cannot create the site.
 The site is published on the custom domain `software.sparkzh.top` (a `CNAME`
@@ -136,7 +142,7 @@ change.
 | App | Upstream versionCode / versionName | Patch-queue commits | Result |
 | --- | --- | --- | --- |
 | ScreenTime | `13` / `"1.4.1"` | 1 | `1301` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 2 | `6802` / `"0.21.4-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 4 | `6804` / `"0.21.4-patchwork"` |
 
 ## Repository layout
 
@@ -146,7 +152,7 @@ change.
 ├── README.zh-CN.md            # Simplified Chinese
 ├── LICENSE                    # GPL-3.0-only
 ├── apps/
-│   ├── expenses/{app.conf,patches/}     # 0001..0015
+│   ├── expenses/{app.conf,patches/}     # 0001..0017
 │   └── screentime/{app.conf,patches/}   # 0001..0008
 ├── scripts/
 │   ├── build-app.sh           # fetch, patch, version, build, verify
