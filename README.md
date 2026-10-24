@@ -77,11 +77,14 @@ RecurringExpenseTracker 的改动最多：
 
 ## F-Droid 仓库
 
-仓库地址（正式地址；Pages 尚未启用时返回 404，见下方“备用地址”）：
+仓库地址（GitHub Pages，**已启用并验证**）：
 
 ```
 https://pilihu2022.github.io/Software-Repo/repo
 ```
+
+站点根 <https://pilihu2022.github.io/Software-Repo/> 是一个简单的导航页。
+`index-v2.json` 里的最新版本：expenses **6802**、screentime **1301**。
 
 在 F-Droid 客户端中添加：
 
@@ -101,52 +104,43 @@ SHA-1:   C7:CB:2C:10:F7:97:3E:80:C8:64:93:C5:31:69:B5:99:5D:6E:E2:F6
 > 不要把这个仓库和 F-Droid 官方源混在一起：两个应用的包名与官方版本相同，
 > 但签名密钥不同，Android 会拒绝覆盖安装。安装前请先卸载官方版本。
 
-### 启用 GitHub Pages（一次性，仓库所有者操作）
+### GitHub Pages（已启用）
 
-正式地址 `https://pilihu2022.github.io/Software-Repo/repo` 通过 GitHub Pages
-提供，但**当前仓库尚未启用 Pages**，所以这个地址会返回 404。启用方法（只需
-一次）：
+GitHub Pages 已于 2026-10-24 启用并验证：`/repo/index-v2.json` 返回 200，
+`entry.json` 里记录的 sha256 与实际索引一致，APK 的下载 sha256 与索引一致。
+如果以后 Pages 被关闭、地址重新变成 404，恢复只需要两步：
 
-1. 打开仓库 **Settings**；
-2. 左侧 **Pages**；
-3. **Build and deployment → Source** 选择 **“GitHub Actions”**；
-4. 不需要手动配置分支或目录，启用后由 `Deploy Pages` 工作流自动上传
-   已提交的 `fdroid/`。
+1. 仓库 **Settings → Pages → Build and deployment → Source** 选择
+   **“GitHub Actions”**（只需要点这一次；`GITHUB_TOKEN` 无权自动创建 Pages
+   站点，`configure-pages` 的 `enablement: true` 需要 PAT / GitHub App token）；
+2. 打开 **Actions → Deploy Pages → Run workflow → Run**，或等每小时一次的定时
+   运行。
 
-`GITHUB_TOKEN` 无权自动创建 Pages 站点（`configure-pages` 的
-`enablement: true` 需要 PAT / GitHub App token），因此工作流在 Pages 未启用
-时只打印 warning，不会让构建失败。
+`.github/workflows/deploy-pages.yml` 是独立的发布安全网，只把仓库中**已经
+提交**的 `fdroid/` 目录上传到 Pages，不构建任何 APK：
 
-> **启用后不需要重新构建。** `.github/workflows/deploy-pages.yml` 里的
-> **Deploy Pages** 工作流是独立的发布安全网，只把仓库中**已经提交**的
-> `fdroid/` 目录上传到 Pages，不构建任何 APK：
->
-> - 它每小时（cron `17 * * * *`）运行一次，也监听 `fdroid/**` 的 push；
-> - 启用 Pages 后最多一小时内会自动部署；想立刻生效就打开
->   **Actions → Deploy Pages → Run workflow → Run**；
-> - 它在 Pages 未启用时所有 Pages 步骤都是 `continue-on-error`，**运行结果
->   仍然是绿色**（只在 Step Summary 里说明原因），不会产生失败通知。
->
-> 仍然可用的老办法（**替代方案，不是必须**）：**Actions → Patchwork build
-> → Run workflow → 勾选 `force` → Run** 会完整重建并发布 `/repo`，同时顺带
-> 部署 Pages。如果只想让 Pages 发布已提交的内容，用 Deploy Pages 就够了。
-> 启用前或部署仍失败时，继续用下面的 raw 备用地址。
+- 每小时（cron `17 * * * *`）运行一次，也监听 `fdroid/**` 的 push；
+- Pages 关闭时所有 Pages 步骤都是 `continue-on-error`，**运行结果仍然是绿色**
+  （只在 Step Summary 里说明原因），不会产生失败通知；
+- 想立刻重新发布已提交的内容，直接手动 dispatch 这个工作流即可。
 
-### 备用地址（Pages 尚未启用时）
+`Patchwork build → Run workflow → force` 仍然可用，但它会完整重建两个 APK 再
+发布，只在需要重新构建时才用。
 
-Pages 未启用或返回 404 时，可以直接使用 `main` 分支上的原始文件地址：
+### 备用地址（Pages 不可用时）
+
+如果 Pages 暂时不可用或返回 404，可以直接使用 `main` 分支上的原始文件地址：
 
 ```
 https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 ```
 
 它提供与 Pages 完全相同的 `index-v2.json`、`entry.json` 和 APK（同样以
-`/repo` 结尾），索引里最新版本与 Pages 部署后一致。两种地址的索引都由同一把
-仓库密钥签名，指纹见上。
+`/repo` 结尾）。两种地址的索引都由同一把仓库密钥签名，指纹见上。
 
 > 索引里的 `repo.address` 始终写正式 Pages 地址；用 raw 地址添加仓库时，
 > 部分 F-Droid 客户端会提示“仓库地址与索引中的地址不一致”（address
-> mismatch）。内容完全相同，确认指纹后继续即可；Pages 启用后建议改回正式
+> mismatch）。内容完全相同，确认指纹后继续即可；Pages 恢复后建议改回正式
 > 地址。
 
 ## 版本号策略
@@ -335,14 +329,11 @@ stdout 是一行可直接交给 `fromJSON` 的 JSON，stderr 是人类可读摘�
 
 - **与官方包名相同、签名不同**：首次安装必须卸载官方版本，否则会报
   `INSTALL_FAILED_UPDATE_INCOMPATIBLE`；卸载会丢失应用数据，请先备份。
-- **GitHub Pages 首次需要启用**：仓库 Settings → Pages → Build and
-  deployment → Source 选择 “GitHub Actions”。`configure-pages` 的
-  `enablement: true` 需要 PAT / GitHub App token，普通 `GITHUB_TOKEN` 无法
-  自动创建 Pages 站点；工作流会把该失败降级为 warning，并使用上面的
-  raw.githubusercontent.com 备用地址。首次启用前正式地址会 404。**启用后
-  不需要重建**：独立的 **Deploy Pages** 工作流每小时自动发布已提交的
-  `fdroid/`（也可在 Actions 里手动 dispatch 立即运行），期间运行结果保持
-  绿色；`Patchwork build → force` 只是可选的重建/发布替代方案。
+- **GitHub Pages 需要一次性手动启用**（已于 2026-10-24 完成）：配置入口是
+  Settings → Pages → Build and deployment → Source: “GitHub Actions”；
+  `GITHUB_TOKEN` 无法自动创建 Pages 站点，因此这一步必须由仓库所有者点一次。
+  之后由独立的 **Deploy Pages** 工作流负责发布已提交的 `fdroid/`，Pages 关闭
+  时该工作流保持绿色并打印 warning。
 - **失败 issue 不会自动关闭**：历史上失败运行创建的 “Patchwork build failed”
   issue 在工作流恢复绿色后不会自动关闭（工作流只负责开新 issue 或追加评论），
   需要手动关闭。
