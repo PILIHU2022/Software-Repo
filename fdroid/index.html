@@ -6,11 +6,20 @@
 <title>Patchwork F-Droid 仓库</title>
 <style>
   :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
   body { font-family: system-ui, -apple-system, "Noto Sans SC", sans-serif; max-width: 46rem;
          margin: 3rem auto; padding: 0 1.2rem; line-height: 1.65; }
+  h1 { font-size: clamp(1.5rem, 5vw, 2rem); line-height: 1.25; }
   code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .box { border: 1px solid #8884; border-radius: 12px; padding: 1rem 1.2rem; margin: 1.2rem 0; }
-  a { color: #0b74d1; }
+  /* Long URLs and the colon-separated fingerprint must wrap inside the box. */
+  .mono { overflow-wrap: anywhere; word-break: break-word; }
+  .fingerprint { display: block; margin: 0; font-size: .9rem; line-height: 1.5;
+                 overflow-wrap: anywhere; word-break: normal;
+                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; }
+  .box { border: 1px solid #8884; border-radius: 12px; padding: 1rem 1.2rem; margin: 1.2rem 0;
+         min-width: 0; overflow-wrap: anywhere; }
+  .box p { margin: .45rem 0; }
+  a { color: #0b74d1; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -20,7 +29,7 @@
   <p><strong>仓库地址</strong>（F-Droid → 设置 → 存储库 → 添加）：</p>
   <p class="mono"><a href="./repo/">https://pilihu2022.github.io/Software-Repo/repo</a></p>
   <p><strong>签名证书 SHA-256</strong>：</p>
-  <p class="mono">D3:34:88:79:40:65:C9:2E:37:0D:24:A1:0E:61:4E:1E:64:E3:19:B7:5E:6F:8B:B7:C4:AA:D6:7F:3A:5B:5E:01</p>
+  <code class="fingerprint">D3:<wbr>34:<wbr>88:<wbr>79:<wbr>40:<wbr>65:<wbr>C9:<wbr>2E:<wbr>37:<wbr>0D:<wbr>24:<wbr>A1:<wbr>0E:<wbr>61:<wbr>4E:<wbr>1E:<wbr>64:<wbr>E3:<wbr>19:<wbr>B7:<wbr>5E:<wbr>6F:<wbr>8B:<wbr>B7:<wbr>C4:<wbr>AA:<wbr>D6:<wbr>7F:<wbr>3A:<wbr>5B:<wbr>5E:<wbr>01</code>
 </div>
 <p>包含：<strong>RecurringExpenseTracker</strong>（0.21.4-patchwork，Tilla 风格首页与日历）、
 <strong>ScreenTime</strong>（1.4.1-patchwork，本地历史库 + Canvas 图表）。</p>
