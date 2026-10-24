@@ -208,7 +208,7 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 
 输出文件：`dist/<APK_NAME_PREFIX>-<versionName>.apk` 和 `dist/build-info.txt`
 （包含 upstream_commit、patch_count、version_code、version_name、variant、
-built_at、sha256）。
+built_at、apk、apk_size、sha256）。
 
 构建缓存与产物在 `.cache/`、`dist/` 下，均已被 `.gitignore` 忽略。
 

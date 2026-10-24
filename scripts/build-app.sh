@@ -309,6 +309,7 @@ ACTUAL_NAME="$(printf '%s\n' "$BADGING" | sed -nE "s/^package: name='[^']*' vers
     || die "APK versionName is '$ACTUAL_NAME', expected '$NEW_NAME'"
 
 SHA256="$(sha256sum "$DEST" | awk '{print $1}')"
+APK_SIZE="$(stat -c %s "$DEST" 2>/dev/null || stat -f %z "$DEST")"
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$OUT/build-info.txt" <<INFO
 app=$APP
@@ -322,6 +323,7 @@ version_name=$ACTUAL_NAME
 variant=release
 built_at=$BUILT_AT
 apk=$(basename "$DEST")
+apk_size=$APK_SIZE
 sha256=$SHA256
 INFO
 
