@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 16:53:39 +0800
+Subject: [PATCH] Animate the main and app-detail charts from zero
+
+The Canvas chart that replaced Vico in 0005 drew every bar at its final
+height, so the main screen and application detail screen had no reveal
+animation. Match Vico's default initial animation by growing the bars (and
+the dashed average line) from the baseline with the same reusable
+rememberAnimatedFraction helper used by the Analysis screen. The animation
+restarts whenever the chart data changes.
+---
+ .../com/atharok/screentime/ui/views/Chart.kt  | 20 ++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+index 358a896..0cb21a0 100644
+--- a/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
++++ b/app/src/main/java/com/atharok/screentime/ui/views/Chart.kt
+@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import com.atharok.screentime.common.utils.DateTimeUtils
+ import com.atharok.screentime.domain.entities.Period
++import com.atharok.screentime.ui.components.rememberAnimatedFraction
+ import kotlin.math.ceil
+ 
+ private const val CHART_HEIGHT_DP = 192
+@@ -58,11 +59,17 @@ fun Chart(
+     period: Period,
+     data: Map<String, Float>,
+     average: Double,
+-    modifier: Modifier = Modifier
++    modifier: Modifier = Modifier,
++    animate: Boolean = true
+ ) {
+     if (data.isEmpty()) return
+ 
+     val values = remember(data) { data.values.toList() }
++    val animationProgress = rememberAnimatedFraction(
++        target = 1f,
++        enabled = animate,
++        animationKey = data
++    )
+     val labels = remember(data) { data.keys.toList() }
+     val textMeasurer = rememberTextMeasurer()
+     val labelStyle = TextStyle(
+@@ -179,20 +186,23 @@ fun Chart(
+         values.forEachIndexed { index, value ->
+             if (value <= 0f) return@forEachIndexed
+             // Chart values are durations in hours; the axis is in minutes.
+-            val barHeight = (value * 60f / maxMinutes) * plotHeight
++            val finalBarHeight = ((value * 60f / maxMinutes) * plotHeight)
++                .coerceAtLeast(2.dp.toPx())
++            val barHeight = finalBarHeight * animationProgress
+             if (barHeight <= 0f) return@forEachIndexed
+             val left = plotLeft + index * slot + (slot - barWidth) / 2f
+             drawRoundRect(
+                 color = barColor.copy(alpha = 0.9f),
+                 topLeft = Offset(left, plotBottom - barHeight),
+-                size = Size(barWidth, barHeight.coerceAtLeast(2.dp.toPx())),
++                size = Size(barWidth, barHeight),
+                 cornerRadius = radius
+             )
+         }
+ 
+-        // Average line.
++        // Average line rises from the baseline together with the bars.
+         if (average > 0.0) {
+-            val y = valueToY((average * 60.0).toFloat())
++            val finalY = valueToY((average * 60.0).toFloat())
++            val y = plotBottom - (plotBottom - finalY) * animationProgress
+             drawLine(
+                 color = averageColor,
+                 start = Offset(plotLeft, y),
