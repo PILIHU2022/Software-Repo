@@ -1,0 +1,2203 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 15:46:36 +0800
+Subject: [PATCH] Complete card layout editor, add About credits and Catppuccin
+ theme
+
+---
+ .../values-zh-rCN/strings.xml                 |  50 ++
+ .../composeResources/values/strings.xml       |  50 ++
+ .../shared/data/RecurringExpenseData.kt       |   2 +
+ .../RecurringExpenseWithTagsMapper.kt         |   5 +
+ .../FakeUserPreferencesRepository.kt          |  11 +-
+ .../datastore/IUserPreferencesRepository.kt   |  11 +-
+ .../KSafeUserPreferencesRepository.kt         |  11 +-
+ .../shared/ui/RecurringExpenseOverview.kt     |  29 +-
+ .../shared/ui/TillaExpenseCard.kt             | 178 +++++++-
+ .../shared/ui/about/AboutScreen.kt            |  93 +++-
+ .../shared/ui/analytics/AnalyticsScreen.kt    |  35 +-
+ .../editexpense/EditRecurringExpenseScreen.kt | 247 +++++-----
+ .../shared/ui/home/CardLayoutPrefs.kt         |  79 +++-
+ .../ui/settings/SettingsAppearanceScreen.kt   |   2 +
+ .../ui/settings/SettingsCardLayoutScreen.kt   | 430 ++++++++++++++----
+ .../shared/ui/settings/SettingsHubScreen.kt   |  12 +
+ .../shared/ui/settings/SettingsScreen.kt      |   1 +
+ .../shared/ui/theme/CatppuccinMocha.kt        | 174 +++++++
+ .../expensetracker/shared/ui/theme/Theme.kt   |  85 +++-
+ .../shared/ui/theme/ThemePreset.kt            |   6 +-
+ .../shared/viewmodel/SettingsViewModel.kt     |  57 ++-
+ 21 files changed, 1286 insertions(+), 282 deletions(-)
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/CatppuccinMocha.kt
+
+diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+index a730786..b9bce35 100644
+--- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
++++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+@@ -207,6 +207,8 @@
+     <string name="home_suspended_badge">已暂停</string>
+     <string name="suspend">暂停</string>
+     <string name="resume">恢复</string>
++    <string name="snackbar_expense_suspended">订阅已暂停</string>
++    <string name="snackbar_expense_resumed">订阅已恢复</string>
+ 
+     <!-- 分析 -->
+     <string name="analytics_title">分析</string>
+@@ -312,4 +314,52 @@
+     <string name="settings_money_per_month">每月</string>
+     <string name="settings_money_per_year">每年</string>
+     <string name="settings_money_exchange_rates">汇率更新时间：%1$s</string>
++
++    <!-- 卡片布局编辑器 -->
++    <string name="settings_subscriptions_card_section_date">日期</string>
++    <string name="settings_subscriptions_card_section_price">价格</string>
++    <string name="settings_subscriptions_card_section_descriptions">描述文字</string>
++    <string name="settings_subscriptions_card_section_card">卡片</string>
++    <string name="settings_subscriptions_card_date_mode">显示日期</string>
++    <string name="settings_subscriptions_card_date_relative">相对日期</string>
++    <string name="settings_subscriptions_card_date_actual">具体日期</string>
++    <string name="settings_subscriptions_card_date_hidden">不显示</string>
++    <string name="settings_subscriptions_card_price_mode">显示价格</string>
++    <string name="settings_subscriptions_card_price_billed">账单价格</string>
++    <string name="settings_subscriptions_card_price_monthly">每月折算</string>
++    <string name="settings_subscriptions_card_price_yearly">每年折算</string>
++    <string name="settings_subscriptions_card_price_hidden">不显示</string>
++    <string name="settings_subscriptions_card_first_line">第一段描述</string>
++    <string name="settings_subscriptions_card_second_line">第二段描述</string>
++    <string name="settings_subscriptions_card_line_none">无</string>
++    <string name="settings_subscriptions_card_line_description">备注（描述）</string>
++    <string name="settings_subscriptions_card_line_tags">分类（标签）</string>
++    <string name="settings_subscriptions_card_line_next_payment">下次付款</string>
++    <string name="settings_subscriptions_show_icon">显示图标</string>
++    <string name="home_card_next_payment">下次：%1$s</string>
++
++    <!-- 关于 / 补丁信息 -->
++    <string name="settings_hub_about_title">关于与补丁</string>
++    <string name="settings_hub_about_summary">原作者、Tilla 致谢与补丁信息</string>
++    <string name="settings_about_original_project_title">原始项目</string>
++    <string name="settings_about_original_project_summary">RecurringExpenseTracker，作者 Dennis Bauer · GPL-3.0</string>
++    <string name="settings_about_patch_title">Patchwork 构建</string>
++    <string name="settings_about_patch_summary">由 Spark 与 DeepSeek 维护的非官方 Tilla 风格补丁</string>
++    <string name="settings_about_patch_version">版本 %1$s · versionCode %2$d</string>
++    <string name="settings_about_tilla_title">界面灵感</string>
++    <string name="settings_about_tilla_summary">Tilla，作者 Pavel Rekun · 非官方参考</string>
++    <string name="settings_about_disclaimer">这是非官方补丁构建，与 RecurringExpenseTracker 原作者及 Tilla 作者均无隶属或背书关系。上游项目使用 GPL-3.0 许可证。</string>
++    <string name="settings_about_source_code">补丁源代码</string>
++    <string name="settings_subscriptions_card_date_pattern">相对日期格式</string>
++    <string name="settings_subscriptions_card_date_pattern_ordinal">序数（天数）</string>
++    <string name="settings_subscriptions_card_date_pattern_calendar">日历（相对单位）</string>
++    <string name="theme_catppuccin_mocha">Catppuccin Mocha</string>
++    <string name="settings_subscriptions_card_date_actual_pattern">实际日期格式</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_mdy">MM/dd/yyyy</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_dmy_slash">dd/MM/yyyy</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_ymd">yyyy/MM/dd</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_dmy_dash">dd-MM-yyyy</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_dmy_dot">dd.MM.yyyy</string>
++    <string name="settings_subscriptions_card_price_add_currency">附加默认货币</string>
++    <string name="settings_subscriptions_card_price_add_currency_summary">在账单价格下方同时显示换算后的价格</string>
+ </resources>
+diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
+index f19810a..afb583f 100644
+--- a/shared/src/commonMain/composeResources/values/strings.xml
++++ b/shared/src/commonMain/composeResources/values/strings.xml
+@@ -9,6 +9,8 @@
+     <string name="home_filter_chip_archived">Archived</string>
+     <string name="snackbar_expense_archived">Expense archived</string>
+     <string name="snackbar_expense_unarchived">Expense unarchived</string>
++    <string name="snackbar_expense_suspended">Subscription paused</string>
++    <string name="snackbar_expense_resumed">Subscription resumed</string>
+     <string name="notification_auto_archived_title">Expense auto-archived</string>
+ 
+     <!-- Bottom Navigation -->
+@@ -379,4 +381,52 @@
+     <string name="settings_money_per_month">Per month</string>
+     <string name="settings_money_per_year">Per year</string>
+     <string name="settings_money_exchange_rates">Exchange rates: %1$s</string>
++
++    <!-- Card layout editor -->
++    <string name="settings_subscriptions_card_section_date">Date</string>
++    <string name="settings_subscriptions_card_section_price">Price</string>
++    <string name="settings_subscriptions_card_section_descriptions">Descriptions</string>
++    <string name="settings_subscriptions_card_section_card">Card</string>
++    <string name="settings_subscriptions_card_date_mode">Date shown</string>
++    <string name="settings_subscriptions_card_date_relative">Relative date</string>
++    <string name="settings_subscriptions_card_date_actual">Actual date</string>
++    <string name="settings_subscriptions_card_date_hidden">Hidden</string>
++    <string name="settings_subscriptions_card_price_mode">Price shown</string>
++    <string name="settings_subscriptions_card_price_billed">Billed price</string>
++    <string name="settings_subscriptions_card_price_monthly">Monthly equivalent</string>
++    <string name="settings_subscriptions_card_price_yearly">Yearly equivalent</string>
++    <string name="settings_subscriptions_card_price_hidden">Hidden</string>
++    <string name="settings_subscriptions_card_first_line">First description</string>
++    <string name="settings_subscriptions_card_second_line">Second description</string>
++    <string name="settings_subscriptions_card_line_none">None</string>
++    <string name="settings_subscriptions_card_line_description">Notes (description)</string>
++    <string name="settings_subscriptions_card_line_tags">Category (tags)</string>
++    <string name="settings_subscriptions_card_line_next_payment">Next payment</string>
++    <string name="settings_subscriptions_show_icon">Show icon</string>
++    <string name="home_card_next_payment">Next: %1$s</string>
++
++    <!-- About / patch credits -->
++    <string name="settings_hub_about_title">About &amp; patch</string>
++    <string name="settings_hub_about_summary">Original author, Tilla credit and patch info</string>
++    <string name="settings_about_original_project_title">Original project</string>
++    <string name="settings_about_original_project_summary">RecurringExpenseTracker by Dennis Bauer · GPL-3.0</string>
++    <string name="settings_about_patch_title">Patchwork build</string>
++    <string name="settings_about_patch_summary">Unofficial Tilla-inspired UI patch maintained by Spark and DeepSeek</string>
++    <string name="settings_about_patch_version">Version %1$s · versionCode %2$d</string>
++    <string name="settings_about_tilla_title">UI inspiration</string>
++    <string name="settings_about_tilla_summary">Tilla by Pavel Rekun · unofficial reference</string>
++    <string name="settings_about_disclaimer">This is an unofficial patch build. It is not affiliated with or endorsed by the original RecurringExpenseTracker developer or the Tilla developer. The upstream project is licensed under GPL-3.0.</string>
++    <string name="settings_about_source_code">Patch source code</string>
++    <string name="settings_subscriptions_card_date_pattern">Relative date format</string>
++    <string name="settings_subscriptions_card_date_pattern_ordinal">Ordinal (days count)</string>
++    <string name="settings_subscriptions_card_date_pattern_calendar">Calendar (relative units)</string>
++    <string name="theme_catppuccin_mocha">Catppuccin Mocha</string>
++    <string name="settings_subscriptions_card_date_actual_pattern">Actual date format</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_mdy">MM/dd/yyyy</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_dmy_slash">dd/MM/yyyy</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_ymd">yyyy/MM/dd</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_dmy_dash">dd-MM-yyyy</string>
++    <string name="settings_subscriptions_card_date_actual_pattern_dmy_dot">dd.MM.yyyy</string>
++    <string name="settings_subscriptions_card_price_add_currency">Add default currency</string>
++    <string name="settings_subscriptions_card_price_add_currency_summary">Show the converted price alongside the billed price</string>
+ </resources>
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
+index 51aeb0a..70be116 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
+@@ -44,6 +44,8 @@ data class RecurringExpenseData(
+     val archivedDate: Instant? = null,
+     val suspended: Boolean = false,
+     val serviceId: String? = null,
++    /** Billed price before conversion to the default currency, when known. */
++    val originalPrice: CurrencyValue? = null,
+ ) {
+     fun getNextPaymentDay(): LocalDate? {
+         if (firstPayment == null) return null
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+index f31bb7a..4018f5a 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+@@ -36,6 +36,11 @@ internal fun RecurringExpenseWithTagsEntry.toRecurringExpenseData(
+         serviceId =
+             this.expense.serviceId
+                 ?: ExpenseServiceNameMatcher.find(this.expense.name.orEmpty())?.id,
++        originalPrice =
++            CurrencyValue(
++                this.expense.price!!,
++                this.expense.currencyCode.ifBlank { defaultCurrencyCode },
++            ),
+     )
+ }
+ 
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/FakeUserPreferencesRepository.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/FakeUserPreferencesRepository.kt
+index 53744ca..ab85c58 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/FakeUserPreferencesRepository.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/FakeUserPreferencesRepository.kt
+@@ -48,9 +48,14 @@ class FakeUserPreferencesRepository() : IUserPreferencesRepository {
+     override val dynamicColor: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(false)
+     override val cardStyle: IUserPreferencesRepository.IPreference<Int> = FakePreference(0)
+     override val cardCompact: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(false)
+-    override val cardShowDescription: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(true)
+-    override val cardShowNextPayment: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(true)
++    override val cardShowIcon: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(true)
++    override val cardPriceMode: IUserPreferencesRepository.IPreference<Int> = FakePreference(1)
++    override val cardDateMode: IUserPreferencesRepository.IPreference<Int> = FakePreference(0)
++    override val cardDatePattern: IUserPreferencesRepository.IPreference<Int> = FakePreference(1)
++    override val cardActualDatePattern: IUserPreferencesRepository.IPreference<Int> = FakePreference(0)
++    override val cardAddDefaultCurrency: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(false)
++    override val cardFirstLine: IUserPreferencesRepository.IPreference<Int> = FakePreference(1)
++    override val cardSecondLine: IUserPreferencesRepository.IPreference<Int> = FakePreference(0)
+     override val cardShowTagDots: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(true)
+-    override val cardShowPrice: IUserPreferencesRepository.IPreference<Boolean> = FakePreference(true)
+     override val averageExpensesPeriod: IUserPreferencesRepository.IPreference<Int> = FakePreference(1)
+ }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/IUserPreferencesRepository.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/IUserPreferencesRepository.kt
+index d9ec32a..ca7e7d2 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/IUserPreferencesRepository.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/IUserPreferencesRepository.kt
+@@ -33,9 +33,14 @@ interface IUserPreferencesRepository {
+     val dynamicColor: IPreference<Boolean>
+     val cardStyle: IPreference<Int>
+     val cardCompact: IPreference<Boolean>
+-    val cardShowDescription: IPreference<Boolean>
+-    val cardShowNextPayment: IPreference<Boolean>
++    val cardShowIcon: IPreference<Boolean>
++    val cardPriceMode: IPreference<Int>
++    val cardDateMode: IPreference<Int>
++    val cardDatePattern: IPreference<Int>
++    val cardActualDatePattern: IPreference<Int>
++    val cardAddDefaultCurrency: IPreference<Boolean>
++    val cardFirstLine: IPreference<Int>
++    val cardSecondLine: IPreference<Int>
+     val cardShowTagDots: IPreference<Boolean>
+-    val cardShowPrice: IPreference<Boolean>
+     val averageExpensesPeriod: IPreference<Int>
+ }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/KSafeUserPreferencesRepository.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/KSafeUserPreferencesRepository.kt
+index aa895bb..be54ed3 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/KSafeUserPreferencesRepository.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/datastore/KSafeUserPreferencesRepository.kt
+@@ -90,9 +90,14 @@ class KSafeUserPreferencesRepository(
+     override val dynamicColor = preference("DYNAMIC_COLOR", false)
+     override val cardStyle = preference("CARD_STYLE", 0)
+     override val cardCompact = preference("CARD_COMPACT", false)
+-    override val cardShowDescription = preference("CARD_SHOW_DESCRIPTION", true)
+-    override val cardShowNextPayment = preference("CARD_SHOW_NEXT_PAYMENT", true)
++    override val cardShowIcon = preference("CARD_SHOW_ICON", true)
++    override val cardPriceMode = preference("CARD_PRICE_MODE", 1)
++    override val cardDateMode = preference("CARD_DATE_MODE", 0)
++    override val cardDatePattern = preference("CARD_DATE_PATTERN", 1)
++    override val cardActualDatePattern = preference("CARD_ACTUAL_DATE_PATTERN", 0)
++    override val cardAddDefaultCurrency = preference("CARD_ADD_DEFAULT_CURRENCY", false)
++    override val cardFirstLine = preference("CARD_FIRST_LINE", 1)
++    override val cardSecondLine = preference("CARD_SECOND_LINE", 0)
+     override val cardShowTagDots = preference("CARD_SHOW_TAG_DOTS", true)
+-    override val cardShowPrice = preference("CARD_SHOW_PRICE", true)
+     override val averageExpensesPeriod = preference("AVERAGE_EXPENSES_PERIOD", 1)
+ }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+index 3c10b01..fcfa960 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/RecurringExpenseOverview.kt
+@@ -30,7 +30,12 @@ import androidx.compose.ui.unit.dp
+ import androidx.navigation.NavController
+ import de.dbauer.expensetracker.shared.data.EditExpensePane
+ import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
++import de.dbauer.expensetracker.shared.ui.home.CardActualDatePattern
++import de.dbauer.expensetracker.shared.ui.home.CardDateMode
++import de.dbauer.expensetracker.shared.ui.home.CardDatePattern
+ import de.dbauer.expensetracker.shared.ui.home.CardLayoutPrefs
++import de.dbauer.expensetracker.shared.ui.home.CardLineSource
++import de.dbauer.expensetracker.shared.ui.home.CardPriceMode
+ import de.dbauer.expensetracker.shared.ui.home.CardStyle
+ import de.dbauer.expensetracker.shared.ui.home.HomeFilter
+ import de.dbauer.expensetracker.shared.viewmodel.RecurringExpenseViewModel
+@@ -59,21 +64,31 @@ fun RecurringExpenseOverview(
+     val listState = rememberLazyListState()
+ 
+     val cardCompact by userPreferencesRepository.cardCompact.collectAsState()
+-    val cardShowDescription by userPreferencesRepository.cardShowDescription.collectAsState()
+-    val cardShowNextPayment by userPreferencesRepository.cardShowNextPayment.collectAsState()
++    val cardShowIcon by userPreferencesRepository.cardShowIcon.collectAsState()
++    val cardPriceMode by userPreferencesRepository.cardPriceMode.collectAsState()
++    val cardDateMode by userPreferencesRepository.cardDateMode.collectAsState()
++    val cardDatePattern by userPreferencesRepository.cardDatePattern.collectAsState()
++    val cardActualDatePattern by userPreferencesRepository.cardActualDatePattern.collectAsState()
++    val cardAddDefaultCurrency by userPreferencesRepository.cardAddDefaultCurrency.collectAsState()
++    val cardFirstLine by userPreferencesRepository.cardFirstLine.collectAsState()
++    val cardSecondLine by userPreferencesRepository.cardSecondLine.collectAsState()
+     val cardShowTagDots by userPreferencesRepository.cardShowTagDots.collectAsState()
+-    val cardShowPrice by userPreferencesRepository.cardShowPrice.collectAsState()
+     val cardStyle by userPreferencesRepository.cardStyle.collectAsState()
+     val selectedFilter by recurringExpenseViewModel.selectedFilter.collectAsState()
+ 
+     val layout =
+         CardLayoutPrefs(
+             compact = cardCompact,
+-            showDescription = cardShowDescription,
+-            showNextPayment = cardShowNextPayment,
+-            showTagDots = cardShowTagDots,
+-            showPrice = cardShowPrice,
+             colored = CardStyle.fromInt(cardStyle) == CardStyle.Colored,
++            showIcon = cardShowIcon,
++            priceMode = CardPriceMode.fromInt(cardPriceMode),
++            dateMode = CardDateMode.fromInt(cardDateMode),
++            datePattern = CardDatePattern.fromInt(cardDatePattern),
++            actualDatePattern = CardActualDatePattern.fromInt(cardActualDatePattern),
++            addDefaultCurrency = cardAddDefaultCurrency,
++            firstLine = CardLineSource.fromInt(cardFirstLine),
++            secondLine = CardLineSource.fromInt(cardSecondLine),
++            showTagDots = cardShowTagDots,
+         )
+ 
+     // Compute "today" once per overview composition instead of once per card per frame.
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+index a9f0bdd..4bbb4da 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+@@ -31,12 +31,18 @@ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
++import de.dbauer.expensetracker.shared.data.CurrencyValue
+ import de.dbauer.expensetracker.shared.data.ExpenseService
+ import de.dbauer.expensetracker.shared.data.ExpenseServiceCatalog
+ import de.dbauer.expensetracker.shared.data.ExpenseServiceIcon
+ import de.dbauer.expensetracker.shared.data.Recurrence
+ import de.dbauer.expensetracker.shared.data.RecurringExpenseData
++import de.dbauer.expensetracker.shared.ui.home.CardActualDatePattern
++import de.dbauer.expensetracker.shared.ui.home.CardDateMode
++import de.dbauer.expensetracker.shared.ui.home.CardDatePattern
+ import de.dbauer.expensetracker.shared.ui.home.CardLayoutPrefs
++import de.dbauer.expensetracker.shared.ui.home.CardLineSource
++import de.dbauer.expensetracker.shared.ui.home.CardPriceMode
+ import kotlinx.datetime.LocalDate
+ import org.jetbrains.compose.resources.painterResource
+ import org.jetbrains.compose.resources.pluralStringResource
+@@ -44,6 +50,7 @@ import org.jetbrains.compose.resources.stringResource
+ import recurringexpensetracker.shared.generated.resources.Res
+ import recurringexpensetracker.shared.generated.resources.home_card_days
+ import recurringexpensetracker.shared.generated.resources.home_card_months
++import recurringexpensetracker.shared.generated.resources.home_card_next_payment
+ import recurringexpensetracker.shared.generated.resources.home_card_today
+ import recurringexpensetracker.shared.generated.resources.home_card_tomorrow
+ import recurringexpensetracker.shared.generated.resources.home_card_years
+@@ -148,10 +155,64 @@ fun TillaExpenseCard(
+                 labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+             )
+         }
+-    val monthlyPriceText = remember(expense.monthlyPrice) { expense.monthlyPrice.toCurrencyString() }
++    val billedPrice = expense.originalPrice ?: expense.price
++    val priceText =
++        remember(expense.price, expense.monthlyPrice, expense.originalPrice, layout.priceMode) {
++            when (layout.priceMode) {
++                CardPriceMode.Billed -> billedPrice.toCurrencyString()
++                CardPriceMode.Monthly -> expense.monthlyPrice.toCurrencyString()
++                CardPriceMode.Yearly ->
++                    expense.monthlyPrice.copy(value = expense.monthlyPrice.value * 12f).toCurrencyString()
++                CardPriceMode.Hidden -> null
++            }
++        }
++    val secondaryPriceText =
++        remember(expense.price, expense.originalPrice, layout.addDefaultCurrency, layout.priceMode) {
++            if (layout.addDefaultCurrency && layout.priceMode == CardPriceMode.Billed) {
++                val converted = expense.price
++                if (converted.currencyCode != billedPrice.currencyCode ||
++                    converted.value != billedPrice.value
++                ) {
++                    converted.toCurrencyString()
++                } else {
++                    null
++                }
++            } else {
++                null
++            }
++        }
+     // getNextPaymentDay() walks month by month from the first payment, so cache it per expense/day.
+     val remaining = remember(expense, today) { remainingFor(expense, today) }
+     val remainingText = rememberLabelText(remaining)
++    val nextPaymentDate = remember(expense, today) { expense.getNextPaymentDayAfter(today) }
++    val actualDateText =
++        nextPaymentDate?.formatActualDate(layout.actualDatePattern)
++    val nextPaymentLine =
++        nextPaymentDate?.let {
++            stringResource(Res.string.home_card_next_payment, it.formatActualDate(layout.actualDatePattern))
++        }
++    val daysUntilPayment =
++        nextPaymentDate?.let { (it.toEpochDays() - today.toEpochDays()).toInt() }
++    val ordinalDateText = ordinalDateLabel(daysUntilPayment)
++    val dateText =
++        if (nextPaymentDate == null) {
++            null
++        } else {
++            when {
++                layout.dateMode == CardDateMode.Hidden -> null
++                layout.dateMode == CardDateMode.Actual -> actualDateText
++                layout.datePattern == CardDatePattern.Ordinal -> ordinalDateText
++                else -> remainingText
++            }
++        }
++    val firstLineText =
++        remember(expense, layout.firstLine, nextPaymentLine) {
++            expense.lineValue(layout.firstLine, nextPaymentLine)
++        }
++    val secondLineText =
++        remember(expense, layout.secondLine, nextPaymentLine) {
++            expense.lineValue(layout.secondLine, nextPaymentLine)
++        }
+     val pausedText = stringResource(Res.string.home_suspended_badge)
+     val tagColors = remember(expense.tags) { expense.tags.take(6).map { Color(it.color) } }
+     val handleClick = remember(expense.id, onClick) { { onClick(expense.id) } }
+@@ -177,12 +238,14 @@ fun TillaExpenseCard(
+                     ),
+             verticalAlignment = Alignment.CenterVertically,
+         ) {
+-            ExpenseServiceIconView(
+-                service = style.service,
+-                tint = style.iconTint,
+-                modifier = Modifier.size(if (compactCard) 28.dp else 32.dp),
+-            )
+-            Spacer(modifier = Modifier.size(if (compactCard) 10.dp else 14.dp))
++            if (layout.showIcon) {
++                ExpenseServiceIconView(
++                    service = style.service,
++                    tint = style.iconTint,
++                    modifier = Modifier.size(if (compactCard) 28.dp else 32.dp),
++                )
++                Spacer(modifier = Modifier.size(if (compactCard) 10.dp else 14.dp))
++            }
+             Column(
+                 modifier = Modifier.weight(1f),
+                 verticalArrangement = Arrangement.Center,
+@@ -194,25 +257,36 @@ fun TillaExpenseCard(
+                     maxLines = 1,
+                     overflow = TextOverflow.Ellipsis,
+                 )
+-                if (expense.suspended) {
+-                    Text(
+-                        text = pausedText,
+-                        fontSize = 9.sp,
+-                        fontWeight = FontWeight.Bold,
+-                        letterSpacing = 0.6.sp,
+-                        modifier = Modifier.padding(top = 3.dp),
+-                        color = style.labelColor,
+-                    )
+-                } else if (layout.showDescription && expense.description.isNotBlank()) {
++                val primaryLine =
++                    if (expense.suspended) {
++                        pausedText
++                    } else {
++                        firstLineText
++                    }
++                if (primaryLine != null) {
+                     Text(
+-                        text = expense.description,
+-                        fontSize = 12.sp,
++                        text = primaryLine,
++                        fontSize = if (compactCard) 11.sp else 12.sp,
++                        fontWeight = if (expense.suspended) FontWeight.Bold else FontWeight.Normal,
++                        letterSpacing = if (expense.suspended) 0.6.sp else 0.sp,
+                         maxLines = 1,
+                         overflow = TextOverflow.Ellipsis,
+                         modifier = Modifier.padding(top = 2.dp),
+                         color = style.descriptionColor,
+                     )
+                 }
++                val secondaryLine =
++                    if (expense.suspended) null else secondLineText?.takeIf { it != primaryLine }
++                if (secondaryLine != null) {
++                    Text(
++                        text = secondaryLine,
++                        fontSize = if (compactCard) 10.sp else 11.sp,
++                        maxLines = 1,
++                        overflow = TextOverflow.Ellipsis,
++                        modifier = Modifier.padding(top = 1.dp),
++                        color = style.descriptionColor.copy(alpha = 0.82f),
++                    )
++                }
+                 if (layout.showTagDots && tagColors.isNotEmpty()) {
+                     Row(
+                         horizontalArrangement = Arrangement.spacedBy(3.dp),
+@@ -231,21 +305,37 @@ fun TillaExpenseCard(
+             }
+             Spacer(modifier = Modifier.size(8.dp))
+             Column(horizontalAlignment = Alignment.End) {
+-                if (layout.showPrice) {
++                if (priceText != null) {
+                     Text(
+-                        text = monthlyPriceText,
++                        text = priceText,
+                         fontSize = if (compactCard) 15.sp else 17.sp,
+                         fontWeight = FontWeight.Bold,
+                         maxLines = 1,
+                         overflow = TextOverflow.Ellipsis,
+                     )
+                 }
+-                if (layout.showNextPayment) {
++                if (secondaryPriceText != null) {
+                     Text(
+-                        text = remainingText,
++                        text = secondaryPriceText,
++                        fontSize = if (compactCard) 8.sp else 9.sp,
++                        color = style.labelColor,
++                        maxLines = 1,
++                        overflow = TextOverflow.Ellipsis,
++                    )
++                }
++                if (dateText != null) {
++                    Text(
++                        text = dateText,
+                         fontSize = if (compactCard) 9.sp else 10.sp,
+                         fontWeight = FontWeight.Medium,
+-                        letterSpacing = 0.4.sp,
++                        letterSpacing =
++                            if (layout.dateMode == CardDateMode.Relative &&
++                                layout.datePattern == CardDatePattern.Ordinal
++                            ) {
++                                0.4.sp
++                            } else {
++                                0.sp
++                            },
+                         color = style.labelColor,
+                         maxLines = 1,
+                     )
+@@ -255,6 +345,46 @@ fun TillaExpenseCard(
+     }
+ }
+ 
++@Composable
++private fun ordinalDateLabel(daysUntilPayment: Int?): String? {
++    if (daysUntilPayment == null) return null
++    val label =
++        if (daysUntilPayment <= 0) {
++            stringResource(Res.string.home_card_today)
++        } else {
++            pluralStringResource(
++                Res.plurals.home_card_days,
++                daysUntilPayment,
++                daysUntilPayment,
++            )
++        }
++    return label.uppercase()
++}
++
++private fun LocalDate.formatActualDate(pattern: CardActualDatePattern): String {
++    val day = dayOfMonth.toString().padStart(2, '0')
++    val month = monthNumber.toString().padStart(2, '0')
++    return when (pattern) {
++        CardActualDatePattern.MonthDayYear -> "$month/$day/$year"
++        CardActualDatePattern.DayMonthYearSlash -> "$day/$month/$year"
++        CardActualDatePattern.YearMonthDaySlash -> "$year/$month/$day"
++        CardActualDatePattern.DayMonthYearDash -> "$day-$month-$year"
++        CardActualDatePattern.DayMonthYearDot -> "$day.$month.$year"
++    }
++}
++
++private fun RecurringExpenseData.lineValue(
++    source: CardLineSource,
++    nextPaymentLine: String?,
++): String? =
++    when (source) {
++        CardLineSource.None -> null
++        CardLineSource.Description -> description.takeIf { it.isNotBlank() }
++        CardLineSource.Tags ->
++            tags.take(3).joinToString(" · ") { it.title }.takeIf { it.isNotBlank() }
++        CardLineSource.NextPayment -> nextPaymentLine
++    }
++
+ internal data class TillaCardStyle(
+     val service: ExpenseService?,
+     val background: Color,
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/about/AboutScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/about/AboutScreen.kt
+index 4ede4f5..f8d59e5 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/about/AboutScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/about/AboutScreen.kt
+@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.verticalScroll
++import androidx.compose.material3.HorizontalDivider
+ import androidx.compose.material3.ListItem
++import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.Alignment
+@@ -16,16 +18,26 @@ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.platform.LocalUriHandler
+ import androidx.compose.ui.unit.dp
+ import de.dbauer.expensetracker.shared.getAppVersion
++import de.dbauer.expensetracker.shared.getAppVersionCode
+ import org.jetbrains.compose.resources.painterResource
+ import org.jetbrains.compose.resources.stringResource
+ import recurringexpensetracker.shared.generated.resources.Res
+ import recurringexpensetracker.shared.generated.resources.github
+ import recurringexpensetracker.shared.generated.resources.ic_launcher
+ import recurringexpensetracker.shared.generated.resources.liberapay
++import recurringexpensetracker.shared.generated.resources.settings_about_disclaimer
+ import recurringexpensetracker.shared.generated.resources.settings_about_libraries
+ import recurringexpensetracker.shared.generated.resources.settings_about_made_by
++import recurringexpensetracker.shared.generated.resources.settings_about_original_project_summary
++import recurringexpensetracker.shared.generated.resources.settings_about_original_project_title
++import recurringexpensetracker.shared.generated.resources.settings_about_patch_summary
++import recurringexpensetracker.shared.generated.resources.settings_about_patch_title
++import recurringexpensetracker.shared.generated.resources.settings_about_patch_version
+ import recurringexpensetracker.shared.generated.resources.settings_about_suggest_or_report
++import recurringexpensetracker.shared.generated.resources.settings_about_source_code
+ import recurringexpensetracker.shared.generated.resources.settings_about_support
++import recurringexpensetracker.shared.generated.resources.settings_about_tilla_summary
++import recurringexpensetracker.shared.generated.resources.settings_about_tilla_title
+ import recurringexpensetracker.shared.generated.resources.settings_about_version
+ 
+ @Composable
+@@ -50,16 +62,54 @@ fun AboutScreen(
+                     .padding(vertical = 32.dp)
+                     .size(120.dp),
+         )
++        ListItem(
++            headlineContent = {
++                Text(text = stringResource(Res.string.settings_about_version))
++            },
++            supportingContent = {
++                Text(getAppVersion())
++            },
++        )
+         ListItem(
+             modifier =
+                 Modifier.clickable {
+-                    uriHandler.openUri("https://github.com/dennisbauer/RecurringExpenseTracker")
++                    uriHandler.openUri("https://github.com/DennisBauer/RecurringExpenseTracker")
+                 },
+             headlineContent = {
+-                Text(text = stringResource(Res.string.settings_about_version))
++                Text(text = stringResource(Res.string.settings_about_original_project_title))
+             },
+             supportingContent = {
+-                Text(getAppVersion())
++                Text(text = stringResource(Res.string.settings_about_original_project_summary))
++            },
++            trailingContent = {
++                Image(
++                    painter = painterResource(Res.drawable.github),
++                    contentDescription = null,
++                    modifier = Modifier.size(24.dp),
++                )
++            },
++        )
++        ListItem(
++            modifier =
++                Modifier.clickable {
++                    uriHandler.openUri("https://github.com/PILIHU2022/Software-Repo")
++                },
++            headlineContent = {
++                Text(text = stringResource(Res.string.settings_about_patch_title))
++            },
++            supportingContent = {
++                Column {
++                    Text(text = stringResource(Res.string.settings_about_patch_summary))
++                    Text(
++                        text =
++                            stringResource(
++                                Res.string.settings_about_patch_version,
++                                getAppVersion(),
++                                getAppVersionCode(),
++                            ),
++                        style = MaterialTheme.typography.bodySmall,
++                    )
++                }
+             },
+             trailingContent = {
+                 Image(
+@@ -69,6 +119,37 @@ fun AboutScreen(
+                 )
+             },
+         )
++        ListItem(
++            modifier =
++                Modifier.clickable {
++                    uriHandler.openUri("https://github.com/PILIHU2022/Software-Repo")
++                },
++            headlineContent = {
++                Text(text = stringResource(Res.string.settings_about_source_code))
++            },
++            trailingContent = {
++                Image(
++                    painter = painterResource(Res.drawable.github),
++                    contentDescription = null,
++                    modifier = Modifier.size(24.dp),
++                )
++            },
++        )
++        ListItem(
++            modifier =
++                Modifier.clickable {
++                    uriHandler.openUri(
++                        "https://play.google.com/store/apps/details?id=com.pavelrekun.tilla",
++                    )
++                },
++            headlineContent = {
++                Text(text = stringResource(Res.string.settings_about_tilla_title))
++            },
++            supportingContent = {
++                Text(text = stringResource(Res.string.settings_about_tilla_summary))
++            },
++        )
++        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+         ListItem(
+             modifier =
+                 Modifier.clickable {
+@@ -123,5 +204,11 @@ fun AboutScreen(
+                 Text(text = stringResource(Res.string.settings_about_libraries))
+             },
+         )
++        Text(
++            text = stringResource(Res.string.settings_about_disclaimer),
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
++        )
+     }
+ }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/analytics/AnalyticsScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/analytics/AnalyticsScreen.kt
+index 32e7c9c..96ac234 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/analytics/AnalyticsScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/analytics/AnalyticsScreen.kt
+@@ -91,12 +91,7 @@ fun AnalyticsScreen(
+     val pausedCount = expenses.count { it.suspended }
+     val totalMonthly =
+         remember(activeExpenses) { activeExpenses.sumOf { it.monthlyPrice.value.toDouble() }.toFloat() }
+-    val total =
+-        when (period) {
+-            0 -> totalMonthly * 12f / 52f
+-            2 -> totalMonthly * 12f
+-            else -> totalMonthly
+-        }
++    val total = monthlyToPeriodAmount(totalMonthly, period)
+ 
+     if (expenses.isEmpty()) {
+         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+@@ -138,7 +133,12 @@ fun AnalyticsScreen(
+             TagBreakdown(activeExpenses, totalMonthly, currencyCode)
+         }
+         item {
+-            TopExpenses(activeExpenses, totalMonthly, currencyCode)
++            TopExpenses(
++                activeExpenses = activeExpenses,
++                period = period,
++                total = total,
++                currencyCode = currencyCode,
++            )
+         }
+     }
+ }
+@@ -358,10 +358,12 @@ private fun DonutChart(
+ @Composable
+ private fun TopExpenses(
+     activeExpenses: List<RecurringExpenseData>,
++    period: Int,
+     total: Float,
+     currencyCode: String,
+ ) {
+     val top = remember(activeExpenses) { activeExpenses.sortedByDescending { it.monthlyPrice.value }.take(5) }
++    val hasTotal = total.isFinite() && total > 0f
+     Surface(
+         shape = RoundedCornerShape(26.dp),
+         color = MaterialTheme.colorScheme.surfaceContainerHigh,
+@@ -386,9 +388,10 @@ private fun TopExpenses(
+                         overflow = TextOverflow.Ellipsis,
+                         modifier = Modifier.weight(1f),
+                     )
+-                    val share = if (total <= 0f) 0f else expense.monthlyPrice.value / total
++                    val amount = monthlyToPeriodAmount(expense.monthlyPrice.value, period)
++                    val share = if (hasTotal) (amount / total).coerceIn(0f, 1f) else 0f
+                     Text(
+-                        text = formatMoney(expense.monthlyPrice.value, currencyCode),
++                        text = formatMoney(amount, currencyCode),
+                         style = MaterialTheme.typography.bodyMedium,
+                         fontWeight = FontWeight.Medium,
+                     )
+@@ -403,6 +406,20 @@ private fun TopExpenses(
+     }
+ }
+ 
++/**
++ * Converts a monthly amount into the amount for the analytics period:
++ * 0 = week (12 months / 52 weeks), 1 = month (unchanged), 2 = year.
++ */
++private fun monthlyToPeriodAmount(
++    monthlyPrice: Float,
++    period: Int,
++): Float =
++    when (period) {
++        0 -> monthlyPrice * 12f / 52f
++        2 -> monthlyPrice * 12f
++        else -> monthlyPrice
++    }
++
+ private fun buildSlices(
+     activeExpenses: List<RecurringExpenseData>,
+     primary: Color,
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt
+index c7d9306..9d1485c 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/editexpense/EditRecurringExpenseScreen.kt
+@@ -1,5 +1,6 @@
+ package de.dbauer.expensetracker.shared.ui.editexpense
+ 
++import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxSize
+@@ -22,11 +23,15 @@ import androidx.compose.material3.Button
+ import androidx.compose.material3.ExperimentalMaterial3Api
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
++import androidx.compose.material3.SnackbarHost
++import androidx.compose.material3.SnackbarHostState
+ import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TextButton
+ import androidx.compose.material3.TopAppBar
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.ExperimentalComposeUiApi
+ import androidx.compose.ui.Modifier
+@@ -39,6 +44,7 @@ import androidx.navigationevent.compose.NavigationBackHandler
+ import androidx.navigationevent.compose.rememberNavigationEventState
+ import de.dbauer.expensetracker.shared.ui.theme.ExpenseTrackerThemePreview
+ import de.dbauer.expensetracker.shared.viewmodel.EditRecurringExpenseViewModel
++import kotlinx.coroutines.launch
+ import org.jetbrains.compose.resources.stringResource
+ import org.koin.compose.viewmodel.koinViewModel
+ import org.koin.core.parameter.parametersOf
+@@ -54,6 +60,8 @@ import recurringexpensetracker.shared.generated.resources.edit_expense_unsaved_c
+ import recurringexpensetracker.shared.generated.resources.edit_expense_unsaved_changes_dialog_title
+ import recurringexpensetracker.shared.generated.resources.resume
+ import recurringexpensetracker.shared.generated.resources.save
++import recurringexpensetracker.shared.generated.resources.snackbar_expense_resumed
++import recurringexpensetracker.shared.generated.resources.snackbar_expense_suspended
+ import recurringexpensetracker.shared.generated.resources.suspend
+ import recurringexpensetracker.shared.generated.resources.unarchive
+ 
+@@ -82,118 +90,133 @@ fun EditRecurringExpenseScreen(
+ 
+     val scrollState = rememberScrollState()
+     val localFocusManager = LocalFocusManager.current
+-    Column(
+-        modifier =
+-            modifier
+-                .padding(horizontal = 16.dp)
+-                .verticalScroll(scrollState),
+-    ) {
+-        if (viewModel.isNewExpense) {
+-            QuickTemplatesRow(
+-                onTemplateSelected = viewModel::onTemplateSelected,
+-            )
+-        }
+-        NameOption(
+-            name = viewModel.nameState,
+-            onNameChange = viewModel::onNameChanged,
+-            nameInputError = viewModel.nameInputError.value,
+-            onNext = { localFocusManager.moveFocus(FocusDirection.Next) },
+-        )
+-        ServiceOption(
+-            selectedServiceId = viewModel.selectedServiceId,
+-            onServiceSelected = viewModel::onServiceSelected,
+-        )
+-        DescriptionOption(
+-            description = viewModel.descriptionState,
+-            onDescriptionChange = { viewModel.descriptionState = it },
+-            onNext = { localFocusManager.moveFocus(FocusDirection.Next) },
+-        )
+-        PriceOption(
+-            price = viewModel.priceState,
+-            onPriceChange = { viewModel.priceState = it },
+-            priceInputError = viewModel.priceInputError.value,
+-            selectedCurrencyOption = viewModel.selectedCurrencyOption,
+-            availableCurrencyOptions = viewModel.availableCurrencyOptions,
+-            onSelectCurrencyOption = { viewModel.selectedCurrencyOption = it },
+-            onNext = { localFocusManager.moveFocus(FocusDirection.Next) },
+-            currencyInputError = viewModel.currencyError,
+-        )
+-        RecurrenceOption(
+-            everyXRecurrence = viewModel.everyXRecurrenceState,
+-            onEveryXRecurrenceChange = { viewModel.everyXRecurrenceState = it },
+-            everyXRecurrenceInputError = viewModel.everyXRecurrenceInputError.value,
+-            selectedRecurrence = viewModel.selectedRecurrence,
+-            onSelectRecurrence = { viewModel.selectedRecurrence = it },
+-            onNext = { localFocusManager.clearFocus() },
+-        )
+-        FirstPaymentOption(
+-            date = viewModel.firstPaymentDate,
+-            onSelectDate = { viewModel.firstPaymentDate = it },
+-        )
+-        EndDateOption(
+-            date = viewModel.endDate,
+-            onSelectDate = { viewModel.endDate = it },
+-        )
+-        ManualConfirmationOption(
+-            requireManualConfirmation = viewModel.requireManualConfirmation,
+-            onRequireManualConfirmationChange = { viewModel.requireManualConfirmation = it },
+-        )
+-        TagsOption(
+-            tags = viewModel.tags,
+-            onTagClick = viewModel::onTagClick,
+-            onEditTagsClick = onEditTagsClick,
+-        )
+-        if (canUseNotifications) {
+-            MultipleRemindersOption(
+-                expenseNotificationEnabledGlobally =
+-                    viewModel.expenseNotificationEnabledGlobally
+-                        .collectAsState()
+-                        .value,
+-                notifyForExpense = viewModel.notifyForExpense,
+-                onNotifyForExpenseChange = viewModel::onNotifyForExpenseChange,
+-                reminders = viewModel.reminders,
+-                onAddReminder = viewModel::addReminder,
+-                onUpdateReminder = viewModel::updateReminder,
+-                onRemoveReminder = viewModel::removeReminder,
+-                isReminderDuplicate = viewModel::isReminderDuplicate,
+-                isNewReminderDuplicate = viewModel::isNewReminderDuplicate,
+-            )
+-        }
+-        Row(
++    val snackbarHostState = remember { SnackbarHostState() }
++    val coroutineScope = rememberCoroutineScope()
++    val suspendedSnackbarMessage = stringResource(Res.string.snackbar_expense_suspended)
++    val resumedSnackbarMessage = stringResource(Res.string.snackbar_expense_resumed)
++    Box(modifier = modifier.fillMaxSize()) {
++        Column(
+             modifier =
+                 Modifier
+-                    .fillMaxWidth()
+-                    .wrapContentWidth(align = Alignment.CenterHorizontally)
+-                    .padding(top = 8.dp)
+-                    .navigationBarsPadding()
+-                    .imePadding(),
++                    .fillMaxSize()
++                    .padding(horizontal = 16.dp)
++                    .verticalScroll(scrollState),
+         ) {
+-            Button(
+-                onClick = {
+-                    viewModel.updateExpense { successful ->
+-                        if (successful) {
+-                            onDismiss()
+-                        }
+-                    }
+-                },
++            if (viewModel.isNewExpense) {
++                QuickTemplatesRow(
++                    onTemplateSelected = viewModel::onTemplateSelected,
++                )
++            }
++            NameOption(
++                name = viewModel.nameState,
++                onNameChange = viewModel::onNameChanged,
++                nameInputError = viewModel.nameInputError.value,
++                onNext = { localFocusManager.moveFocus(FocusDirection.Next) },
++            )
++            ServiceOption(
++                selectedServiceId = viewModel.selectedServiceId,
++                onServiceSelected = viewModel::onServiceSelected,
++            )
++            DescriptionOption(
++                description = viewModel.descriptionState,
++                onDescriptionChange = { viewModel.descriptionState = it },
++                onNext = { localFocusManager.moveFocus(FocusDirection.Next) },
++            )
++            PriceOption(
++                price = viewModel.priceState,
++                onPriceChange = { viewModel.priceState = it },
++                priceInputError = viewModel.priceInputError.value,
++                selectedCurrencyOption = viewModel.selectedCurrencyOption,
++                availableCurrencyOptions = viewModel.availableCurrencyOptions,
++                onSelectCurrencyOption = { viewModel.selectedCurrencyOption = it },
++                onNext = { localFocusManager.moveFocus(FocusDirection.Next) },
++                currencyInputError = viewModel.currencyError,
++            )
++            RecurrenceOption(
++                everyXRecurrence = viewModel.everyXRecurrenceState,
++                onEveryXRecurrenceChange = { viewModel.everyXRecurrenceState = it },
++                everyXRecurrenceInputError = viewModel.everyXRecurrenceInputError.value,
++                selectedRecurrence = viewModel.selectedRecurrence,
++                onSelectRecurrence = { viewModel.selectedRecurrence = it },
++                onNext = { localFocusManager.clearFocus() },
++            )
++            FirstPaymentOption(
++                date = viewModel.firstPaymentDate,
++                onSelectDate = { viewModel.firstPaymentDate = it },
++            )
++            EndDateOption(
++                date = viewModel.endDate,
++                onSelectDate = { viewModel.endDate = it },
++            )
++            ManualConfirmationOption(
++                requireManualConfirmation = viewModel.requireManualConfirmation,
++                onRequireManualConfirmationChange = { viewModel.requireManualConfirmation = it },
++            )
++            TagsOption(
++                tags = viewModel.tags,
++                onTagClick = viewModel::onTagClick,
++                onEditTagsClick = onEditTagsClick,
++            )
++            if (canUseNotifications) {
++                MultipleRemindersOption(
++                    expenseNotificationEnabledGlobally =
++                        viewModel.expenseNotificationEnabledGlobally
++                            .collectAsState()
++                            .value,
++                    notifyForExpense = viewModel.notifyForExpense,
++                    onNotifyForExpenseChange = viewModel::onNotifyForExpenseChange,
++                    reminders = viewModel.reminders,
++                    onAddReminder = viewModel::addReminder,
++                    onUpdateReminder = viewModel::updateReminder,
++                    onRemoveReminder = viewModel::removeReminder,
++                    isReminderDuplicate = viewModel::isReminderDuplicate,
++                    isNewReminderDuplicate = viewModel::isNewReminderDuplicate,
++                )
++            }
++            Row(
+                 modifier =
+                     Modifier
+-                        .weight(1f)
+-                        .wrapContentWidth(),
++                        .fillMaxWidth()
++                        .wrapContentWidth(align = Alignment.CenterHorizontally)
++                        .padding(top = 8.dp)
++                        .navigationBarsPadding()
++                        .imePadding(),
+             ) {
+-                Text(
+-                    text =
+-                        stringResource(
+-                            if (viewModel.isNewExpense) {
+-                                Res.string.edit_expense_button_add
+-                            } else {
+-                                Res.string.save
+-                            },
+-                        ),
+-                    modifier = Modifier.padding(vertical = 4.dp),
+-                )
++                Button(
++                    onClick = {
++                        viewModel.updateExpense { successful ->
++                            if (successful) {
++                                onDismiss()
++                            }
++                        }
++                    },
++                    modifier =
++                        Modifier
++                            .weight(1f)
++                            .wrapContentWidth(),
++                ) {
++                    Text(
++                        text =
++                            stringResource(
++                                if (viewModel.isNewExpense) {
++                                    Res.string.edit_expense_button_add
++                                } else {
++                                    Res.string.save
++                                },
++                            ),
++                        modifier = Modifier.padding(vertical = 4.dp),
++                    )
++                }
+             }
+         }
++        SnackbarHost(
++            hostState = snackbarHostState,
++            modifier =
++                Modifier
++                    .align(Alignment.BottomCenter)
++                    .navigationBarsPadding()
++                    .padding(horizontal = 16.dp, vertical = 16.dp),
++        )
+     }
+     if (viewModel.showDeleteConfirmDialog) {
+         AlertDialog(
+@@ -272,7 +295,21 @@ fun EditRecurringExpenseScreen(
+             },
+             actions = {
+                 if (viewModel.showSuspendButton) {
+-                    IconButton(onClick = viewModel::onToggleSuspended) {
++                    IconButton(
++                        onClick = {
++                            val message =
++                                if (!viewModel.suspended) {
++                                    suspendedSnackbarMessage
++                                } else {
++                                    resumedSnackbarMessage
++                                }
++                            viewModel.onToggleSuspended()
++                            coroutineScope.launch {
++                                snackbarHostState.currentSnackbarData?.dismiss()
++                                snackbarHostState.showSnackbar(message)
++                            }
++                        },
++                    ) {
+                         Icon(
+                             imageVector =
+                                 if (viewModel.suspended) {
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/CardLayoutPrefs.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/CardLayoutPrefs.kt
+index 604874e..a19ef22 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/CardLayoutPrefs.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/CardLayoutPrefs.kt
+@@ -3,11 +3,16 @@ package de.dbauer.expensetracker.shared.ui.home
+ /** Visual layout of a subscription card, as configured in Settings → Subscriptions. */
+ data class CardLayoutPrefs(
+     val compact: Boolean = false,
+-    val showDescription: Boolean = true,
+-    val showNextPayment: Boolean = true,
+-    val showTagDots: Boolean = true,
+-    val showPrice: Boolean = true,
+     val colored: Boolean = true,
++    val showIcon: Boolean = true,
++    val priceMode: CardPriceMode = CardPriceMode.Monthly,
++    val dateMode: CardDateMode = CardDateMode.Relative,
++    val datePattern: CardDatePattern = CardDatePattern.Calendar,
++    val actualDatePattern: CardActualDatePattern = CardActualDatePattern.MonthDayYear,
++    val addDefaultCurrency: Boolean = false,
++    val firstLine: CardLineSource = CardLineSource.Description,
++    val secondLine: CardLineSource = CardLineSource.None,
++    val showTagDots: Boolean = true,
+ )
+ 
+ enum class CardStyle(val value: Int) {
+@@ -19,3 +24,69 @@ enum class CardStyle(val value: Int) {
+         fun fromInt(value: Int): CardStyle = entries.firstOrNull { it.value == value } ?: Colored
+     }
+ }
++
++/** Which price is printed on the right side of a card. */
++enum class CardPriceMode(val value: Int) {
++    Billed(0),
++    Monthly(1),
++    Yearly(2),
++    Hidden(3),
++    ;
++
++    companion object {
++        fun fromInt(value: Int): CardPriceMode = entries.firstOrNull { it.value == value } ?: Monthly
++    }
++}
++
++/** How the next-payment date is rendered under the price. */
++enum class CardDateMode(val value: Int) {
++    Relative(0),
++    Actual(1),
++    Hidden(2),
++    ;
++
++    companion object {
++        fun fromInt(value: Int): CardDateMode = entries.firstOrNull { it.value == value } ?: Relative
++    }
++}
++
++/** How a relative next-payment date is formatted. */
++enum class CardDatePattern(val value: Int) {
++    Ordinal(0),
++    Calendar(1),
++    ;
++
++    companion object {
++        fun fromInt(value: Int): CardDatePattern =
++            entries.firstOrNull { it.value == value } ?: Calendar
++    }
++}
++
++/** Format used when the card prints an actual next-payment date. */
++enum class CardActualDatePattern(val value: Int) {
++    MonthDayYear(0),
++    DayMonthYearSlash(1),
++    YearMonthDaySlash(2),
++    DayMonthYearDash(3),
++    DayMonthYearDot(4),
++    ;
++
++    companion object {
++        fun fromInt(value: Int): CardActualDatePattern =
++            entries.firstOrNull { it.value == value } ?: MonthDayYear
++    }
++}
++
++/** A line of secondary information shown under the subscription name. */
++enum class CardLineSource(val value: Int) {
++    None(0),
++    Description(1),
++    Tags(2),
++    NextPayment(3),
++    ;
++
++    companion object {
++        fun fromInt(value: Int): CardLineSource =
++            entries.firstOrNull { it.value == value } ?: Description
++    }
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsAppearanceScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsAppearanceScreen.kt
+index bb2077c..f0f0d2b 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsAppearanceScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsAppearanceScreen.kt
+@@ -62,6 +62,7 @@ import recurringexpensetracker.shared.generated.resources.settings_theme_mode_da
+ import recurringexpensetracker.shared.generated.resources.settings_theme_mode_follow_system
+ import recurringexpensetracker.shared.generated.resources.settings_theme_mode_light
+ import recurringexpensetracker.shared.generated.resources.theme_forest
++import recurringexpensetracker.shared.generated.resources.theme_catppuccin_mocha
+ import recurringexpensetracker.shared.generated.resources.theme_graphite
+ import recurringexpensetracker.shared.generated.resources.theme_ocean
+ import recurringexpensetracker.shared.generated.resources.theme_rose
+@@ -324,6 +325,7 @@ fun ThemePreset.label(): String =
+         ThemePreset.Sunset -> stringResource(Res.string.theme_sunset)
+         ThemePreset.Rose -> stringResource(Res.string.theme_rose)
+         ThemePreset.Graphite -> stringResource(Res.string.theme_graphite)
++        ThemePreset.CatppuccinMocha -> stringResource(Res.string.theme_catppuccin_mocha)
+     }
+ 
+ @Composable
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt
+index 0c139e0..e92abcd 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt
+@@ -6,12 +6,13 @@ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.material.icons.Icons
+-import androidx.compose.material.icons.rounded.DashboardCustomize
++import androidx.compose.material.icons.rounded.DateRange
+ import androidx.compose.material.icons.rounded.Description
++import androidx.compose.material.icons.rounded.Image
+ import androidx.compose.material.icons.rounded.Palette
+ import androidx.compose.material.icons.rounded.Payments
+-import androidx.compose.material.icons.rounded.Schedule
+ import androidx.compose.material.icons.rounded.Straighten
++import androidx.compose.material.icons.rounded.Subject
+ import androidx.compose.material.icons.rounded.Tag
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+@@ -26,31 +27,75 @@ import de.dbauer.expensetracker.shared.data.Recurrence
+ import de.dbauer.expensetracker.shared.data.RecurringExpenseData
+ import de.dbauer.expensetracker.shared.data.Tag
+ import de.dbauer.expensetracker.shared.ui.TillaExpenseCard
++import de.dbauer.expensetracker.shared.ui.home.CardActualDatePattern
++import de.dbauer.expensetracker.shared.ui.home.CardDateMode
++import de.dbauer.expensetracker.shared.ui.home.CardDatePattern
+ import de.dbauer.expensetracker.shared.ui.home.CardLayoutPrefs
++import de.dbauer.expensetracker.shared.ui.home.CardLineSource
++import de.dbauer.expensetracker.shared.ui.home.CardPriceMode
+ import de.dbauer.expensetracker.shared.ui.home.CardStyle
+ import de.dbauer.expensetracker.shared.viewmodel.SettingsViewModel
++import kotlinx.datetime.DateTimeUnit
+ import kotlinx.datetime.TimeZone
++import kotlinx.datetime.atStartOfDayIn
++import kotlinx.datetime.plus
+ import kotlinx.datetime.toLocalDateTime
+ import org.jetbrains.compose.resources.stringResource
+ import org.koin.compose.viewmodel.koinViewModel
+ import recurringexpensetracker.shared.generated.resources.Res
+-import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_category
+-import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_details
+-import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_details_summary
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_actual
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_actual_pattern
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_actual_pattern_dmy_dash
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_actual_pattern_dmy_dot
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_actual_pattern_dmy_slash
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_actual_pattern_mdy
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_actual_pattern_ymd
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_hidden
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_mode
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_pattern
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_pattern_calendar
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_pattern_ordinal
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_date_relative
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_first_line
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_layout_preview
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_line_description
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_line_next_payment
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_line_none
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_line_tags
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_price_billed
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_price_hidden
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_price_mode
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_price_monthly
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_price_yearly
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_section_card
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_section_date
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_section_descriptions
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_section_price
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_second_line
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_size
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_size_comfortable
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_size_compact
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_style
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_style_colored
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_style_surface
+-import recurringexpensetracker.shared.generated.resources.settings_subscriptions_show_description
+-import recurringexpensetracker.shared.generated.resources.settings_subscriptions_show_next_payment
+-import recurringexpensetracker.shared.generated.resources.settings_subscriptions_show_price
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_price_add_currency
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_card_price_add_currency_summary
++import recurringexpensetracker.shared.generated.resources.settings_subscriptions_show_icon
+ import recurringexpensetracker.shared.generated.resources.settings_subscriptions_show_tag_dots
+ import kotlin.time.Clock
+ import kotlin.time.Instant
+ 
++private enum class CardLayoutDialog {
++    Size,
++    Style,
++    PriceMode,
++    DateMode,
++    FirstLine,
++    SecondLine,
++    DatePattern,
++    ActualDatePattern,
++}
++
+ @Composable
+ fun SettingsCardLayoutScreen(
+     modifier: Modifier = Modifier,
+@@ -58,29 +103,33 @@ fun SettingsCardLayoutScreen(
+ ) {
+     val compact by viewModel.cardCompact.collectAsState()
+     val style by viewModel.cardStyle.collectAsState()
+-    val showDescription by viewModel.cardShowDescription.collectAsState()
+-    val showNextPayment by viewModel.cardShowNextPayment.collectAsState()
++    val showIcon by viewModel.cardShowIcon.collectAsState()
++    val priceMode by viewModel.cardPriceMode.collectAsState()
++    val dateMode by viewModel.cardDateMode.collectAsState()
++    val datePattern by viewModel.cardDatePattern.collectAsState()
++    val actualDatePattern by viewModel.cardActualDatePattern.collectAsState()
++    val addDefaultCurrency by viewModel.cardAddDefaultCurrency.collectAsState()
++    val showConvertedCurrency by viewModel.showConvertedCurrency.collectAsState()
++    val firstLine by viewModel.cardFirstLine.collectAsState()
++    val secondLine by viewModel.cardSecondLine.collectAsState()
+     val showTagDots by viewModel.cardShowTagDots.collectAsState()
+-    val showPrice by viewModel.cardShowPrice.collectAsState()
+-    var showSizeDialog by remember { mutableStateOf(false) }
+-    var showStyleDialog by remember { mutableStateOf(false) }
++    var dialog by remember { mutableStateOf<CardLayoutDialog?>(null) }
+ 
+     val layout =
+         CardLayoutPrefs(
+             compact = compact,
+-            showDescription = showDescription,
+-            showNextPayment = showNextPayment,
+-            showTagDots = showTagDots,
+-            showPrice = showPrice,
+             colored = CardStyle.fromInt(style) == CardStyle.Colored,
++            showIcon = showIcon,
++            priceMode = CardPriceMode.fromInt(priceMode),
++            dateMode = CardDateMode.fromInt(dateMode),
++            datePattern = CardDatePattern.fromInt(datePattern),
++            actualDatePattern = CardActualDatePattern.fromInt(actualDatePattern),
++            addDefaultCurrency = addDefaultCurrency,
++            firstLine = CardLineSource.fromInt(firstLine),
++            secondLine = CardLineSource.fromInt(secondLine),
++            showTagDots = showTagDots,
+         )
+-    val today =
+-        remember {
+-            Clock.System
+-                .now()
+-                .toLocalDateTime(TimeZone.currentSystemDefault())
+-                .date
+-        }
++    val today = remember { Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date }
+     val sample =
+         remember {
+             RecurringExpenseData(
+@@ -92,12 +141,10 @@ fun SettingsCardLayoutScreen(
+                 everyXRecurrence = 1,
+                 recurrence = Recurrence.Monthly,
+                 tags = listOf(Tag(title = "Music", color = 0xFF1DB954, id = 1)),
+-                firstPayment =
+-                    Instant.fromEpochMilliseconds(
+-                        Clock.System.now().toEpochMilliseconds() + 22L * 24L * 60L * 60L * 1000L,
+-                    ),
++                firstPayment = today.plus(22, DateTimeUnit.DAY).atStartOfDayIn(TimeZone.UTC),
+                 notifyForExpense = true,
+                 serviceId = "spotify",
++                originalPrice = CurrencyValue(8.99f, "EUR"),
+             )
+         }
+ 
+@@ -116,7 +163,78 @@ fun SettingsCardLayoutScreen(
+             layout = layout,
+         )
+ 
+-        SettingsSectionTitle(stringResource(Res.string.settings_subscriptions_card_category))
++        SettingsSectionTitle(stringResource(Res.string.settings_subscriptions_card_section_date))
++        SettingsGroup {
++            SettingsRow(
++                icon = Icons.Rounded.DateRange,
++                title = stringResource(Res.string.settings_subscriptions_card_date_mode),
++                subtitle = CardDateMode.fromInt(dateMode).label(),
++                onClick = { dialog = CardLayoutDialog.DateMode },
++            )
++            if (CardDateMode.fromInt(dateMode) == CardDateMode.Relative) {
++                SettingsDivider()
++                SettingsRow(
++                    icon = Icons.Rounded.DateRange,
++                    title = stringResource(Res.string.settings_subscriptions_card_date_pattern),
++                    subtitle = CardDatePattern.fromInt(datePattern).label(),
++                    onClick = { dialog = CardLayoutDialog.DatePattern },
++                )
++            }
++            if (CardDateMode.fromInt(dateMode) == CardDateMode.Actual) {
++                SettingsDivider()
++                SettingsRow(
++                    icon = Icons.Rounded.DateRange,
++                    title = stringResource(Res.string.settings_subscriptions_card_date_actual_pattern),
++                    subtitle = CardActualDatePattern.fromInt(actualDatePattern).label(),
++                    onClick = { dialog = CardLayoutDialog.ActualDatePattern },
++                )
++            }
++        }
++
++        SettingsSectionTitle(stringResource(Res.string.settings_subscriptions_card_section_price))
++        SettingsGroup {
++            SettingsRow(
++                icon = Icons.Rounded.Payments,
++                title = stringResource(Res.string.settings_subscriptions_card_price_mode),
++                subtitle = CardPriceMode.fromInt(priceMode).label(),
++                onClick = { dialog = CardLayoutDialog.PriceMode },
++            )
++            SettingsDivider()
++            SettingsSwitchRow(
++                icon = Icons.Rounded.Payments,
++                title = stringResource(Res.string.settings_subscriptions_card_price_add_currency),
++                subtitle =
++                    stringResource(
++                        Res.string.settings_subscriptions_card_price_add_currency_summary,
++                    ),
++                checked = addDefaultCurrency,
++                onCheckedChange = viewModel::onCardAddDefaultCurrencyChange,
++                enabled =
++                    CardPriceMode.fromInt(priceMode) == CardPriceMode.Billed &&
++                        showConvertedCurrency,
++            )
++        }
++
++        SettingsSectionTitle(
++            stringResource(Res.string.settings_subscriptions_card_section_descriptions),
++        )
++        SettingsGroup {
++            SettingsRow(
++                icon = Icons.Rounded.Subject,
++                title = stringResource(Res.string.settings_subscriptions_card_first_line),
++                subtitle = CardLineSource.fromInt(firstLine).label(),
++                onClick = { dialog = CardLayoutDialog.FirstLine },
++            )
++            SettingsDivider()
++            SettingsRow(
++                icon = Icons.Rounded.Description,
++                title = stringResource(Res.string.settings_subscriptions_card_second_line),
++                subtitle = CardLineSource.fromInt(secondLine).label(),
++                onClick = { dialog = CardLayoutDialog.SecondLine },
++            )
++        }
++
++        SettingsSectionTitle(stringResource(Res.string.settings_subscriptions_card_section_card))
+         SettingsGroup {
+             SettingsRow(
+                 icon = Icons.Rounded.Straighten,
+@@ -129,7 +247,7 @@ fun SettingsCardLayoutScreen(
+                             Res.string.settings_subscriptions_card_size_comfortable
+                         },
+                     ),
+-                onClick = { showSizeDialog = true },
++                onClick = { dialog = CardLayoutDialog.Size },
+             )
+             SettingsDivider()
+             SettingsRow(
+@@ -143,37 +261,14 @@ fun SettingsCardLayoutScreen(
+                             Res.string.settings_subscriptions_card_style_surface
+                         },
+                     ),
+-                onClick = { showStyleDialog = true },
+-            )
+-            SettingsDivider()
+-            SettingsRow(
+-                icon = Icons.Rounded.DashboardCustomize,
+-                title = stringResource(Res.string.settings_subscriptions_card_details),
+-                subtitle =
+-                    stringResource(Res.string.settings_subscriptions_card_details_summary),
+-            )
+-        }
+-
+-        SettingsGroup {
+-            SettingsSwitchRow(
+-                icon = Icons.Rounded.Payments,
+-                title = stringResource(Res.string.settings_subscriptions_show_price),
+-                checked = showPrice,
+-                onCheckedChange = viewModel::onCardShowPriceChange,
++                onClick = { dialog = CardLayoutDialog.Style },
+             )
+             SettingsDivider()
+             SettingsSwitchRow(
+-                icon = Icons.Rounded.Schedule,
+-                title = stringResource(Res.string.settings_subscriptions_show_next_payment),
+-                checked = showNextPayment,
+-                onCheckedChange = viewModel::onCardShowNextPaymentChange,
+-            )
+-            SettingsDivider()
+-            SettingsSwitchRow(
+-                icon = Icons.Rounded.Description,
+-                title = stringResource(Res.string.settings_subscriptions_show_description),
+-                checked = showDescription,
+-                onCheckedChange = viewModel::onCardShowDescriptionChange,
++                icon = Icons.Rounded.Image,
++                title = stringResource(Res.string.settings_subscriptions_show_icon),
++                checked = showIcon,
++                onCheckedChange = viewModel::onCardShowIconChange,
+             )
+             SettingsDivider()
+             SettingsSwitchRow(
+@@ -186,47 +281,184 @@ fun SettingsCardLayoutScreen(
+         Column(modifier = Modifier.padding(bottom = 24.dp)) {}
+     }
+ 
+-    if (showSizeDialog) {
+-        SettingsChoiceDialog(
+-            title = stringResource(Res.string.settings_subscriptions_card_size),
+-            options = listOf(true, false),
+-            selected = compact,
+-            onSelect = {
+-                viewModel.onCardCompactChange(it)
+-                showSizeDialog = false
+-            },
+-            onDismiss = { showSizeDialog = false },
+-            label = {
+-                stringResource(
+-                    if (it) {
+-                        Res.string.settings_subscriptions_card_size_compact
+-                    } else {
+-                        Res.string.settings_subscriptions_card_size_comfortable
+-                    },
+-                )
+-            },
+-        )
+-    }
++    when (dialog) {
++        CardLayoutDialog.Size ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_size),
++                options = listOf(true, false),
++                selected = compact,
++                onSelect = {
++                    viewModel.onCardCompactChange(it)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = {
++                    stringResource(
++                        if (it) {
++                            Res.string.settings_subscriptions_card_size_compact
++                        } else {
++                            Res.string.settings_subscriptions_card_size_comfortable
++                        },
++                    )
++                },
++            )
+ 
+-    if (showStyleDialog) {
+-        SettingsChoiceDialog(
+-            title = stringResource(Res.string.settings_subscriptions_card_style),
+-            options = CardStyle.entries,
+-            selected = CardStyle.fromInt(style),
+-            onSelect = {
+-                viewModel.onCardStyleSelected(it.value)
+-                showStyleDialog = false
+-            },
+-            onDismiss = { showStyleDialog = false },
+-            label = {
+-                stringResource(
+-                    if (it == CardStyle.Colored) {
+-                        Res.string.settings_subscriptions_card_style_colored
+-                    } else {
+-                        Res.string.settings_subscriptions_card_style_surface
+-                    },
+-                )
+-            },
+-        )
++        CardLayoutDialog.Style ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_style),
++                options = CardStyle.entries,
++                selected = CardStyle.fromInt(style),
++                onSelect = {
++                    viewModel.onCardStyleSelected(it.value)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = {
++                    stringResource(
++                        if (it == CardStyle.Colored) {
++                            Res.string.settings_subscriptions_card_style_colored
++                        } else {
++                            Res.string.settings_subscriptions_card_style_surface
++                        },
++                    )
++                },
++            )
++
++        CardLayoutDialog.PriceMode ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_price_mode),
++                options = CardPriceMode.entries,
++                selected = CardPriceMode.fromInt(priceMode),
++                onSelect = {
++                    viewModel.onCardPriceModeSelected(it.value)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = { it.label() },
++            )
++
++        CardLayoutDialog.DateMode ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_date_mode),
++                options = CardDateMode.entries,
++                selected = CardDateMode.fromInt(dateMode),
++                onSelect = {
++                    viewModel.onCardDateModeSelected(it.value)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = { it.label() },
++            )
++
++        CardLayoutDialog.DatePattern ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_date_pattern),
++                options = CardDatePattern.entries,
++                selected = CardDatePattern.fromInt(datePattern),
++                onSelect = {
++                    viewModel.onCardDatePatternSelected(it.value)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = { it.label() },
++            )
++
++        CardLayoutDialog.ActualDatePattern ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_date_actual_pattern),
++                options = CardActualDatePattern.entries,
++                selected = CardActualDatePattern.fromInt(actualDatePattern),
++                onSelect = {
++                    viewModel.onCardActualDatePatternSelected(it.value)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = { it.label() },
++            )
++
++        CardLayoutDialog.FirstLine ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_first_line),
++                options = CardLineSource.entries,
++                selected = CardLineSource.fromInt(firstLine),
++                onSelect = {
++                    viewModel.onCardFirstLineSelected(it.value)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = { it.label() },
++            )
++
++        CardLayoutDialog.SecondLine ->
++            SettingsChoiceDialog(
++                title = stringResource(Res.string.settings_subscriptions_card_second_line),
++                options = CardLineSource.entries,
++                selected = CardLineSource.fromInt(secondLine),
++                onSelect = {
++                    viewModel.onCardSecondLineSelected(it.value)
++                    dialog = null
++                },
++                onDismiss = { dialog = null },
++                label = { it.label() },
++            )
++
++        null -> Unit
+     }
+ }
++
++@Composable
++private fun CardPriceMode.label(): String =
++    stringResource(
++        when (this) {
++            CardPriceMode.Billed -> Res.string.settings_subscriptions_card_price_billed
++            CardPriceMode.Monthly -> Res.string.settings_subscriptions_card_price_monthly
++            CardPriceMode.Yearly -> Res.string.settings_subscriptions_card_price_yearly
++            CardPriceMode.Hidden -> Res.string.settings_subscriptions_card_price_hidden
++        },
++    )
++
++@Composable
++private fun CardDateMode.label(): String =
++    stringResource(
++        when (this) {
++            CardDateMode.Relative -> Res.string.settings_subscriptions_card_date_relative
++            CardDateMode.Actual -> Res.string.settings_subscriptions_card_date_actual
++            CardDateMode.Hidden -> Res.string.settings_subscriptions_card_date_hidden
++        },
++    )
++
++@Composable
++private fun CardDatePattern.label(): String =
++    stringResource(
++        when (this) {
++            CardDatePattern.Ordinal -> Res.string.settings_subscriptions_card_date_pattern_ordinal
++            CardDatePattern.Calendar -> Res.string.settings_subscriptions_card_date_pattern_calendar
++        },
++    )
++
++@Composable
++private fun CardActualDatePattern.label(): String =
++    stringResource(
++        when (this) {
++            CardActualDatePattern.MonthDayYear -> Res.string.settings_subscriptions_card_date_actual_pattern_mdy
++            CardActualDatePattern.DayMonthYearSlash ->
++                Res.string.settings_subscriptions_card_date_actual_pattern_dmy_slash
++            CardActualDatePattern.YearMonthDaySlash ->
++                Res.string.settings_subscriptions_card_date_actual_pattern_ymd
++            CardActualDatePattern.DayMonthYearDash ->
++                Res.string.settings_subscriptions_card_date_actual_pattern_dmy_dash
++            CardActualDatePattern.DayMonthYearDot ->
++                Res.string.settings_subscriptions_card_date_actual_pattern_dmy_dot
++        },
++    )
++
++@Composable
++private fun CardLineSource.label(): String =
++    stringResource(
++        when (this) {
++            CardLineSource.None -> Res.string.settings_subscriptions_card_line_none
++            CardLineSource.Description -> Res.string.settings_subscriptions_card_line_description
++            CardLineSource.Tags -> Res.string.settings_subscriptions_card_line_tags
++            CardLineSource.NextPayment -> Res.string.settings_subscriptions_card_line_next_payment
++        },
++    )
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsHubScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsHubScreen.kt
+index cc93615..a02ec05 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsHubScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsHubScreen.kt
+@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.rounded.AttachMoney
++import androidx.compose.material.icons.rounded.Info
+ import androidx.compose.material.icons.rounded.Palette
+ import androidx.compose.material.icons.rounded.Settings
+ import androidx.compose.material.icons.rounded.Subscriptions
+@@ -19,6 +20,9 @@ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.unit.dp
+ import org.jetbrains.compose.resources.stringResource
+ import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.settings_general_system
++import recurringexpensetracker.shared.generated.resources.settings_hub_about_summary
++import recurringexpensetracker.shared.generated.resources.settings_hub_about_title
+ import recurringexpensetracker.shared.generated.resources.settings_hub_appearance_summary
+ import recurringexpensetracker.shared.generated.resources.settings_hub_appearance_title
+ import recurringexpensetracker.shared.generated.resources.settings_hub_general_summary
+@@ -35,6 +39,7 @@ fun SettingsHubScreen(
+     onAppearanceClick: () -> Unit,
+     onSubscriptionsClick: () -> Unit,
+     onMoneyClick: () -> Unit,
++    onAboutClick: () -> Unit,
+     appVersion: String,
+     modifier: Modifier = Modifier,
+ ) {
+@@ -70,6 +75,13 @@ fun SettingsHubScreen(
+             summary = stringResource(Res.string.settings_hub_money_summary),
+             onClick = onMoneyClick,
+         )
++        SettingsSectionTitle(stringResource(Res.string.settings_general_system))
++        SettingsHubCard(
++            icon = Icons.Rounded.Info,
++            title = stringResource(Res.string.settings_hub_about_title),
++            summary = stringResource(Res.string.settings_hub_about_summary),
++            onClick = onAboutClick,
++        )
+         Text(
+             text = stringResource(Res.string.settings_hub_version, appVersion),
+             style = MaterialTheme.typography.bodySmall,
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
+index 5ec59d9..4568963 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
+@@ -103,6 +103,7 @@ fun SettingsScreen(
+                 onAppearanceClick = { settingsNavController.navigate(SettingsPaneAppearance) },
+                 onSubscriptionsClick = { settingsNavController.navigate(SettingsPaneSubscriptions) },
+                 onMoneyClick = { settingsNavController.navigate(SettingsPaneMoney) },
++                onAboutClick = { settingsNavController.navigate(SettingsPaneAbout) },
+                 appVersion = appVersion,
+                 modifier = Modifier.padding(top = 4.dp),
+             )
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/CatppuccinMocha.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/CatppuccinMocha.kt
+new file mode 100644
+index 0000000..3c0bbe1
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/CatppuccinMocha.kt
+@@ -0,0 +1,174 @@
++package de.dbauer.expensetracker.shared.ui.theme
++
++import androidx.compose.material3.ColorScheme
++import androidx.compose.material3.darkColorScheme
++import androidx.compose.material3.lightColorScheme
++import androidx.compose.ui.graphics.Color
++
++/**
++ * Official Catppuccin Mocha palette.
++ *
++ * Values from https://catppuccin.com/palette#mocha; kept private so the public surface of this
++ * file stays limited to the complete [ColorScheme]s.
++ */
++private object CatppuccinMochaPalette {
++    val rosewater = Color(0xFFF5E0DC)
++    val flamingo = Color(0xFFF2CDCD)
++    val pink = Color(0xFFF5C2E7)
++    val mauve = Color(0xFFCBA6F7)
++    val red = Color(0xFFF38BA8)
++    val maroon = Color(0xFFEBA0AC)
++    val peach = Color(0xFFFAB387)
++    val yellow = Color(0xFFF9E2AF)
++    val green = Color(0xFFA6E3A1)
++    val teal = Color(0xFF94E2D5)
++    val sky = Color(0xFF89DCEB)
++    val sapphire = Color(0xFF74C7EC)
++    val blue = Color(0xFF89B4FA)
++    val lavender = Color(0xFFB4BEFE)
++    val text = Color(0xFFCDD6F4)
++    val subtext1 = Color(0xFFBAC2DE)
++    val subtext0 = Color(0xFFA6ADC8)
++    val overlay2 = Color(0xFF9399B2)
++    val overlay1 = Color(0xFF7F849C)
++    val overlay0 = Color(0xFF6C7086)
++    val surface2 = Color(0xFF585B70)
++    val surface1 = Color(0xFF45475A)
++    val surface0 = Color(0xFF313244)
++    val base = Color(0xFF1E1E2E)
++    val mantle = Color(0xFF181825)
++    val crust = Color(0xFF11111B)
++}
++
++/**
++ * Official Catppuccin Latte palette.
++ *
++ * Values from https://catppuccin.com/palette#latte; kept private so the public surface of this
++ * file stays limited to the complete [ColorScheme]s.
++ */
++private object CatppuccinLattePalette {
++    val rosewater = Color(0xFFDC8A78)
++    val flamingo = Color(0xFFDD7878)
++    val pink = Color(0xFFEA76CB)
++    val mauve = Color(0xFF8839EF)
++    val red = Color(0xFFD20F39)
++    val maroon = Color(0xFFE64553)
++    val peach = Color(0xFFFE640B)
++    val yellow = Color(0xFFDF8E1D)
++    val green = Color(0xFF40A02B)
++    val teal = Color(0xFF179299)
++    val sky = Color(0xFF04A5E5)
++    val sapphire = Color(0xFF209FB5)
++    val blue = Color(0xFF1E66F5)
++    val lavender = Color(0xFF7287FD)
++    val text = Color(0xFF4C4F69)
++    val subtext1 = Color(0xFF5C5F77)
++    val subtext0 = Color(0xFF6C6F85)
++    val overlay2 = Color(0xFF7C7F93)
++    val overlay1 = Color(0xFF8C8FA1)
++    val overlay0 = Color(0xFF9CA0B0)
++    val surface2 = Color(0xFFACB0BE)
++    val surface1 = Color(0xFFBCC0CC)
++    val surface0 = Color(0xFFCCD0DA)
++    val base = Color(0xFFEFF1F5)
++    val mantle = Color(0xFFE6E9EF)
++    val crust = Color(0xFFDCE0E8)
++}
++
++/**
++ * Complete Material 3 dark scheme built from the official Catppuccin Mocha palette.
++ *
++ * Mauve drives primary actions, blue is the secondary accent and teal the tertiary one.
++ * Neutral surfaces come from base/mantle/crust, with surface0–2 for raised containers.
++ */
++val catppuccinMochaColorScheme: ColorScheme =
++    darkColorScheme(
++        primary = CatppuccinMochaPalette.mauve,
++        onPrimary = CatppuccinMochaPalette.crust,
++        primaryContainer = CatppuccinMochaPalette.surface1,
++        onPrimaryContainer = CatppuccinMochaPalette.lavender,
++        // Mocha has no dark mauve, so Latte's mauve is used on the light inverse surface.
++        inversePrimary = CatppuccinLattePalette.mauve,
++        secondary = CatppuccinMochaPalette.blue,
++        onSecondary = CatppuccinMochaPalette.crust,
++        secondaryContainer = CatppuccinMochaPalette.surface0,
++        onSecondaryContainer = CatppuccinMochaPalette.blue,
++        tertiary = CatppuccinMochaPalette.teal,
++        onTertiary = CatppuccinMochaPalette.crust,
++        tertiaryContainer = CatppuccinMochaPalette.surface1,
++        onTertiaryContainer = CatppuccinMochaPalette.teal,
++        background = CatppuccinMochaPalette.base,
++        onBackground = CatppuccinMochaPalette.text,
++        surface = CatppuccinMochaPalette.base,
++        onSurface = CatppuccinMochaPalette.text,
++        surfaceVariant = CatppuccinMochaPalette.surface0,
++        onSurfaceVariant = CatppuccinMochaPalette.subtext0,
++        surfaceTint = CatppuccinMochaPalette.mauve,
++        inverseSurface = CatppuccinMochaPalette.text,
++        inverseOnSurface = CatppuccinMochaPalette.base,
++        error = CatppuccinMochaPalette.red,
++        onError = CatppuccinMochaPalette.crust,
++        errorContainer = CatppuccinMochaPalette.maroon,
++        onErrorContainer = CatppuccinMochaPalette.crust,
++        outline = CatppuccinMochaPalette.overlay1,
++        outlineVariant = CatppuccinMochaPalette.overlay0,
++        scrim = CatppuccinMochaPalette.crust,
++        surfaceBright = CatppuccinMochaPalette.surface2,
++        surfaceDim = CatppuccinMochaPalette.crust,
++        surfaceContainer = CatppuccinMochaPalette.surface0,
++        surfaceContainerHigh = CatppuccinMochaPalette.surface1,
++        surfaceContainerHighest = CatppuccinMochaPalette.surface2,
++        surfaceContainerLow = CatppuccinMochaPalette.mantle,
++        surfaceContainerLowest = CatppuccinMochaPalette.crust,
++    )
++
++/**
++ * Complete Material 3 light scheme built from the official Catppuccin Latte palette.
++ *
++ * Latte's accents are darker, so on-colors use the light base ink to keep contrast comfortable.
++ * Neutral surfaces come from base/mantle/crust, with surface0–2 for raised containers.
++ */
++val catppuccinLatteColorScheme: ColorScheme =
++    lightColorScheme(
++        primary = CatppuccinLattePalette.mauve,
++        onPrimary = CatppuccinLattePalette.base,
++        primaryContainer = CatppuccinLattePalette.surface1,
++        onPrimaryContainer = CatppuccinLattePalette.text,
++        // Latte has no light mauve, so Mocha's mauve is used on the dark inverse surface.
++        inversePrimary = CatppuccinMochaPalette.mauve,
++        secondary = CatppuccinLattePalette.blue,
++        onSecondary = CatppuccinLattePalette.base,
++        secondaryContainer = CatppuccinLattePalette.surface0,
++        onSecondaryContainer = CatppuccinLattePalette.text,
++        tertiary = CatppuccinLattePalette.teal,
++        onTertiary = CatppuccinLattePalette.base,
++        tertiaryContainer = CatppuccinLattePalette.surface1,
++        onTertiaryContainer = CatppuccinLattePalette.text,
++        background = CatppuccinLattePalette.base,
++        onBackground = CatppuccinLattePalette.text,
++        surface = CatppuccinLattePalette.base,
++        onSurface = CatppuccinLattePalette.text,
++        surfaceVariant = CatppuccinLattePalette.surface0,
++        onSurfaceVariant = CatppuccinLattePalette.text,
++        surfaceTint = CatppuccinLattePalette.mauve,
++        inverseSurface = CatppuccinLattePalette.text,
++        inverseOnSurface = CatppuccinLattePalette.base,
++        error = CatppuccinLattePalette.red,
++        onError = CatppuccinLattePalette.base,
++        errorContainer = CatppuccinLattePalette.red,
++        onErrorContainer = CatppuccinLattePalette.base,
++        outline = CatppuccinLattePalette.overlay1,
++        outlineVariant = CatppuccinLattePalette.overlay0,
++        scrim = CatppuccinLattePalette.text,
++        surfaceBright = CatppuccinLattePalette.base,
++        surfaceDim = CatppuccinLattePalette.crust,
++        surfaceContainer = CatppuccinLattePalette.surface0,
++        surfaceContainerHigh = CatppuccinLattePalette.surface1,
++        surfaceContainerHighest = CatppuccinLattePalette.surface2,
++        surfaceContainerLow = CatppuccinLattePalette.mantle,
++        surfaceContainerLowest = CatppuccinLattePalette.crust,
++    )
++
++/** Returns the Catppuccin scheme for the current [dark] mode. */
++fun catppuccinColorScheme(dark: Boolean): ColorScheme =
++    if (dark) catppuccinMochaColorScheme else catppuccinLatteColorScheme
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.kt
+index 664c6e9..0e077bf 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.kt
+@@ -5,6 +5,7 @@ import androidx.compose.material3.darkColorScheme
+ import androidx.compose.material3.lightColorScheme
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.luminance
+ import de.dbauer.expensetracker.shared.ui.ThemeMode
+ 
+ val lightColorScheme =
+@@ -81,23 +82,87 @@ expect fun ExpenseTrackerTheme(
+     content: @Composable () -> Unit,
+ )
+ 
++// Neutral surface ladder for true-black OLED themes. The steps are deliberately spaced so that
++// grouped settings rows, cards, sheets and menus still read as separate layers on pure black.
++private val amoledSurfaceContainerLowest = Color(0xFF050505)
++private val amoledSurfaceContainerLow = Color(0xFF0D0D0D)
++private val amoledSurfaceContainer = Color(0xFF151515)
++private val amoledSurfaceContainerHigh = Color(0xFF1D1D1D)
++private val amoledSurfaceContainerHighest = Color(0xFF272727)
++private val amoledSurfaceVariant = Color(0xFF1C1C1C)
++private val amoledSurfaceBright = Color(0xFF2E2E2E)
++private val amoledOutlineVariant = Color(0xFF3C3C3C)
++private val amoledOutline = Color(0xFF707070)
++
++/**
++ * Turns a dark [ColorScheme] into an OLED friendly variant.
++ *
++ * The background becomes pure black so OLED pixels can switch off, while raised surfaces use an
++ * explicit near-black grey ladder instead of being scaled down to black. Accent containers are only
++ * toned down 25%, which keeps them tinted and keeps their on-colors readable, and the outlines are
++ * lifted so button, segment and card borders stay visible.
++ */
+ fun ColorScheme.toAmoledColorScheme(): ColorScheme {
+     return copy(
+         background = Color.Black,
++        onBackground = onBackground.readableOnAmoledBackground(minLuminance = 0.6f),
+         surface = Color.Black,
+-        surfaceVariant = surfaceVariant.darken(),
+-        surfaceContainer = surfaceContainer.darken(),
+-        surfaceContainerLow = surfaceContainerLow.darken(),
+-        surfaceContainerHigh = surfaceContainerHigh.darken(),
+-        surfaceContainerLowest = surfaceContainerLowest.darken(),
+-        surfaceContainerHighest = surfaceContainerHighest.darken(),
+-        primaryContainer = primaryContainer.darken(),
+-        secondaryContainer = secondaryContainer.darken(),
+-        tertiaryContainer = tertiaryContainer.darken(),
++        onSurface = onSurface.readableOnAmoledBackground(minLuminance = 0.6f),
++        surfaceDim = Color.Black,
++        surfaceBright = amoledSurfaceBright,
++        surfaceVariant = amoledSurfaceVariant,
++        onSurfaceVariant = onSurfaceVariant.readableOnAmoledBackground(minLuminance = 0.4f),
++        surfaceContainerLowest = amoledSurfaceContainerLowest,
++        surfaceContainerLow = amoledSurfaceContainerLow,
++        surfaceContainer = amoledSurfaceContainer,
++        surfaceContainerHigh = amoledSurfaceContainerHigh,
++        surfaceContainerHighest = amoledSurfaceContainerHighest,
++        outline = amoledOutline,
++        outlineVariant = amoledOutlineVariant,
++        primaryContainer = primaryContainer.amoledContainer(),
++        secondaryContainer = secondaryContainer.amoledContainer(),
++        tertiaryContainer = tertiaryContainer.amoledContainer(),
++    )
++}
++
++/**
++ * Keeps accent containers tinted instead of collapsing them to black.
++ *
++ * A 0.75 factor is enough to let them sit on a black background while their (light) on-colors keep
++ * a comfortable contrast ratio.
++ */
++private fun Color.amoledContainer(): Color = darken(0.75f)
++
++/**
++ * Raises [Color.luminance] until text or icons are readable on black.
++ *
++ * Dark scheme on-colors already pass the threshold, so the original preset tint is preserved; this
++ * only corrects unusually dim colors.
++ */
++private fun Color.readableOnAmoledBackground(minLuminance: Float): Color {
++    var color = this
++    var guard = 0
++    while (color.luminance() < minLuminance && guard < 16) {
++        color = color.mixWith(Color.White, 0.12f)
++        guard++
++    }
++    return color
++}
++
++private fun Color.mixWith(
++    other: Color,
++    amount: Float,
++): Color {
++    val fraction = amount.coerceIn(0f, 1f)
++    return Color(
++        red = red + (other.red - red) * fraction,
++        green = green + (other.green - green) * fraction,
++        blue = blue + (other.blue - blue) * fraction,
++        alpha = alpha + (other.alpha - alpha) * fraction,
+     )
+ }
+ 
+-private fun Color.darken(factor: Float = 0.25f): Color {
++private fun Color.darken(factor: Float = 0.75f): Color {
+     return this.copy(
+         red = this.red * factor,
+         green = this.green * factor,
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/ThemePreset.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/ThemePreset.kt
+index b8c55aa..32e6c5e 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/ThemePreset.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/ThemePreset.kt
+@@ -27,6 +27,7 @@ enum class ThemePreset(
+     Sunset(4, Color(0xFFF2994A), Color(0xFFFFF7EF), Color(0xFF1A120A)),
+     Rose(5, Color(0xFFE85D75), Color(0xFFFFF4F6), Color(0xFF1A0E12)),
+     Graphite(6, Color(0xFF7C8B99), Color(0xFFF4F6F8), Color(0xFF101416)),
++    CatppuccinMocha(7, Color(0xFFCBA6F7), Color(0xFFEFF1F5), Color(0xFF1E1E2E)),
+     ;
+ 
+     companion object {
+@@ -42,7 +43,10 @@ fun themeColorScheme(
+     dark: Boolean,
+ ): ColorScheme =
+     schemeCache.getOrPut(preset.value to dark) {
+-        if (dark) darkScheme(preset) else lightScheme(preset)
++        when (preset) {
++            ThemePreset.CatppuccinMocha -> catppuccinColorScheme(dark)
++            else -> if (dark) darkScheme(preset) else lightScheme(preset)
++        }
+     }
+ 
+ private val lightInk = Color(0xFF141A18)
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/SettingsViewModel.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/SettingsViewModel.kt
+index bf9c1d8..a004ca0 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/SettingsViewModel.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/SettingsViewModel.kt
+@@ -46,10 +46,15 @@ class SettingsViewModel(
+     val dynamicColor = userPreferencesRepository.dynamicColor
+     val cardStyle = userPreferencesRepository.cardStyle
+     val cardCompact = userPreferencesRepository.cardCompact
+-    val cardShowDescription = userPreferencesRepository.cardShowDescription
+-    val cardShowNextPayment = userPreferencesRepository.cardShowNextPayment
++    val cardShowIcon = userPreferencesRepository.cardShowIcon
++    val cardPriceMode = userPreferencesRepository.cardPriceMode
++    val cardDateMode = userPreferencesRepository.cardDateMode
++    val cardDatePattern = userPreferencesRepository.cardDatePattern
++    val cardActualDatePattern = userPreferencesRepository.cardActualDatePattern
++    val cardAddDefaultCurrency = userPreferencesRepository.cardAddDefaultCurrency
++    val cardFirstLine = userPreferencesRepository.cardFirstLine
++    val cardSecondLine = userPreferencesRepository.cardSecondLine
+     val cardShowTagDots = userPreferencesRepository.cardShowTagDots
+-    val cardShowPrice = userPreferencesRepository.cardShowPrice
+     val averageExpensesPeriod = userPreferencesRepository.averageExpensesPeriod
+     val upcomingPaymentNotification = userPreferencesRepository.upcomingPaymentNotification
+     var upcomingPaymentNotificationTime = userPreferencesRepository.upcomingPaymentNotificationTime
+@@ -137,27 +142,57 @@ class SettingsViewModel(
+         }
+     }
+ 
+-    fun onCardShowDescriptionChange(show: Boolean) {
++    fun onCardShowIconChange(show: Boolean) {
+         viewModelScope.launch {
+-            userPreferencesRepository.cardShowDescription.save(show)
++            userPreferencesRepository.cardShowIcon.save(show)
+         }
+     }
+ 
+-    fun onCardShowNextPaymentChange(show: Boolean) {
++    fun onCardPriceModeSelected(mode: Int) {
+         viewModelScope.launch {
+-            userPreferencesRepository.cardShowNextPayment.save(show)
++            userPreferencesRepository.cardPriceMode.save(mode)
+         }
+     }
+ 
+-    fun onCardShowTagDotsChange(show: Boolean) {
++    fun onCardDateModeSelected(mode: Int) {
+         viewModelScope.launch {
+-            userPreferencesRepository.cardShowTagDots.save(show)
++            userPreferencesRepository.cardDateMode.save(mode)
++        }
++    }
++
++    fun onCardDatePatternSelected(pattern: Int) {
++        viewModelScope.launch {
++            userPreferencesRepository.cardDatePattern.save(pattern)
++        }
++    }
++
++    fun onCardActualDatePatternSelected(pattern: Int) {
++        viewModelScope.launch {
++            userPreferencesRepository.cardActualDatePattern.save(pattern)
++        }
++    }
++
++    fun onCardAddDefaultCurrencyChange(enabled: Boolean) {
++        viewModelScope.launch {
++            userPreferencesRepository.cardAddDefaultCurrency.save(enabled)
++        }
++    }
++
++    fun onCardFirstLineSelected(line: Int) {
++        viewModelScope.launch {
++            userPreferencesRepository.cardFirstLine.save(line)
+         }
+     }
+ 
+-    fun onCardShowPriceChange(show: Boolean) {
++    fun onCardSecondLineSelected(line: Int) {
+         viewModelScope.launch {
+-            userPreferencesRepository.cardShowPrice.save(show)
++            userPreferencesRepository.cardSecondLine.save(line)
++        }
++    }
++
++    fun onCardShowTagDotsChange(show: Boolean) {
++        viewModelScope.launch {
++            userPreferencesRepository.cardShowTagDots.save(show)
+         }
+     }
+ 
