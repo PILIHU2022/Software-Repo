@@ -2,7 +2,9 @@ name: Patchwork build
 
 on:
   schedule:
-    - cron: '23 */6 * * *'
+    # Poll upstream every 15 minutes; scheduled runs are best-effort and can be
+    # delayed by GitHub under load. Nothing is built unless an upstream SHA changed.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       app:

@@ -84,8 +84,12 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 
 ## 自动化流程
 
-`build.yml` 每 6 小时运行一次（`23 */6 * * *`），在推送到 `main` 且改动涉及
-`apps/**`、`scripts/**` 或工作流本身时运行，也支持手动触发（可选 `force` 输入）。
+`build.yml` 每 **15 分钟**轮询一次上游仓库（`*/15 * * * *`），只有上游 SHA 与
+`fdroid/.build-state.json` 不同的 app 才会构建。它也响应推送到 `main` 且改动涉及
+`apps/**`、`scripts/**` 或工作流本身的提交，并支持手动触发（可选 `app` / `force`
+输入）。GitHub 的定时任务属于 best-effort，负载高时可能延迟，因此实际生效时间
+可能长于 15 分钟。
+
 改动 `apps/*/patches/` 的补丁提交本身就是一次 `apps/**` 推送：**会立即触发构建**
 （无需等定时运行），并按下文的版本号规则自动 +1。
 

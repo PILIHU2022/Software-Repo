@@ -96,10 +96,13 @@ mismatch when the raw URL is used; the content is identical.
 
 ## How automation works
 
-`build.yml` runs every 6 hours (`23 */6 * * *`), on pushes to `main` touching
-`apps/**`, `scripts/**` or the workflow itself, and on manual dispatch (optional
-`app` / `force` inputs). A push that changes the patch queues under
-`apps/*/patches/` is an ordinary `apps/**` push: it triggers a build immediately
+`build.yml` polls the upstream repositories every 15 minutes (`*/15 * * * *`)
+and builds only the app(s) whose upstream SHA differs from
+`fdroid/.build-state.json`. It also runs on pushes to `main` touching `apps/**`,
+`scripts/**` or the workflow itself, and on manual dispatch (optional `app` /
+`force` inputs). GitHub treats schedules as best-effort and may delay a run under
+load, so the effective latency can be longer than 15 minutes. A push that
+changes the patch queues under `apps/*/patches/` is an ordinary `apps/**` push: it triggers a build immediately
 (no need to wait for the schedule) and the patch-queue commit bumps
 `versionCode` as described below.
 
