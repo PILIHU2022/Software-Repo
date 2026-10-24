@@ -30,11 +30,12 @@ issue，而不是继续发布过期代码。
 | 应用 | 上游 | 上游提交 | 补丁数 | 已发布 |
 | --- | --- | --- | --- | --- |
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) | `82ef9c9` | 17 | `0.21.4-patchwork` (6804) |
-| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) | `9ac2520` | 8 | `1.4.1-patchwork` (1301) |
+| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) | `9ac2520` | 10 | `1.4.1-patchwork`（已发布 1301；本地 1302 待推送） |
 
-**ScreenTime** —— 每日使用记录持久化到本地 SQLite 数据库，新增基于该历史的分析页；
-用 Compose `Canvas` 图表替换 Vico；缓存已栅格化的应用图标；启动时不再有主线程阻塞
-工作。
+**ScreenTime** —— 每日使用记录持久化到本地 SQLite 数据库，新增基于该历史的分析页
+（时长表格从 0 递增、星期进度条与柱图从 0 生长；新增独立的「分析」设置分类和本地
+历史说明）；用 Compose `Canvas` 图表替换 Vico；缓存已栅格化的应用图标；启动时不再
+有主线程阻塞工作。
 
 **RecurringExpenseTracker（Expenses）** —— Tilla 风格界面（服务品牌色磁贴、内置
 92 个服务图标目录、编辑页图标选择器、按名称推荐图标）、普通 `LazyColumn` 列表、
@@ -129,7 +130,7 @@ versionName = "<上游 versionName>-patchwork"
 
 | 应用 | 上游 versionCode / versionName | 补丁队列提交数 | 构建结果 |
 | --- | --- | --- | --- |
-| ScreenTime | `13` / `"1.4.1"` | 1 | `1301` / `"1.4.1-patchwork"` |
+| ScreenTime | `13` / `"1.4.1"` | 2 | `1302` / `"1.4.1-patchwork"` |
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 4 | `6804` / `"0.21.4-patchwork"` |
 
 ## 仓库结构

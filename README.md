@@ -34,11 +34,13 @@ code.
 | App | Upstream | Upstream revision | Patches | Published |
 | --- | --- | --- | --- | --- |
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) | `82ef9c9` | 17 | `0.21.4-patchwork` (6804) |
-| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) | `9ac2520` | 8 | `1.4.1-patchwork` (1301) |
+| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) | `9ac2520` | 10 | `1.4.1-patchwork` (1301 published; 1302 local, pending) |
 
 **ScreenTime** — daily usage history persisted in a local SQLite database, a new
-analysis screen backed by that history, Compose `Canvas` charts instead of Vico,
-cached rasterized app icons, and no main-thread work at startup.
+analysis screen backed by that history (durations count up from zero while the
+weekday bars and charts grow, with a dedicated **Analysis** settings category and
+an in-app explanation of the local history), Compose `Canvas` charts instead of
+Vico, cached rasterized app icons, and no main-thread work at startup.
 
 **RecurringExpenseTracker (Expenses)** — Tilla-style UI (coloured service tiles,
 built-in catalog of 92 service icons, editor icon picker, name-based
@@ -147,7 +149,7 @@ change.
 
 | App | Upstream versionCode / versionName | Patch-queue commits | Result |
 | --- | --- | --- | --- |
-| ScreenTime | `13` / `"1.4.1"` | 1 | `1301` / `"1.4.1-patchwork"` |
+| ScreenTime | `13` / `"1.4.1"` | 2 | `1302` / `"1.4.1-patchwork"` |
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 4 | `6804` / `"0.21.4-patchwork"` |
 
 ## Repository layout
