@@ -334,8 +334,8 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git config user.name "Spark"
-          git config user.email "Spark-CN@outlook.com"
+          git config user.name "DeepSeek Harness"
+          git config user.email "noreply@deepseek.com"
           git add fdroid/repo fdroid/.build-state.json
           if git diff --cached --quiet; then
             echo "No repository changes to commit"
