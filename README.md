@@ -52,15 +52,17 @@ strings. See [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md).
 
 ## F-Droid repository
 
-Live and verified GitHub Pages repository:
+Repository (custom domain, served and TLS-terminated in front of GitHub Pages;
+verified):
 
 ```
-https://pilihu2022.github.io/Software-Repo/repo
+https://software.sparkzh.top/repo
 ```
 
 The index returns HTTP 200, and `index-v2.json` lists
 `de.dbauer.expensetracker` **6802** and `com.atharok.screentime` **1301**.
-Landing page: <https://pilihu2022.github.io/Software-Repo/>.
+Landing page: <https://software.sparkzh.top/>. The GitHub Pages URL
+<https://pilihu2022.github.io/Software-Repo/repo> redirects to this domain.
 
 Add it in F-Droid: **Settings** → **Repositories** → **Add repository** → paste
 the URL (it must end in `/repo`) → check the fingerprint in the repository
@@ -84,8 +86,8 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 address — F-Droid requests `index-v2.json` under it.)
 
 Both addresses serve the same signed index. The index advertises the canonical
-Pages address, so some clients warn about an address mismatch when the raw URL
-is used; the content is identical.
+repository address (the custom domain), so some clients warn about an address
+mismatch when the raw URL is used; the content is identical.
 
 ## How automation works
 
@@ -110,6 +112,9 @@ The last full build
 ([run 40060044089](https://github.com/PILIHU2022/Software-Repo/actions/runs/40060044089))
 is green. Pages was enabled once manually (Settings → Pages → Build and
 deployment → Source: “GitHub Actions”); `GITHUB_TOKEN` cannot create the site.
+The site is published on the custom domain `software.sparkzh.top` (a `CNAME`
+file in `fdroid/` keeps it attached), and GitHub Pages redirects the
+`pilihu2022.github.io` URL there.
 
 `deploy-pages.yml` is the hourly safety net (`17 * * * *`, plus `fdroid/**`
 pushes): it publishes the committed `fdroid/` without rebuilding and stays green

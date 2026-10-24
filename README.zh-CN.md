@@ -46,15 +46,16 @@ tab：月历卡片使用 7 列 1:1 日格和按 locale 推断的每周首日；�
 
 ## F-Droid 仓库
 
-GitHub Pages 上的仓库地址（**已上线并验证**）：
+仓库地址（自定义域名，由 GitHub Pages 托管、CDN + TLS；**已上线并验证**）：
 
 ```
-https://pilihu2022.github.io/Software-Repo/repo
+https://software.sparkzh.top/repo
 ```
 
 索引返回 HTTP 200，`index-v2.json` 中列出 `de.dbauer.expensetracker` **6802** 与
-`com.atharok.screentime` **1301**。站点首页：
-<https://pilihu2022.github.io/Software-Repo/>。
+`com.atharok.screentime` **1301**。站点首页：<https://software.sparkzh.top/>。
+GitHub Pages 地址 <https://pilihu2022.github.io/Software-Repo/repo> 会 301 跳转到
+这个域名。
 
 在 F-Droid 客户端中添加：**设置** → **存储库** → **添加存储库** → 粘贴上面的地址
 （必须以 `/repo` 结尾）→ 在仓库详情中核对指纹。签名证书：
@@ -101,6 +102,8 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 （[run 40060044089](https://github.com/PILIHU2022/Software-Repo/actions/runs/40060044089)）
 是绿色的。Pages 需要由仓库所有者手动启用一次（Settings → Pages → Build and
 deployment → Source: “GitHub Actions”）；`GITHUB_TOKEN` 无权创建 Pages 站点。
+站点发布在自定义域名 `software.sparkzh.top` 上（`fdroid/CNAME` 负责保持绑定），
+`pilihu2022.github.io` 的地址会 301 跳转过去。
 
 `deploy-pages.yml` 是每小时一次的安全网（`17 * * * *`，以及 `fdroid/**` 的推送）：
 它只发布已提交的 `fdroid/`，不重新构建，Pages 不可用时也保持绿色。
