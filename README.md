@@ -28,6 +28,7 @@
 │   ├── build-app.sh              # 拉上游 + 打补丁 + 改版本 + 构建 + 校验
 │   ├── check-upstream.sh         # 比较上游 SHA，输出 GitHub Actions matrix
 │   ├── publish-fdroid.sh         # 发布 APK 到 fdroid/repo 并生成索引
+│   ├── test-publish-fdroid.sh    # publish-fdroid.sh 的回归测试（去重/索引）
 │   └── sync-patches.sh           # 从本地作者仓库同步补丁队列
 ├── fdroid/
 │   ├── config.yml                # fdroidserver 仓库配置
@@ -105,7 +106,15 @@ PATCHWORK_REVISION=1 ./scripts/build-app.sh screentime
 3. **publish**：把 APK 放进 `fdroid/repo/`，每个包最多保留 3 个版本，
    运行 `fdroid update --verbose` 生成并签名索引，提交
    `fdroid/repo` 与 `fdroid/.build-state.json`（提交信息带 `[skip ci]`），
-   最后把 `fdroid/` 发布到 GitHub Pages；
+   最后把 `fdroid/` 发布到 GitHub Pages。
+   - 矩阵中某个 app 构建失败时，publish 仍会运行并把幸存 APK 发布出去；
+   - 发布前按 `(package, versionCode)` 去重：同一版本重新构建产生的
+     新 APK 会替换 `fdroid/repo/` 里的旧文件，索引不会指向旧二进制；
+   - `.build-state.json` 只记录真正产出 APK 的 app，失败 app 的旧 SHA
+     会保留，下次运行会重试；
+   - 没有可发布的 APK 时 publish 直接跳过；
+   - 提交回 `main` 若因仓库 Actions 默认权限只读而返回 403，会打印
+     warning 但**不阻断** Pages 部署（见“已知限制”）。
 4. 失败时由 `actions/github-script` 打开或评论 issue
    **“Patchwork build failed”**，附运行链接和本地复现命令。
 
@@ -212,19 +221,40 @@ built_at、sha256）。
 
 stdout 是一行可直接交给 `fromJSON` 的 JSON，stderr 是人类可读摘要。
 
+## 测试发布脚本
+
+`publish-fdroid.sh` 的 (package, versionCode) 去重、嵌套目录搜索和索引哈希
+可以用一个已构建的 APK 做回归测试（在临时目录中运行，不会改动真实
+`fdroid/repo`）：
+
+```bash
+./scripts/test-publish-fdroid.sh dist/RecurringExpenseTracker-0.21.4-patchwork.apk
+```
+
+需要 JDK、Android SDK（`aapt` / `apksigner`）、`jq`、`python3` 和
+`fdroidserver`；CI 在 publish 前会自动运行它。
+
 ## 已知限制
 
 - **与官方包名相同、签名不同**：首次安装必须卸载官方版本，否则会报
   `INSTALL_FAILED_UPDATE_INCOMPATIBLE`；卸载会丢失应用数据，请先备份。
 - **GitHub Pages 首次需要启用**：仓库 Settings → Pages → Source 选择
   “GitHub Actions”，或让工作流中的 `configure-pages`（`enablement: true`）
-  自动开启；首次部署前仓库地址会 404。
+  自动开启；首次部署前仓库地址会 404。若 `configure-pages` 因权限不足
+  无法自动开启，需要仓库管理员手动执行这一步。
+- **Actions 写权限**：如果仓库 Settings → Actions → General → Workflow
+  permissions 是 “Read-only”，publish 的“提交回 main”会返回 403。工作流会把
+  该错误降级为 warning 并继续部署 Pages（本次运行的索引仍可访问），但
+  `fdroid/repo` 不会写回仓库；要恢复提交，需要改成 “Read and write
+  permissions”（或给 workflow 单独放行）。
 - **只有上游 SHA 变化才会自动构建**：仅修改补丁时，推送会因 paths 触发一次
   `--all` 构建；如果只改了补丁但未推送，需要手动运行 workflow。
 - **F-Droid 索引由测试密钥签名**，仅适合个人使用；不同设备之间请勿混用
   官方版和本仓库版。
 - **上游预览工具链**：ScreenTime 的 `compileSdk 37` 需要较新的 build-tools /
   platform；CI 先尝试稳定通道，失败后用 `sdkmanager --channel=3` 安装预览包。
+  构建不需要 NDK（上游 fdroiddata 为 RecurringExpenseTracker 声明了 NDK，
+  但本项目没有 `ndkVersion` / `externalNativeBuild`，本地零 NDK 构建已通过）。
 
 ## 上游项目
 
@@ -233,4 +263,5 @@ stdout 是一行可直接交给 `fromJSON` 的 JSON，stderr 是人类可读摘�
 | ScreenTime | <https://gitlab.com/Atharok/ScreenTime> | `main` | `com.atharok.screentime` |
 | RecurringExpenseTracker | <https://github.com/DennisBauer/RecurringExpenseTracker> | `main` | `de.dbauer.expensetracker` |
 
-两个上游项目均以 GPL-3.0 发布；本仓库中的补丁遵循各自上游的许可证。
+RecurringExpenseTracker 以 **GPL-3.0-only** 发布（上游 fdroiddata 元数据），
+ScreenTime 以 **GPL-3.0-or-later** 发布；本仓库中的补丁遵循各自上游的许可证。

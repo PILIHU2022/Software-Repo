@@ -27,9 +27,13 @@ Environment:
   FDROID_BIN         fdroid executable (default: fdroid from PATH)
   ANDROID_HOME       Android SDK (default: ../.toolchain/android-sdk if present)
 
-At most three APKs per package are kept in fdroid/repo/. The repository is
-indexed with `fdroid update --verbose`; fdroid/repo/index-v2.json must exist
-afterwards or the script exits non-zero.
+Incoming APKs are discovered recursively. For each (package, versionCode)
+pair only one APK is published: an incoming build replaces any older file with
+the same pair, and duplicate incoming files are collapsed to the last one in
+sorted order. At most three APKs per package (newest versionCode first) are
+kept in fdroid/repo/. The repository is indexed with
+`fdroid update --verbose`; fdroid/repo/index-v2.json must exist afterwards or
+the script exits non-zero.
 EOF
 }
 
@@ -106,13 +110,48 @@ apk_package_and_code() {
     printf '%s\n' "$line"
 }
 
+# Search recursively: the CI workflow downloads every matrix artifact into its
+# own `dist/patchwork-<app>/` directory, so APKs are usually nested one level
+# deep. Keeping the artifacts in separate directories also avoids two apps
+# overwriting each other's build-info.txt.
 mapfile -t FOUND < <(find "$APK_DIR" -type f -name '*.apk' | LC_ALL=C sort)
 [[ ${#FOUND[@]} -gt 0 ]] || die "no APKs found under $APK_DIR"
 
-echo "==> Copying ${#FOUND[@]} APK(s) into fdroid/repo"
+# Collapse duplicate (package, versionCode) inputs. A retried matrix job, a
+# local APK passed next to the CI artifact, or a re-run for the same upstream
+# version can hand us several binaries for one package/version pair. Only one
+# may be published: the last file in sorted order wins, deterministically.
+declare -A INCOMING=()
+INCOMING_ORDER=()
 for apk in "${FOUND[@]}"; do
+    read -r pkg code <<<"$(apk_package_and_code "$apk")"
+    key="$pkg $code"
+    if [[ -n "${INCOMING[$key]:-}" ]]; then
+        echo "    duplicate $pkg ($code): $(basename "${INCOMING[$key]}") superseded by $(basename "$apk")"
+    else
+        INCOMING_ORDER+=("$key")
+    fi
+    INCOMING[$key]="$apk"
+done
+
+echo "==> Publishing ${#INCOMING_ORDER[@]} unique APK(s) into fdroid/repo"
+for key in "${INCOMING_ORDER[@]}"; do
+    apk="${INCOMING[$key]}"
+    read -r pkg code <<<"$key"
+    # Drop any previously published build that has the same package and
+    # versionCode. The incoming APK is the authoritative binary for that
+    # pair; leaving the old file behind would let the index reference a stale
+    # binary (same versionCode, different bytes).
+    while IFS= read -r stale; do
+        [[ "$stale" -ef "$apk" ]] && continue
+        read -r stale_pkg stale_code <<<"$(apk_package_and_code "$stale")"
+        if [[ "$stale_pkg" == "$pkg" && "$stale_code" == "$code" ]]; then
+            rm -f -- "$stale"
+            echo "    replaced $(basename "$stale") ($pkg $code)"
+        fi
+    done < <(find "$REPO_DIR" -maxdepth 1 -type f -name '*.apk')
     cp -f "$apk" "$REPO_DIR/$(basename "$apk")"
-    echo "    $(basename "$apk")"
+    echo "    $(basename "$apk") ($pkg $code)"
 done
 
 # Keep only the three newest APKs per package. fdroid update would otherwise

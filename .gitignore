@@ -6,6 +6,11 @@ dist/
 # Generated F-Droid signing key (copied from signing/ by publish-fdroid.sh)
 fdroid/keystore.jks
 
+# fdroidserver transient state (contains local absolute paths, changes on
+# every run, and is not needed by F-Droid clients)
+fdroid/tmp/
+fdroid/repo/status/
+
 # Editor / OS noise
 .DS_Store
 *.log

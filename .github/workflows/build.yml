@@ -81,6 +81,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK packages
+        # android-37.x is a preview platform, so the stable channel may not
+        # know it; retry on channel 3. No NDK is installed on purpose: the
+        # app has no externalNativeBuild/ndkVersion and builds fine without
+        # one (AGP only warns that prebuilt AAR libs cannot be stripped).
+        # fdroiddata lists ndk 28.2.13676358 for upstream builds, but this
+        # patchwork build does not need it.
         run: |
           set -euo pipefail
           packages=(
@@ -136,7 +142,13 @@ jobs:
     needs:
       - check
       - build
-    if: always() && needs.build.result == 'success'
+    # Run even when one matrix leg failed (fail-fast is off), so surviving
+    # artifacts still get published. Skip cleanly when nothing changed.
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      needs.check.outputs.any_changed == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment:
@@ -165,28 +177,75 @@ jobs:
             sdkmanager --channel=3 --install "platform-tools" "build-tools;37.0.0"
           fi
 
+      # Artifacts are downloaded without merge-multiple, so each matrix leg
+      # lands in dist/patchwork-<app>/. publish-fdroid.sh searches
+      # recursively, which also keeps the per-app build-info.txt files apart.
       - name: Download APK artifacts
+        id: download
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           path: dist
           pattern: patchwork-*
 
+      - name: Detect downloaded APKs
+        id: apks
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find dist -type f -name '*.apk' 2>/dev/null | LC_ALL=C sort)
+          if [[ ${#apks[@]} -eq 0 ]]; then
+            echo "::warning::No APK artifacts were downloaded; skipping publish"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            printf 'Found %d APK(s):\n' "${#apks[@]}"
+            printf '  %s\n' "${apks[@]}"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install fdroidserver
+        if: steps.apks.outputs.found == 'true'
         run: |
           set -euo pipefail
           pipx install fdroidserver
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Test publish dedupe
+        if: steps.apks.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          apk="$(find dist -type f -name '*.apk' | head -n 1)"
+          ./scripts/test-publish-fdroid.sh "$apk"
+
       - name: Publish to F-Droid repository
+        if: steps.apks.outputs.found == 'true'
         env:
           MATRIX: ${{ needs.check.outputs.matrix }}
         run: |
           set -euo pipefail
-          state="$(jq -c '[.include[] | {(.app): .sha}] | add // {}' <<<"$MATRIX")"
+          # Only record the upstream SHA for apps whose APK really exists.
+          # A failed matrix leg must keep its previous state so the next run
+          # retries it instead of treating it as built.
+          state='{}'
+          while IFS=$'\t' read -r app sha; do
+            [[ -n "$app" ]] || continue
+            if [[ -n "$(find "dist/patchwork-$app" -type f -name '*.apk' -print -quit 2>/dev/null)" ]]; then
+              state="$(jq -c --arg app "$app" --arg sha "$sha" '. + {($app): $sha}' <<<"$state")"
+            else
+              echo "::warning::No APK for '$app' (build failed or artifact missing); keeping previous build state"
+            fi
+          done < <(jq -r '.include[]? | [.app, .sha] | @tsv' <<<"$MATRIX")
           printf 'Build state: %s\n' "$state"
           ./scripts/publish-fdroid.sh --apk-dir dist --state-json "$state"
 
       - name: Commit repository changes
+        id: commit
+        if: steps.apks.outputs.found == 'true'
+        # A repo whose default workflow permissions are read-only makes this
+        # fail with 403. That must not prevent the Pages deployment below.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git config user.name "Spark"
@@ -198,20 +257,29 @@ jobs:
           fi
           git commit -m "Update F-Droid repo [skip ci]"
           git pull --rebase origin main
-          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:main
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main
+
+      - name: Report commit-back failure
+        if: steps.commit.outcome == 'failure'
+        run: |
+          echo "::warning title=Commit-back failed::Pushing fdroid/repo to main failed (often HTTP 403)."
+          echo "::warning::Pages will still be deployed from this run's artifact. To fix the commit-back, set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions'."
 
       - name: Configure Pages
+        if: steps.apks.outputs.found == 'true'
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
       - name: Upload Pages artifact
+        if: steps.apks.outputs.found == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: fdroid
 
       - name: Deploy Pages
         id: deployment
+        if: steps.apks.outputs.found == 'true'
         uses: actions/deploy-pages@v4
 
   notify-failure:
