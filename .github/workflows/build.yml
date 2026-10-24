@@ -332,6 +332,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+        # Automated commits below use the same identity as the patch history.
         run: |
           set -euo pipefail
           git config user.name "DeepSeek Harness"
