@@ -96,10 +96,16 @@ mismatch when the raw URL is used; the content is identical.
 
 `build.yml` runs every 6 hours (`23 */6 * * *`), on pushes to `main` touching
 `apps/**`, `scripts/**` or the workflow itself, and on manual dispatch (optional
-`force` input). A push that changes the patch queues under `apps/*/patches/` is
-an ordinary `apps/**` push: it triggers a build immediately (no need to wait for
-the schedule) and the patch-queue commit bumps `versionCode` as described below.
-Each run:
+`app` / `force` inputs). A push that changes the patch queues under
+`apps/*/patches/` is an ordinary `apps/**` push: it triggers a build immediately
+(no need to wait for the schedule) and the patch-queue commit bumps
+`versionCode` as described below.
+
+Builds are per app: a push rebuilds only the apps whose `apps/<app>/**` paths
+changed (a `scripts/**` or workflow change rebuilds both; an unknown/forced push
+falls back to both). Scheduled runs rebuild only the apps whose upstream SHA
+changed. Manual dispatch can target one app with the `app` input, or rebuild
+everything with `app=all` + `force`. Each run:
 
 1. **check** — `scripts/check-upstream.sh` compares upstream `main` SHAs with
    `fdroid/.build-state.json` and emits the build matrix;
@@ -185,7 +191,7 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-app.sh expenses --no-build    # fetch + patch + rewrite version
 ./scripts/build-app.sh expenses              # full build into dist/
 ./scripts/build-app.sh screentime --out dist
-./scripts/check-upstream.sh                  # JSON status; --all forces all
+./scripts/check-upstream.sh                  # JSON status; --all/--apps select apps
 ./scripts/publish-fdroid.sh --apk-dir dist   # rebuild fdroid/repo + index
 ./scripts/sync-patches.sh --check            # compare queues with the clones
 ./scripts/test-publish-fdroid.sh dist/RecurringExpenseTracker-0.21.4-patchwork.apk

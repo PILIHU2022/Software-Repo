@@ -5,8 +5,16 @@ on:
     - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
+      app:
+        description: Which app to build
+        type: choice
+        options:
+          - all
+          - expenses
+          - screentime
+        default: all
       force:
-        description: Build every app even when upstream has not changed
+        description: Build even when upstream has not changed
         type: boolean
         default: false
   push:
@@ -39,14 +47,53 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Decide which apps to build:
+      #  * push  -> only the apps whose apps/<app>/** paths changed in this push;
+      #            a change to scripts/** or a workflow rebuilds both;
+      #            unknown/forced pushes fall back to both for safety;
+      #  * dispatch -> the selected app (or all with force);
+      #  * schedule -> only apps whose upstream SHA changed.
       - name: Resolve build matrix
         id: check
         env:
-          FORCE: ${{ github.event_name == 'push' || inputs.force }}
+          EVENT: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          FORCE_INPUT: ${{ inputs.force }}
+          APP_INPUT: ${{ inputs.app }}
         run: |
           set -euo pipefail
-          if [[ "$FORCE" == "true" ]]; then
-            result="$(./scripts/check-upstream.sh --all)"
+          args=()
+          if [[ "$EVENT" == "push" ]]; then
+            selected=""
+            if [[ -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]] \
+               && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" || true)"
+              pick=()
+              while IFS= read -r path; do
+                case "$path" in
+                  apps/expenses/*) pick+=(expenses) ;;
+                  apps/screentime/*) pick+=(screentime) ;;
+                  scripts/*|.github/workflows/*) pick=(expenses screentime); break ;;
+                esac
+              done <<<"$changed_files"
+              if [[ ${#pick[@]} -gt 0 ]]; then
+                selected="$(printf '%s\n' "${pick[@]}" | sort -u | paste -sd' ' -)"
+              fi
+            fi
+            # Unknown before-SHA (force push) or a non-app change: rebuild both.
+            [[ -n "$selected" ]] || selected="expenses screentime"
+            echo "Push changed these apps: $selected"
+            args=(--apps "$selected")
+          elif [[ "$EVENT" == "workflow_dispatch" ]]; then
+            if [[ -n "${APP_INPUT:-}" && "$APP_INPUT" != "all" ]]; then
+              args=(--apps "$APP_INPUT")
+            elif [[ "$FORCE_INPUT" == "true" ]]; then
+              args=(--all)
+            fi
+          fi
+          if [[ ${#args[@]} -gt 0 ]]; then
+            result="$(./scripts/check-upstream.sh "${args[@]}")"
           else
             result="$(./scripts/check-upstream.sh)"
           fi

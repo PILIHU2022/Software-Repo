@@ -86,7 +86,12 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 `build.yml` 每 6 小时运行一次（`23 */6 * * *`），在推送到 `main` 且改动涉及
 `apps/**`、`scripts/**` 或工作流本身时运行，也支持手动触发（可选 `force` 输入）。
 改动 `apps/*/patches/` 的补丁提交本身就是一次 `apps/**` 推送：**会立即触发构建**
-（无需等定时运行），并按下文的版本号规则自动 +1。每次运行：
+（无需等定时运行），并按下文的版本号规则自动 +1。
+
+构建按 app 分开：推送只重建 `apps/<app>/**` 有改动的那个 app（`scripts/**` 或
+工作流改动会重建两个；无法确定 before 的强制推送回退为两个）。定时运行只重建上游
+SHA 变化的 app。手动触发可用 `app` 输入只构建一个 app，或用 `app=all` + `force`
+全量重建。每次运行：
 
 1. **check** —— `scripts/check-upstream.sh` 对比上游 `main` 的 SHA 与
    `fdroid/.build-state.json`，生成构建矩阵；
@@ -167,7 +172,7 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-app.sh expenses --no-build    # 只拉上游 + 打补丁 + 改版本
 ./scripts/build-app.sh expenses              # 完整构建，输出到 dist/
 ./scripts/build-app.sh screentime --out dist
-./scripts/check-upstream.sh                  # 输出 JSON；--all 强制全部变化
+./scripts/check-upstream.sh                  # 输出 JSON；--all/--apps 选择 app
 ./scripts/publish-fdroid.sh --apk-dir dist   # 重建 fdroid/repo 与索引
 ./scripts/sync-patches.sh --check            # 对比作者仓库与补丁队列
 ./scripts/test-publish-fdroid.sh dist/RecurringExpenseTracker-0.21.4-patchwork.apk
