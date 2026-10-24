@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 11:26:29 +0800
+Subject: [PATCH] Keep the bottom bar visible on the calendar tab
+
+CalendarPane was missing from the bottom bar visibility predicate, so
+landing on the new Calendar tab hid the navigation bar entirely.
+---
+ .../kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt    | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+index f78393f..8edba9d 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+@@ -173,7 +173,7 @@ fun MainContent(
+         bottomBar = {
+             if (backStackEntry
+                     ?.destination
+-                    ?.isInRoute<MainNavRoute>(HomePane(), UpcomingPane, SettingsPane) == true
++                    ?.isInRoute<MainNavRoute>(HomePane(), UpcomingPane, CalendarPane, SettingsPane) == true
+             ) {
+                 BottomNavBar(navController = navController)
+             }

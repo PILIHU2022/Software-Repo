@@ -20,7 +20,7 @@
 ├── apps/
 │   ├── expenses/
 │   │   ├── app.conf              # RecurringExpenseTracker 构建参数
-│   │   └── patches/              # 0001..0010
+│   │   └── patches/              # 0001..0015
 │   └── screentime/
 │       ├── app.conf              # ScreenTime 构建参数
 │       └── patches/              # 0001..0008
@@ -93,18 +93,25 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 构建时会把上游 `app/build.gradle.kts` 中的版本改写为：
 
 ```
-versionCode = 上游 versionCode × 100 + PATCHWORK_REVISION   # 默认 revision = 0
+versionCode = 上游 versionCode × 100 + PATCHWORK_REVISION
 versionName = "上游 versionName-patchwork"
 ```
 
-例如：
+`PATCHWORK_REVISION` **默认自动计算**：它是仓库 `HEAD` 上触及该应用补丁目录
+（`apps/<app>/patches`）的提交数，上限 99。也就是说，每提交一次补丁队列变更，
+下一次构建的 `versionCode` 就自动 +1，F-Droid 客户端才能把“上游版本号没变、
+只改了补丁”的构建识别为升级。超过 99 时脚本会直接报错退出（因为
+`上游 versionCode × 100 + 100` 会与下一个上游版本号撞车），此时需要压缩补丁
+提交或显式指定 revision。
 
-| 应用 | 上游 versionCode / versionName | 本仓库构建结果 |
-| --- | --- | --- |
-| ScreenTime | `13` / `"1.4.1"` | `1300` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | `6800` / `"0.21.4-patchwork"` |
+例如（当前仓库状态）：
 
-`PATCHWORK_REVISION` 用于上游版本号不变、但补丁自身需要重新发布的情况：
+| 应用 | 上游 versionCode / versionName | 补丁目录提交数 | 本仓库构建结果 |
+| --- | --- | --- | --- |
+| ScreenTime | `13` / `"1.4.1"` | 1 | `1301` / `"1.4.1-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 2 | `6802` / `"0.21.4-patchwork"` |
+
+需要临时固定某个 revision 时仍可覆盖：
 
 ```bash
 PATCHWORK_REVISION=1 ./scripts/build-app.sh screentime

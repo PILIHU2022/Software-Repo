@@ -8,7 +8,8 @@
 #
 # Environment:
 #   PATCHWORK_REVISION        patch revision appended after the upstream
-#                             versionCode * 100 (default: 0)
+#                             versionCode * 100 (default: number of commits
+#                             that touched apps/<app>/patches, max 99)
 #   PATCHWORK_KEYSTORE_FILE   signing keystore (default: signing/patchwork-test.jks)
 #   PATCHWORK_STORE_PASSWORD  keystore password (default: patchwork123)
 #   PATCHWORK_KEY_ALIAS       key alias (default: patchwork)
@@ -96,9 +97,20 @@ for var in APP_ID PROJECT_NAME UPSTREAM_URL UPSTREAM_BRANCH PACKAGE \
     [[ -n "${!var:-}" ]] || die "app config $CONF does not set $var"
 done
 
-PATCHWORK_REVISION="${PATCHWORK_REVISION:-0}"
+# The revision suffix keeps patch-only releases installable: every commit that
+# touches this app's patch queue bumps the effective versionCode by one, even
+# when the upstream version itself did not change. Callers can still pin an
+# exact revision with PATCHWORK_REVISION=…
+if [[ -z "${PATCHWORK_REVISION:-}" ]]; then
+    PATCHWORK_REVISION="$(git -C "$ROOT" rev-list --count HEAD -- "apps/$APP/patches" 2>/dev/null || true)"
+    [[ -n "$PATCHWORK_REVISION" ]] || PATCHWORK_REVISION=0
+    echo "==> PATCHWORK_REVISION not set; using patch-queue commit count: $PATCHWORK_REVISION"
+fi
 [[ "$PATCHWORK_REVISION" =~ ^[0-9]+$ ]] \
     || die "PATCHWORK_REVISION must be a non-negative integer, got '$PATCHWORK_REVISION'"
+if (( 10#$PATCHWORK_REVISION > 99 )); then
+    die "PATCHWORK_REVISION=$PATCHWORK_REVISION exceeds the maximum of 99 (versionCode = upstream_code * 100 + revision, so larger revisions would collide with the next upstream release). Squash patch-queue commits or set PATCHWORK_REVISION explicitly."
+fi
 
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"

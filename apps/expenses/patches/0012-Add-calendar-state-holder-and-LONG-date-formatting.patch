@@ -1,0 +1,296 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 11:18:12 +0800
+Subject: [PATCH] Add calendar state holder and LONG date formatting
+
+CalendarViewModel keeps the displayed month, the selected day and the
+per-month projection. Paid state is fetched only for manual-confirmation
+expenses. The day detail needs a localized LONG date, which the existing
+Medium-style actuals cannot produce, so add a small expect/actual next to
+toMonthYearStringUTC.
+---
+ .../shared/Extensions.android.kt              |   9 ++
+ .../expensetracker/shared/Extensions.kt       |   2 +
+ .../dbauer/expensetracker/shared/di/Module.kt |   4 +
+ .../shared/viewmodel/CalendarViewModel.kt     | 145 ++++++++++++++++++
+ .../expensetracker/shared/Extensions.ios.kt   |  20 +++
+ .../shared/Extensions.desktop.kt              |   9 ++
+ 6 files changed, 189 insertions(+)
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt
+
+diff --git a/shared/src/androidMain/kotlin/de/dbauer/expensetracker/shared/Extensions.android.kt b/shared/src/androidMain/kotlin/de/dbauer/expensetracker/shared/Extensions.android.kt
+index 0602830..8193afb 100644
+--- a/shared/src/androidMain/kotlin/de/dbauer/expensetracker/shared/Extensions.android.kt
++++ b/shared/src/androidMain/kotlin/de/dbauer/expensetracker/shared/Extensions.android.kt
+@@ -6,6 +6,8 @@ import java.text.DateFormat
+ import java.text.NumberFormat
+ import java.text.ParseException
+ import java.time.Month
++import java.time.format.DateTimeFormatter
++import java.time.format.FormatStyle
+ import java.time.format.TextStyle
+ import java.util.Currency
+ import java.util.Date
+@@ -73,3 +75,10 @@ actual fun LocalDate.toMonthYearStringUTC(): String {
+             .getDisplayName(TextStyle.FULL, locale)
+     return "$month $year"
+ }
++
++actual fun LocalDate.toLongDateString(): String {
++    return DateTimeFormatter
++        .ofLocalizedDate(FormatStyle.LONG)
++        .withLocale(Locale.getDefault())
++        .format(java.time.LocalDate.of(year, month.number, day))
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/Extensions.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/Extensions.kt
+index f2c01d7..72b4a92 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/Extensions.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/Extensions.kt
+@@ -35,6 +35,8 @@ expect fun Instant.toLocaleString(): String
+ 
+ expect fun LocalDate.toMonthYearStringUTC(): String
+ 
++expect fun LocalDate.toLongDateString(): String
++
+ suspend fun StringResource.asString(): String {
+     return getString(this)
+ }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt
+index 048d3df..6517eee 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/di/Module.kt
+@@ -15,6 +15,7 @@ import de.dbauer.expensetracker.shared.model.notification.ExpenseNotificationMan
+ import de.dbauer.expensetracker.shared.ui.whatsnew.FakeWhatsNew
+ import de.dbauer.expensetracker.shared.ui.whatsnew.IWhatsNew
+ import de.dbauer.expensetracker.shared.ui.whatsnew.WhatsNew
++import de.dbauer.expensetracker.shared.viewmodel.CalendarViewModel
+ import de.dbauer.expensetracker.shared.viewmodel.EditRecurringExpenseViewModel
+ import de.dbauer.expensetracker.shared.viewmodel.MainNavigationViewModel
+ import de.dbauer.expensetracker.shared.viewmodel.RecurringExpenseViewModel
+@@ -37,6 +38,7 @@ val sharedModule =
+         single { get<RecurringExpenseDatabase>().recurringExpenseDao() }.bind<RecurringExpenseDao>()
+         viewModelOf(::RecurringExpenseViewModel)
+         viewModelOf(::UpcomingPaymentsViewModel)
++        viewModelOf(::CalendarViewModel)
+         viewModel { (expenseId: Int?) ->
+             EditRecurringExpenseViewModel(expenseId, get(), get(), get())
+         }
+@@ -52,6 +54,8 @@ val sharedModule =
+ val previewModule =
+     module {
+         viewModelOf(::RecurringExpenseViewModel)
++        viewModelOf(::UpcomingPaymentsViewModel)
++        viewModelOf(::CalendarViewModel)
+         viewModelOf(::SettingsViewModel)
+         viewModel { (expenseId: Int?) ->
+             EditRecurringExpenseViewModel(expenseId, get(), get(), get())
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt
+new file mode 100644
+index 0000000..be1d507
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt
+@@ -0,0 +1,145 @@
++package de.dbauer.expensetracker.shared.viewmodel
++
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.setValue
++import androidx.lifecycle.ViewModel
++import androidx.lifecycle.viewModelScope
++import de.dbauer.expensetracker.shared.data.RecurringExpenseData
++import de.dbauer.expensetracker.shared.model.DateTimeCalculator
++import de.dbauer.expensetracker.shared.model.calendar.CalendarDayCell
++import de.dbauer.expensetracker.shared.model.calendar.CalendarOccurrence
++import de.dbauer.expensetracker.shared.model.calendar.ISO_MONDAY
++import de.dbauer.expensetracker.shared.model.calendar.monthGrid
++import de.dbauer.expensetracker.shared.model.calendar.occurrencesForMonth
++import de.dbauer.expensetracker.shared.model.database.IExpenseRepository
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.combine
++import kotlinx.coroutines.launch
++import kotlinx.datetime.DateTimeUnit
++import kotlinx.datetime.LocalDate
++import kotlinx.datetime.plus
++
++/**
++ * State holder for the Tilla-style calendar tab.
++ *
++ * The per-day projection is only rebuilt when the displayed month or the expense list changes;
++ * selecting a day, changing the locale's first day of week or clicking an arrow only re-renders
++ * the (cheap) grid around the already projected occurrences.
++ */
++class CalendarViewModel(
++    private val expenseRepository: IExpenseRepository,
++) : ViewModel() {
++    private var today: LocalDate = DateTimeCalculator.getCurrentLocalDate()
++
++    var currentMonth by mutableStateOf(today.startOfMonth())
++        private set
++    var selectedDate by mutableStateOf(today)
++        private set
++    var days by mutableStateOf<List<CalendarDayCell>>(emptyList())
++        private set
++    var itemsByDay by mutableStateOf<Map<LocalDate, List<CalendarOccurrence>>>(emptyMap())
++        private set
++    var firstDayOfWeekIso by mutableIntStateOf(ISO_MONDAY)
++        private set
++    var isLoading by mutableStateOf(true)
++        private set
++
++    private val displayedMonth = MutableStateFlow(currentMonth)
++
++    init {
++        viewModelScope.launch {
++            combine(expenseRepository.allRecurringExpenses, displayedMonth) { expenses, month ->
++                month to projectMonth(expenses, month)
++            }.collect { (month, occurrences) ->
++                // A month projection can finish after the user already swiped to another month.
++                if (month != currentMonth) return@collect
++                today = DateTimeCalculator.getCurrentLocalDate()
++                itemsByDay = occurrences
++                days = buildDays(month, occurrences)
++                isLoading = false
++            }
++        }
++    }
++
++    fun onPreviousMonth() {
++        changeMonth(-1)
++    }
++
++    fun onNextMonth() {
++        changeMonth(1)
++    }
++
++    fun onDaySelected(date: LocalDate) {
++        selectedDate = date
++        val monthOfDate = date.startOfMonth()
++        if (monthOfDate == currentMonth) {
++            days = buildDays(currentMonth, itemsByDay)
++        } else {
++            changeMonthTo(monthOfDate)
++        }
++    }
++
++    /**
++     * Keeps the week labels in sync with the platform locale. The composable reads the tag with
++     * `Locale.current` (a Compose-only API) and passes the resulting ISO day number in.
++     */
++    fun onFirstDayOfWeekChanged(isoDayNumber: Int) {
++        val normalized = isoDayNumber.coerceIn(1, 7)
++        if (normalized == firstDayOfWeekIso) return
++        firstDayOfWeekIso = normalized
++        days = buildDays(currentMonth, itemsByDay)
++    }
++
++    private fun changeMonth(delta: Int) {
++        changeMonthTo(currentMonth.plus(delta, DateTimeUnit.MONTH))
++    }
++
++    private fun changeMonthTo(monthStart: LocalDate) {
++        if (monthStart == currentMonth) return
++        currentMonth = monthStart
++        today = DateTimeCalculator.getCurrentLocalDate()
++        if (!selectedDate.isInMonth(monthStart)) {
++            // Tilla keeps the old selection when changing months, which leaves the day list showing
++            // a date outside the visible grid. Prefer today when it is in the new month, else the 1st.
++            selectedDate = if (today.isInMonth(monthStart)) today else monthStart
++        }
++        itemsByDay = emptyMap()
++        days = buildDays(monthStart, emptyMap())
++        isLoading = true
++        displayedMonth.value = monthStart
++    }
++
++    private fun buildDays(
++        monthStart: LocalDate,
++        occurrences: Map<LocalDate, List<CalendarOccurrence>>,
++    ): List<CalendarDayCell> {
++        return monthGrid(
++            monthStart = monthStart,
++            firstDayOfWeekIso = firstDayOfWeekIso,
++            today = today,
++            selectedDate = selectedDate,
++            itemsByDay = occurrences,
++        )
++    }
++
++    private suspend fun projectMonth(
++        expenses: List<RecurringExpenseData>,
++        monthStart: LocalDate,
++    ): Map<LocalDate, List<CalendarOccurrence>> {
++        // payment_records only exist for manual-confirmation expenses; fetching them per expense
++        // keeps the repository interface unchanged.
++        val paidDatesByExpense = mutableMapOf<Int, Set<Long>>()
++        expenses.filter { it.requireManualConfirmation }.forEach { expense ->
++            paidDatesByExpense[expense.id] = expenseRepository.getPaymentRecordsForExpense(expense.id).toSet()
++        }
++        return occurrencesForMonth(expenses, monthStart, paidDatesByExpense)
++    }
++
++    private fun LocalDate.startOfMonth(): LocalDate = LocalDate(year, month, 1)
++
++    private fun LocalDate.isInMonth(monthStart: LocalDate): Boolean {
++        return year == monthStart.year && month == monthStart.month
++    }
++}
+diff --git a/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/Extensions.ios.kt b/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/Extensions.ios.kt
+index 0fc91a8..4e7794b 100644
+--- a/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/Extensions.ios.kt
++++ b/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/Extensions.ios.kt
+@@ -6,6 +6,7 @@ import platform.Foundation.NSCalendar
+ import platform.Foundation.NSDate
+ import platform.Foundation.NSDateComponents
+ import platform.Foundation.NSDateFormatter
++import platform.Foundation.NSDateFormatterLongStyle
+ import platform.Foundation.NSDateFormatterMediumStyle
+ import platform.Foundation.NSNumber
+ import platform.Foundation.NSNumberFormatter
+@@ -58,3 +59,22 @@ actual fun LocalDate.toMonthYearStringUTC(): String {
+     dateFormatter.dateFormat = "MMMM"
+     return "${dateFormatter.stringFromDate(date)} $year"
+ }
++
++actual fun LocalDate.toLongDateString(): String {
++    val comps =
++        NSDateComponents().apply {
++            setYear(year)
++            setMonth(this@toLongDateString.month.number.toLong())
++            setDay(day.toLong())
++            timeZone = NSTimeZone.timeZoneWithAbbreviation("UTC")
++        }
++    val calendar = NSCalendar.currentCalendar
++    val date = calendar.dateFromComponents(comps)!!
++
++    val dateFormatter =
++        NSDateFormatter().apply {
++            dateStyle = NSDateFormatterLongStyle
++            timeZone = NSTimeZone.timeZoneWithAbbreviation("UTC")
++        }
++    return dateFormatter.stringFromDate(date)
++}
+diff --git a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Extensions.desktop.kt b/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Extensions.desktop.kt
+index ad6217d..7dcefa8 100644
+--- a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Extensions.desktop.kt
++++ b/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Extensions.desktop.kt
+@@ -5,6 +5,8 @@ import java.text.DateFormat
+ import java.text.NumberFormat
+ import java.text.ParseException
+ import java.time.Month
++import java.time.format.DateTimeFormatter
++import java.time.format.FormatStyle
+ import java.time.format.TextStyle
+ import java.util.Currency
+ import java.util.Date
+@@ -55,3 +57,10 @@ actual fun LocalDate.toMonthYearStringUTC(): String {
+             .getDisplayName(TextStyle.FULL, locale)
+     return "$month $year"
+ }
++
++actual fun LocalDate.toLongDateString(): String {
++    return DateTimeFormatter
++        .ofLocalizedDate(FormatStyle.LONG)
++        .withLocale(Locale.getDefault())
++        .format(java.time.LocalDate.of(year, month.number, day))
++}

@@ -1,0 +1,891 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 11:18:10 +0800
+Subject: [PATCH] Add calendar month grid and occurrence projection
+
+Project the occurrences of a month with the same getNextPaymentDayAfter
+rules the Upcoming screen uses, so monthly clamping and the inclusive
+endDate stay consistent. The grid is pure and padded to full weeks,
+including adjacent-month days. First day of week is derived from a
+BCP-47 tag instead of expect/actual so it can be unit tested.
+---
+ .../shared/model/calendar/CalendarGrid.kt     |  61 ++++
+ .../shared/model/calendar/CalendarModels.kt   |  46 +++
+ .../model/calendar/CalendarOccurrences.kt     |  59 ++++
+ .../shared/model/calendar/FirstDayOfWeek.kt   |  77 +++++
+ .../shared/model/calendar/CalendarGridTest.kt | 176 +++++++++++
+ .../model/calendar/CalendarOccurrencesTest.kt | 283 ++++++++++++++++++
+ .../model/calendar/CalendarTestFixtures.kt    |  57 ++++
+ .../model/calendar/FirstDayOfWeekTest.kt      |  55 ++++
+ 8 files changed, 814 insertions(+)
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGrid.kt
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarModels.kt
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrences.kt
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeek.kt
+ create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGridTest.kt
+ create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrencesTest.kt
+ create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarTestFixtures.kt
+ create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeekTest.kt
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGrid.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGrid.kt
+new file mode 100644
+index 0000000..b483a30
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGrid.kt
+@@ -0,0 +1,61 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++import kotlinx.datetime.DateTimeUnit
++import kotlinx.datetime.LocalDate
++import kotlinx.datetime.daysUntil
++import kotlinx.datetime.isoDayNumber
++import kotlinx.datetime.minus
++import kotlinx.datetime.plus
++
++/**
++ * Number of empty cells before the first day of [monthStart] when the week starts on
++ * [firstDayOfWeekIso]. [monthStart] must be the first day of a month.
++ */
++fun leadingBlanks(
++    monthStart: LocalDate,
++    firstDayOfWeekIso: Int,
++): Int {
++    val offset = monthStart.dayOfWeek.isoDayNumber - firstDayOfWeekIso
++    return offset.mod(DAYS_PER_WEEK)
++}
++
++/** Number of days in the month that starts at [monthStart]. */
++fun daysInMonth(monthStart: LocalDate): Int {
++    return monthStart.daysUntil(monthStart.plus(1, DateTimeUnit.MONTH))
++}
++
++/**
++ * Builds the whole 7-column month grid for [monthStart], including the trailing days of the
++ * previous month and the leading days of the next month so every row is full (like Tilla does).
++ *
++ * [itemsByDay] is the projection for [monthStart]'s month only; adjacent-month cells never show
++ * markers, they are just navigation targets. [today] and [selectedDate] may be outside the month.
++ */
++fun monthGrid(
++    monthStart: LocalDate,
++    firstDayOfWeekIso: Int,
++    today: LocalDate,
++    selectedDate: LocalDate,
++    itemsByDay: Map<LocalDate, List<CalendarOccurrence>>,
++): List<CalendarDayCell> {
++    val leading = leadingBlanks(monthStart, firstDayOfWeekIso)
++    val cellCount = ceilToWeek(leading + daysInMonth(monthStart))
++    val gridStart = monthStart.minus(leading, DateTimeUnit.DAY)
++
++    return (0 until cellCount).map { index ->
++        val date = gridStart.plus(index, DateTimeUnit.DAY)
++        val isCurrentMonth = date.year == monthStart.year && date.month == monthStart.month
++        CalendarDayCell(
++            date = date,
++            dayOfMonth = date.day,
++            isCurrentMonth = isCurrentMonth,
++            isToday = date == today,
++            isSelected = date == selectedDate,
++            items = if (isCurrentMonth) itemsByDay[date].orEmpty() else emptyList(),
++        )
++    }
++}
++
++private fun ceilToWeek(days: Int): Int {
++    return ((days + DAYS_PER_WEEK - 1) / DAYS_PER_WEEK) * DAYS_PER_WEEK
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarModels.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarModels.kt
+new file mode 100644
+index 0000000..2898a52
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarModels.kt
+@@ -0,0 +1,46 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++import de.dbauer.expensetracker.shared.data.CurrencyValue
++import de.dbauer.expensetracker.shared.data.Recurrence
++import kotlinx.datetime.LocalDate
++
++/**
++ * One concrete payment of a recurring expense on a concrete day.
++ *
++ * Occurrences are never persisted: they are projected from [de.dbauer.expensetracker.shared.data.RecurringExpenseData]
++ * with the same `getNextPaymentDayAfter` rules the Upcoming screen uses.
++ */
++data class CalendarOccurrence(
++    val expenseId: Int,
++    val date: LocalDate,
++    val name: String,
++    val price: CurrencyValue,
++    val serviceId: String?,
++    val recurrence: Recurrence,
++    val everyXRecurrence: Int,
++    val requiresConfirmation: Boolean,
++    val isPaid: Boolean,
++)
++
++/** A single cell of the month grid, including the adjacent-month filler days. */
++data class CalendarDayCell(
++    val date: LocalDate,
++    val dayOfMonth: Int,
++    val isCurrentMonth: Boolean,
++    val isToday: Boolean,
++    val isSelected: Boolean,
++    val items: List<CalendarOccurrence> = emptyList(),
++) {
++    val itemCount: Int
++        get() = items.size
++
++    val firstItem: CalendarOccurrence?
++        get() = items.firstOrNull()
++
++    /**
++     * True when every occurrence on this day was explicitly marked as paid. Expenses that are paid
++     * automatically are never stored in `payment_records`, so a mixed day never counts as paid.
++     */
++    val allItemsPaid: Boolean
++        get() = items.isNotEmpty() && items.all { it.isPaid }
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrences.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrences.kt
+new file mode 100644
+index 0000000..c2580fc
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrences.kt
+@@ -0,0 +1,59 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++import de.dbauer.expensetracker.shared.data.RecurringExpenseData
++import kotlinx.datetime.DateTimeUnit
++import kotlinx.datetime.LocalDate
++import kotlinx.datetime.TimeZone
++import kotlinx.datetime.atStartOfDayIn
++import kotlinx.datetime.plus
++
++/**
++ * Projects every occurrence of [expenses] that falls into the month starting at [monthStart]
++ * (which must be the first day of the month), grouped and stably sorted by day.
++ *
++ * The dates are derived with [RecurringExpenseData.getNextPaymentDayAfter], exactly like the
++ * Upcoming screen, so monthly clamping (`31 Jan -> 28/29 Feb -> 28/29 Mar`) and the inclusive
++ * `endDate` upper bound stay consistent between both screens.
++ *
++ * Only expenses that require manual confirmation can be paid, so [paidDatesByExpense] is only
++ * consulted for those (values are UTC start-of-day epoch milliseconds, the format used by
++ * `payment_records`).
++ */
++fun occurrencesForMonth(
++    expenses: List<RecurringExpenseData>,
++    monthStart: LocalDate,
++    paidDatesByExpense: Map<Int, Set<Long>> = emptyMap(),
++): Map<LocalDate, List<CalendarOccurrence>> {
++    val monthEnd = monthStart.plus(1, DateTimeUnit.MONTH)
++    val occurrencesByDay = mutableMapOf<LocalDate, MutableList<CalendarOccurrence>>()
++
++    expenses.forEach { expense ->
++        if (expense.archivedDate != null) return@forEach
++
++        val paidDates = paidDatesByExpense[expense.id].orEmpty()
++        var date = expense.getNextPaymentDayAfter(monthStart) ?: return@forEach
++        while (date < monthEnd) {
++            val isPaid =
++                expense.requireManualConfirmation &&
++                    paidDates.contains(date.atStartOfDayIn(TimeZone.UTC).toEpochMilliseconds())
++            occurrencesByDay.getOrPut(date) { mutableListOf() }.add(
++                CalendarOccurrence(
++                    expenseId = expense.id,
++                    date = date,
++                    name = expense.name,
++                    price = expense.price,
++                    serviceId = expense.serviceId,
++                    recurrence = expense.recurrence,
++                    everyXRecurrence = expense.everyXRecurrence,
++                    requiresConfirmation = expense.requireManualConfirmation,
++                    isPaid = isPaid,
++                ),
++            )
++            date = expense.getNextPaymentDayAfter(date.plus(1, DateTimeUnit.DAY)) ?: break
++        }
++    }
++
++    return occurrencesByDay.mapValues { (_, dayOccurrences) ->
++        dayOccurrences.sortedWith(compareBy({ it.name.lowercase() }, { it.expenseId }))
++    }
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeek.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeek.kt
+new file mode 100644
+index 0000000..8810cbf
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeek.kt
+@@ -0,0 +1,77 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++/**
++ * Maps a BCP-47 locale tag to the ISO day number (Monday = 1 … Sunday = 7) of the first day of the
++ * week. There is no common Kotlin API for this and an `expect/actual` would only wrap
++ * `WeekFields`/`NSCalendar`, so a small table keeps the logic pure and unit-testable.
++ *
++ * The table follows the regions this app actually ships translations for; unknown locales fall
++ * back to ISO-8601 (Monday first), which is what most of Europe and Asia use.
++ */
++fun firstDayOfWeekIso(localeTag: String): Int {
++    val parts = localeTag.replace('_', '-').split('-').filter { it.isNotBlank() }
++    val language = parts.firstOrNull()?.lowercase().orEmpty()
++    val region =
++        parts
++            .drop(1)
++            .firstOrNull { part -> part.length == 2 && part.all { it.isLetter() } }
++            ?.uppercase()
++            .orEmpty()
++
++    if (language == "ar" || region in SATURDAY_FIRST_REGIONS) {
++        return ISO_SATURDAY
++    }
++    if (language in SUNDAY_FIRST_LANGUAGES || region in SUNDAY_FIRST_REGIONS) {
++        return ISO_SUNDAY
++    }
++    return ISO_MONDAY
++}
++
++/**
++ * Returns the weekday indices (0 = Monday … 6 = Sunday) in the order they are displayed for the
++ * given first day of week. The seven weekday label resources are always stored Monday-first.
++ */
++fun weekdayIndices(firstDayOfWeekIso: Int): List<Int> {
++    val offset = (firstDayOfWeekIso - 1).mod(DAYS_PER_WEEK)
++    return (0 until DAYS_PER_WEEK).map { index -> (index + offset) % DAYS_PER_WEEK }
++}
++
++const val ISO_MONDAY = 1
++const val ISO_SATURDAY = 6
++const val ISO_SUNDAY = 7
++
++internal const val DAYS_PER_WEEK = 7
++
++private val SUNDAY_FIRST_LANGUAGES = setOf("he", "ja", "ko")
++
++private val SUNDAY_FIRST_REGIONS =
++    setOf(
++        "CA",
++        "IL",
++        "JP",
++        "KR",
++        "PH",
++        "US",
++    )
++
++private val SATURDAY_FIRST_REGIONS =
++    setOf(
++        "AE",
++        "AF",
++        "BH",
++        "DZ",
++        "EG",
++        "IQ",
++        "IR",
++        "JO",
++        "KW",
++        "LY",
++        "MA",
++        "OM",
++        "QA",
++        "SA",
++        "SD",
++        "SY",
++        "TN",
++        "YE",
++    )
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGridTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGridTest.kt
+new file mode 100644
+index 0000000..bb70101
+--- /dev/null
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarGridTest.kt
+@@ -0,0 +1,176 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++import kotlinx.datetime.LocalDate
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class CalendarGridTest {
++    @Test
++    fun leadingBlanksFollowFirstDayOfWeek() {
++        val october = LocalDate(2026, 10, 1)
++        assertEquals(3, leadingBlanks(october, ISO_MONDAY))
++        assertEquals(4, leadingBlanks(october, ISO_SUNDAY))
++
++        val september = LocalDate(2026, 9, 1)
++        assertEquals(1, leadingBlanks(september, ISO_MONDAY))
++        assertEquals(2, leadingBlanks(september, ISO_SUNDAY))
++
++        val february = LocalDate(2026, 2, 1)
++        assertEquals(6, leadingBlanks(february, ISO_MONDAY))
++        assertEquals(0, leadingBlanks(february, ISO_SUNDAY))
++    }
++
++    @Test
++    fun daysInMonthHandlesEveryMonthLength() {
++        assertEquals(28, daysInMonth(LocalDate(2026, 2, 1)))
++        assertEquals(29, daysInMonth(LocalDate(2024, 2, 1)))
++        assertEquals(30, daysInMonth(LocalDate(2026, 9, 1)))
++        assertEquals(31, daysInMonth(LocalDate(2026, 10, 1)))
++        assertEquals(31, daysInMonth(LocalDate(2026, 12, 1)))
++    }
++
++    @Test
++    fun gridAlwaysFillsCompleteWeeks() {
++        val date = LocalDate(2026, 10, 24)
++        val cells = monthGrid(LocalDate(2026, 10, 1), ISO_MONDAY, date, date, emptyMap())
++
++        assertEquals(35, cells.size)
++        assertEquals(0, cells.size % 7)
++        assertEquals(LocalDate(2026, 9, 28), cells.first().date)
++        assertEquals(LocalDate(2026, 11, 1), cells.last().date)
++        assertEquals(31, cells.count { it.isCurrentMonth })
++        assertEquals(4, cells.count { !it.isCurrentMonth })
++    }
++
++    @Test
++    fun gridStartsOnSundayWhenSundayIsFirstDay() {
++        val date = LocalDate(2026, 2, 14)
++        val cells = monthGrid(LocalDate(2026, 2, 1), ISO_SUNDAY, date, date, emptyMap())
++
++        assertEquals(28, cells.size)
++        assertEquals(LocalDate(2026, 2, 1), cells.first().date)
++        assertEquals(LocalDate(2026, 2, 28), cells.last().date)
++        assertTrue(cells.all { it.isCurrentMonth })
++    }
++
++    @Test
++    fun gridHandlesLeapFebruary() {
++        val cells =
++            monthGrid(LocalDate(2024, 2, 1), ISO_MONDAY, LocalDate(2024, 2, 1), LocalDate(2024, 2, 1), emptyMap())
++
++        assertEquals(35, cells.size)
++        assertEquals(LocalDate(2024, 1, 29), cells.first().date)
++        assertEquals(LocalDate(2024, 3, 3), cells.last().date)
++        assertEquals(29, cells.count { it.isCurrentMonth })
++    }
++
++    @Test
++    fun gridCrossesTheYearBoundary() {
++        val cells =
++            monthGrid(
++                LocalDate(2026, 12, 1),
++                ISO_MONDAY,
++                LocalDate(2026, 12, 1),
++                LocalDate(2026, 12, 1),
++                emptyMap(),
++            )
++
++        assertEquals(LocalDate(2026, 11, 30), cells.first().date)
++        assertEquals(LocalDate(2027, 1, 3), cells.last().date)
++        assertEquals(31, cells.count { it.isCurrentMonth })
++        assertTrue(cells.any { it.date == LocalDate(2027, 1, 1) && !it.isCurrentMonth })
++    }
++
++    @Test
++    fun todayAndSelectedAreFlaggedOnce() {
++        val today = LocalDate(2026, 10, 24)
++        val selected = LocalDate(2026, 10, 10)
++        val cells = monthGrid(LocalDate(2026, 10, 1), ISO_MONDAY, today, selected, emptyMap())
++
++        assertEquals(1, cells.count { it.isToday })
++        assertEquals(1, cells.count { it.isSelected })
++        assertEquals(today, cells.first { it.isToday }.date)
++        assertEquals(selected, cells.first { it.isSelected }.date)
++        assertEquals(24, cells.first { it.isToday }.dayOfMonth)
++    }
++
++    @Test
++    fun adjacentMonthDaysCanCarrySelectionButNoItems() {
++        val selected = LocalDate(2026, 9, 29)
++        val adjacentOccurrence = buildOccurrence(LocalDate(2026, 9, 29))
++        val currentOccurrence = buildOccurrence(LocalDate(2026, 10, 5))
++        val cells =
++            monthGrid(
++                monthStart = LocalDate(2026, 10, 1),
++                firstDayOfWeekIso = ISO_MONDAY,
++                today = LocalDate(2026, 10, 24),
++                selectedDate = selected,
++                itemsByDay =
++                    mapOf(
++                        LocalDate(2026, 9, 29) to listOf(adjacentOccurrence),
++                        LocalDate(2026, 10, 5) to listOf(currentOccurrence),
++                    ),
++            )
++
++        val adjacentCell = cells.first { it.date == LocalDate(2026, 9, 29) }
++        assertTrue(adjacentCell.isSelected)
++        assertFalse(adjacentCell.isCurrentMonth)
++        assertTrue(adjacentCell.items.isEmpty())
++
++        val currentCell = cells.first { it.date == LocalDate(2026, 10, 5) }
++        assertEquals(1, currentCell.itemCount)
++        assertEquals(1, currentCell.firstItem?.expenseId)
++    }
++
++    @Test
++    fun cellsExposeItemCountAndFirstItem() {
++        val day = LocalDate(2026, 10, 5)
++        val cells =
++            monthGrid(
++                monthStart = LocalDate(2026, 10, 1),
++                firstDayOfWeekIso = ISO_MONDAY,
++                today = LocalDate(2026, 10, 1),
++                selectedDate = LocalDate(2026, 10, 1),
++                itemsByDay =
++                    mapOf(day to listOf(buildOccurrence(day, expenseId = 1), buildOccurrence(day, expenseId = 2))),
++            )
++
++        val cell = cells.first { it.date == day }
++        assertEquals(2, cell.itemCount)
++        assertEquals(1, cell.firstItem?.expenseId)
++        assertFalse(cell.allItemsPaid)
++    }
++
++    @Test
++    fun allItemsPaidOnlyWhenEveryItemIsPaid() {
++        val day = LocalDate(2026, 10, 5)
++        val paidCell =
++            monthGrid(
++                monthStart = LocalDate(2026, 10, 1),
++                firstDayOfWeekIso = ISO_MONDAY,
++                today = LocalDate(2026, 10, 1),
++                selectedDate = LocalDate(2026, 10, 1),
++                itemsByDay = mapOf(day to listOf(buildOccurrence(day, isPaid = true))),
++            ).first { it.date == day }
++        assertTrue(paidCell.allItemsPaid)
++
++        val mixedCell =
++            monthGrid(
++                monthStart = LocalDate(2026, 10, 1),
++                firstDayOfWeekIso = ISO_MONDAY,
++                today = LocalDate(2026, 10, 1),
++                selectedDate = LocalDate(2026, 10, 1),
++                itemsByDay =
++                    mapOf(
++                        day to
++                            listOf(
++                                buildOccurrence(day, expenseId = 1, isPaid = true),
++                                buildOccurrence(day, expenseId = 2, isPaid = false),
++                            ),
++                    ),
++            ).first { it.date == day }
++        assertFalse(mixedCell.allItemsPaid)
++    }
++}
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrencesTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrencesTest.kt
+new file mode 100644
+index 0000000..a439d3a
+--- /dev/null
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarOccurrencesTest.kt
+@@ -0,0 +1,283 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++import de.dbauer.expensetracker.shared.data.Recurrence
++import kotlinx.datetime.LocalDate
++import kotlinx.datetime.TimeZone
++import kotlinx.datetime.atStartOfDayIn
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class CalendarOccurrencesTest {
++    @Test
++    fun dailyExpenseFillsEveryDayOfTheMonth() {
++        val expense = buildExpense(recurrence = Recurrence.Daily, firstPayment = LocalDate(2026, 10, 1))
++
++        val occurrences = occurrencesForMonth(listOf(expense), LocalDate(2026, 10, 1))
++
++        assertEquals(31, occurrences.size)
++        assertEquals(31, occurrences.values.sumOf { it.size })
++        assertEquals(LocalDate(2026, 10, 31), occurrences.keys.max())
++    }
++
++    @Test
++    fun weeklyExpenseRespectsEveryXWeeks() {
++        val everyWeek = buildExpense(recurrence = Recurrence.Weekly, firstPayment = LocalDate(2026, 10, 1))
++        val everyTwoWeeks =
++            buildExpense(
++                recurrence = Recurrence.Weekly,
++                everyXRecurrence = 2,
++                firstPayment = LocalDate(2026, 10, 1),
++            )
++
++        val weeklyDates = occurrencesForMonth(listOf(everyWeek), LocalDate(2026, 10, 1)).keys.sorted()
++        assertEquals(
++            listOf(
++                LocalDate(2026, 10, 1),
++                LocalDate(2026, 10, 8),
++                LocalDate(2026, 10, 15),
++                LocalDate(2026, 10, 22),
++                LocalDate(2026, 10, 29),
++            ),
++            weeklyDates,
++        )
++
++        val biWeeklyDates = occurrencesForMonth(listOf(everyTwoWeeks), LocalDate(2026, 10, 1)).keys.sorted()
++        assertEquals(
++            listOf(
++                LocalDate(2026, 10, 1),
++                LocalDate(2026, 10, 15),
++                LocalDate(2026, 10, 29),
++            ),
++            biWeeklyDates,
++        )
++    }
++
++    @Test
++    fun weeklyExpenseThatStartsInThePreviousMonthShowsOnlyThisMonth() {
++        val expense = buildExpense(recurrence = Recurrence.Weekly, firstPayment = LocalDate(2026, 9, 28))
++
++        val occurrences = occurrencesForMonth(listOf(expense), LocalDate(2026, 10, 1))
++
++        assertEquals(
++            listOf(
++                LocalDate(2026, 10, 5),
++                LocalDate(2026, 10, 12),
++                LocalDate(2026, 10, 19),
++                LocalDate(2026, 10, 26),
++            ),
++            occurrences.keys.sorted(),
++        )
++    }
++
++    @Test
++    fun monthlyEveryXMonthsSkipsMonths() {
++        val expense =
++            buildExpense(
++                recurrence = Recurrence.Monthly,
++                everyXRecurrence = 3,
++                firstPayment = LocalDate(2026, 1, 15),
++            )
++
++        assertEquals(
++            listOf(LocalDate(2026, 10, 15)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 10, 1)).keys.toList(),
++        )
++        assertTrue(occurrencesForMonth(listOf(expense), LocalDate(2026, 9, 1)).isEmpty())
++        assertTrue(occurrencesForMonth(listOf(expense), LocalDate(2026, 11, 1)).isEmpty())
++    }
++
++    @Test
++    fun monthlyClampDriftsLikeGetNextPaymentDayAfter() {
++        val expense = buildExpense(recurrence = Recurrence.Monthly, firstPayment = LocalDate(2026, 1, 31))
++
++        assertEquals(
++            listOf(LocalDate(2026, 1, 31)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 1, 1)).keys.toList(),
++        )
++        assertEquals(
++            listOf(LocalDate(2026, 2, 28)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 2, 1)).keys.toList(),
++        )
++        // The 31st drifts to the 28th after February instead of snapping back to the 31st.
++        assertEquals(
++            listOf(LocalDate(2026, 3, 28)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 3, 1)).keys.toList(),
++        )
++        assertEquals(
++            listOf(LocalDate(2026, 10, 28)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 10, 1)).keys.toList(),
++        )
++    }
++
++    @Test
++    fun leapDayMonthlyExpenseClampsInLeapYear() {
++        val expense = buildExpense(recurrence = Recurrence.Monthly, firstPayment = LocalDate(2024, 1, 31))
++
++        assertEquals(
++            listOf(LocalDate(2024, 2, 29)),
++            occurrencesForMonth(listOf(expense), LocalDate(2024, 2, 1)).keys.toList(),
++        )
++        assertEquals(
++            listOf(LocalDate(2024, 3, 29)),
++            occurrencesForMonth(listOf(expense), LocalDate(2024, 3, 1)).keys.toList(),
++        )
++    }
++
++    @Test
++    fun yearlyExpenseAppearsInEveryYearOnTheSameDay() {
++        val expense = buildExpense(recurrence = Recurrence.Yearly, firstPayment = LocalDate(2026, 10, 5))
++
++        assertEquals(
++            listOf(LocalDate(2026, 10, 5)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 10, 1)).keys.toList(),
++        )
++        assertEquals(
++            listOf(LocalDate(2027, 10, 5)),
++            occurrencesForMonth(listOf(expense), LocalDate(2027, 10, 1)).keys.toList(),
++        )
++        assertTrue(occurrencesForMonth(listOf(expense), LocalDate(2026, 11, 1)).isEmpty())
++    }
++
++    @Test
++    fun leapDayYearlyExpenseUsesTheLastDayOfFebruary() {
++        val expense = buildExpense(recurrence = Recurrence.Yearly, firstPayment = LocalDate(2024, 2, 29))
++
++        assertEquals(
++            listOf(LocalDate(2024, 2, 29)),
++            occurrencesForMonth(listOf(expense), LocalDate(2024, 2, 1)).keys.toList(),
++        )
++        assertEquals(
++            listOf(LocalDate(2025, 2, 28)),
++            occurrencesForMonth(listOf(expense), LocalDate(2025, 2, 1)).keys.toList(),
++        )
++        assertEquals(
++            listOf(LocalDate(2026, 2, 28)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 2, 1)).keys.toList(),
++        )
++    }
++
++    @Test
++    fun endDateStopsOccurrencesInclusively() {
++        val expense =
++            buildExpense(
++                recurrence = Recurrence.Monthly,
++                firstPayment = LocalDate(2026, 1, 1),
++                endDate = LocalDate(2026, 5, 1),
++            )
++
++        assertEquals(
++            listOf(LocalDate(2026, 5, 1)),
++            occurrencesForMonth(listOf(expense), LocalDate(2026, 5, 1)).keys.toList(),
++        )
++        assertTrue(occurrencesForMonth(listOf(expense), LocalDate(2026, 6, 1)).isEmpty())
++    }
++
++    @Test
++    fun endDateInTheMiddleOfAMonthKeepsOnlyEarlierOccurrences() {
++        val expense =
++            buildExpense(
++                recurrence = Recurrence.Daily,
++                firstPayment = LocalDate(2026, 10, 1),
++                endDate = LocalDate(2026, 10, 10),
++            )
++
++        val occurrences = occurrencesForMonth(listOf(expense), LocalDate(2026, 10, 1))
++
++        assertEquals(LocalDate(2026, 10, 10), occurrences.keys.max())
++        assertEquals(10, occurrences.size)
++    }
++
++    @Test
++    fun multipleItemsOnTheSameDayAreStableAndSorted() {
++        val zeta = buildExpense(id = 1, name = "Zeta", firstPayment = LocalDate(2026, 10, 10))
++        val alpha = buildExpense(id = 2, name = "Alpha", firstPayment = LocalDate(2026, 10, 10))
++
++        val occurrences = occurrencesForMonth(listOf(zeta, alpha), LocalDate(2026, 10, 1))
++
++        val day = occurrences.getValue(LocalDate(2026, 10, 10))
++        assertEquals(2, day.size)
++        assertEquals(listOf("Alpha", "Zeta"), day.map { it.name })
++    }
++
++    @Test
++    fun emptyMonthAndExpensesWithoutFirstPaymentProduceNothing() {
++        assertTrue(occurrencesForMonth(emptyList(), LocalDate(2026, 10, 1)).isEmpty())
++
++        val withoutFirstPayment = buildExpense(firstPayment = null)
++        assertTrue(occurrencesForMonth(listOf(withoutFirstPayment), LocalDate(2026, 10, 1)).isEmpty())
++
++        val farFuture = buildExpense(firstPayment = LocalDate(2030, 1, 1))
++        assertTrue(occurrencesForMonth(listOf(farFuture), LocalDate(2026, 10, 1)).isEmpty())
++    }
++
++    @Test
++    fun archivedExpensesAreNeverProjected() {
++        val archived = buildExpense(archived = true)
++
++        assertTrue(occurrencesForMonth(listOf(archived), LocalDate(2026, 10, 1)).isEmpty())
++    }
++
++    @Test
++    fun manualConfirmationExpensesCarryPaidState() {
++        val expense =
++            buildExpense(
++                recurrence = Recurrence.Daily,
++                firstPayment = LocalDate(2026, 10, 1),
++                requireManualConfirmation = true,
++            )
++        val paidEpoch = LocalDate(2026, 10, 1).atStartOfDayIn(TimeZone.UTC).toEpochMilliseconds()
++
++        val occurrences =
++            occurrencesForMonth(
++                expenses = listOf(expense),
++                monthStart = LocalDate(2026, 10, 1),
++                paidDatesByExpense = mapOf(expense.id to setOf(paidEpoch)),
++            )
++
++        assertTrue(occurrences.getValue(LocalDate(2026, 10, 1)).single().isPaid)
++        assertFalse(occurrences.getValue(LocalDate(2026, 10, 2)).single().isPaid)
++    }
++
++    @Test
++    fun automaticallyPaidExpensesIgnorePaymentRecords() {
++        val expense = buildExpense(firstPayment = LocalDate(2026, 10, 1))
++        val paidEpoch = LocalDate(2026, 10, 1).atStartOfDayIn(TimeZone.UTC).toEpochMilliseconds()
++
++        val occurrences =
++            occurrencesForMonth(
++                expenses = listOf(expense),
++                monthStart = LocalDate(2026, 10, 1),
++                paidDatesByExpense = mapOf(expense.id to setOf(paidEpoch)),
++            )
++
++        assertFalse(occurrences.getValue(LocalDate(2026, 10, 1)).single().isPaid)
++    }
++
++    @Test
++    fun occurrencesExposeTheExpensePresentationData() {
++        val expense =
++            buildExpense(
++                id = 42,
++                name = "Streaming",
++                recurrence = Recurrence.Yearly,
++                everyXRecurrence = 2,
++                firstPayment = LocalDate(2026, 10, 5),
++                serviceId = "netflix",
++            )
++
++        val occurrence =
++            occurrencesForMonth(
++                listOf(expense),
++                LocalDate(2026, 10, 1),
++            ).getValue(LocalDate(2026, 10, 5)).single()
++
++        assertEquals(42, occurrence.expenseId)
++        assertEquals("Streaming", occurrence.name)
++        assertEquals("netflix", occurrence.serviceId)
++        assertEquals(Recurrence.Yearly, occurrence.recurrence)
++        assertEquals(2, occurrence.everyXRecurrence)
++        assertEquals(LocalDate(2026, 10, 5), occurrence.date)
++    }
++}
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarTestFixtures.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarTestFixtures.kt
+new file mode 100644
+index 0000000..fe82d6e
+--- /dev/null
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/CalendarTestFixtures.kt
+@@ -0,0 +1,57 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++import de.dbauer.expensetracker.shared.data.CurrencyValue
++import de.dbauer.expensetracker.shared.data.Recurrence
++import de.dbauer.expensetracker.shared.data.RecurringExpenseData
++import kotlinx.datetime.LocalDate
++import kotlinx.datetime.TimeZone
++import kotlinx.datetime.atStartOfDayIn
++import kotlin.time.Instant
++
++internal fun buildExpense(
++    id: Int = 1,
++    name: String = "Expense",
++    recurrence: Recurrence = Recurrence.Monthly,
++    everyXRecurrence: Int = 1,
++    firstPayment: LocalDate? = LocalDate(2026, 1, 1),
++    endDate: LocalDate? = null,
++    requireManualConfirmation: Boolean = false,
++    archived: Boolean = false,
++    serviceId: String? = null,
++): RecurringExpenseData {
++    return RecurringExpenseData(
++        id = id,
++        name = name,
++        description = "",
++        price = CurrencyValue(10f, "EUR"),
++        monthlyPrice = CurrencyValue(10f, "EUR"),
++        everyXRecurrence = everyXRecurrence,
++        recurrence = recurrence,
++        tags = emptyList(),
++        firstPayment = firstPayment?.atStartOfDayIn(TimeZone.UTC),
++        notifyForExpense = false,
++        requireManualConfirmation = requireManualConfirmation,
++        endDate = endDate?.atStartOfDayIn(TimeZone.UTC),
++        archivedDate = if (archived) Instant.fromEpochMilliseconds(0) else null,
++        serviceId = serviceId,
++    )
++}
++
++internal fun buildOccurrence(
++    date: LocalDate,
++    expenseId: Int = 1,
++    name: String = "Expense",
++    isPaid: Boolean = false,
++): CalendarOccurrence {
++    return CalendarOccurrence(
++        expenseId = expenseId,
++        date = date,
++        name = name,
++        price = CurrencyValue(10f, "EUR"),
++        serviceId = null,
++        recurrence = Recurrence.Monthly,
++        everyXRecurrence = 1,
++        requiresConfirmation = false,
++        isPaid = isPaid,
++    )
++}
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeekTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeekTest.kt
+new file mode 100644
+index 0000000..4e85d99
+--- /dev/null
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/model/calendar/FirstDayOfWeekTest.kt
+@@ -0,0 +1,55 @@
++package de.dbauer.expensetracker.shared.model.calendar
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class FirstDayOfWeekTest {
++    @Test
++    fun chineseAndEuropeanLocalesStartOnMonday() {
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("zh-CN"))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("zh-TW"))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("zh-Hant-TW"))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("de-DE"))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("fr-FR"))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("en-GB"))
++    }
++
++    @Test
++    fun usAndAsianLocalesStartOnSunday() {
++        assertEquals(ISO_SUNDAY, firstDayOfWeekIso("en-US"))
++        assertEquals(ISO_SUNDAY, firstDayOfWeekIso("en-ca"))
++        assertEquals(ISO_SUNDAY, firstDayOfWeekIso("ja-JP"))
++        assertEquals(ISO_SUNDAY, firstDayOfWeekIso("ja"))
++        assertEquals(ISO_SUNDAY, firstDayOfWeekIso("ko-KR"))
++        assertEquals(ISO_SUNDAY, firstDayOfWeekIso("he-IL"))
++    }
++
++    @Test
++    fun arabicAndMiddleEasternLocalesStartOnSaturday() {
++        assertEquals(ISO_SATURDAY, firstDayOfWeekIso("ar"))
++        assertEquals(ISO_SATURDAY, firstDayOfWeekIso("ar-SA"))
++        assertEquals(ISO_SATURDAY, firstDayOfWeekIso("ar-EG"))
++        assertEquals(ISO_SATURDAY, firstDayOfWeekIso("fa-IR"))
++    }
++
++    @Test
++    fun unknownLocalesFallBackToMonday() {
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso(""))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("en"))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("und"))
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("pt-BR"))
++    }
++
++    @Test
++    fun tagsWithUnderscoresAreSupported() {
++        assertEquals(ISO_MONDAY, firstDayOfWeekIso("zh_CN"))
++        assertEquals(ISO_SUNDAY, firstDayOfWeekIso("en_US"))
++    }
++
++    @Test
++    fun weekdayIndicesRotateTheMondayFirstLabels() {
++        assertEquals(listOf(0, 1, 2, 3, 4, 5, 6), weekdayIndices(ISO_MONDAY))
++        assertEquals(listOf(6, 0, 1, 2, 3, 4, 5), weekdayIndices(ISO_SUNDAY))
++        assertEquals(listOf(5, 6, 0, 1, 2, 3, 4), weekdayIndices(ISO_SATURDAY))
++    }
++}

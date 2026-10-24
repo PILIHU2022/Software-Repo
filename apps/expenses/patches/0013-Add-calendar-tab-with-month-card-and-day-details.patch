@@ -1,0 +1,985 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 11:18:15 +0800
+Subject: [PATCH] Add calendar tab with month card and day details
+
+Calendar becomes the fourth bottom tab (after Home/Upcoming, before
+Settings) with its own top app bar and no FAB. The month card follows
+Tilla's 7-column layout, but keeps the day number above a small tinted
+service icon so daily expenses cannot erase the whole month. Adjacent
+days dim and switch month, swipes use the same ~100 px threshold, and
+the day list reuses the Tilla card styling. Calendar(2) is appended to
+DefaultTab so persisted values 0/1 keep working.
+---
+ .../de/dbauer/expensetracker/MainActivity.kt  |  12 +-
+ .../values-zh-rCN/strings.xml                 |  27 +
+ .../values-zh-rTW/strings.xml                 |  27 +
+ .../composeResources/values/strings.xml       |  27 +
+ .../expensetracker/shared/data/Navigation.kt  |   3 +
+ .../expensetracker/shared/ui/BottomNavBar.kt  |   4 +
+ .../expensetracker/shared/ui/DefaultTab.kt    |   1 +
+ .../expensetracker/shared/ui/MainContent.kt   |  19 +
+ .../shared/ui/TillaExpenseCard.kt             |   9 +-
+ .../shared/ui/calendar/CalendarScreen.kt      | 602 ++++++++++++++++++
+ .../shared/ui/settings/SettingsMainScreen.kt  |   7 +
+ 11 files changed, 730 insertions(+), 8 deletions(-)
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt
+
+diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
+index 8b0f812..7a49fa0 100644
+--- a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
++++ b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
+@@ -48,6 +48,7 @@ import de.dbauer.expensetracker.model.notification.startAlarmLooper
+ import de.dbauer.expensetracker.security.BiometricPromptManager
+ import de.dbauer.expensetracker.security.BiometricPromptManager.BiometricResult
+ import de.dbauer.expensetracker.shared.asString
++import de.dbauer.expensetracker.shared.data.CalendarPane
+ import de.dbauer.expensetracker.shared.data.HomePane
+ import de.dbauer.expensetracker.shared.data.MainNavRoute
+ import de.dbauer.expensetracker.shared.data.UpcomingPane
+@@ -167,14 +168,17 @@ class MainActivity : AppCompatActivity() {
+                 }
+ 
+         // Never block the first frame on DataStore. Home is the start destination, and if the
+-        // stored default tab is Upcoming we navigate there once the preference is known. An
++        // stored default tab is Upcoming or Calendar we navigate there once the preference is known. An
+         // explicit intent route (notification, deep link) always wins and skips this lookup.
+         val deferredStartRoute = mutableStateOf<MainNavRoute?>(null)
+         if (startRouteFromIntent == null && savedInstanceState == null) {
+             lifecycleScope.launch {
+-                if (userPreferencesRepository.defaultTab.get().first() == DefaultTab.Upcoming.value) {
+-                    deferredStartRoute.value = UpcomingPane
+-                }
++                deferredStartRoute.value =
++                    when (userPreferencesRepository.defaultTab.get().first()) {
++                        DefaultTab.Upcoming.value -> UpcomingPane
++                        DefaultTab.Calendar.value -> CalendarPane
++                        else -> null
++                    }
+             }
+         }
+ 
+diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+index a32b477..6492097 100644
+--- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
++++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+@@ -8,6 +8,7 @@
+     <string name="home_summary_weekly">每周</string>
+     <string name="top_app_bar_icon_button_grid_close_content_desc">关闭网格模式</string>
+     <string name="bottom_nav_upcoming">即将到期</string>
++    <string name="bottom_nav_calendar">日历</string>
+     <string name="home_summary_yearly">每年</string>
+     <string name="edit_expense_title">编辑支出</string>
+     <string name="edit_expense_description_placeholder">例如：特殊订阅</string>
+@@ -154,4 +155,30 @@
+     <!-- Quick templates & automatic icon selection -->
+     <string name="edit_expense_quick_templates">快速模板</string>
+     <string name="edit_expense_quick_templates_hint">点击即可填入名称、图标和价格</string>
++
++    <!-- Calendar Tab -->
++    <string name="calendar_previous_month">上个月</string>
++    <string name="calendar_next_month">下个月</string>
++    <string name="calendar_empty_title">暂无计划</string>
++    <string name="calendar_empty_description">该日期没有计划好的订阅付款</string>
++    <string name="calendar_paid">已付款</string>
++    <string name="calendar_unpaid">未付款</string>
++    <string name="calendar_weekday_mon_narrow">一</string>
++    <string name="calendar_weekday_tue_narrow">二</string>
++    <string name="calendar_weekday_wed_narrow">三</string>
++    <string name="calendar_weekday_thu_narrow">四</string>
++    <string name="calendar_weekday_fri_narrow">五</string>
++    <string name="calendar_weekday_sat_narrow">六</string>
++    <string name="calendar_weekday_sun_narrow">日</string>
++    <string name="calendar_weekday_mon_full">星期一</string>
++    <string name="calendar_weekday_tue_full">星期二</string>
++    <string name="calendar_weekday_wed_full">星期三</string>
++    <string name="calendar_weekday_thu_full">星期四</string>
++    <string name="calendar_weekday_fri_full">星期五</string>
++    <string name="calendar_weekday_sat_full">星期六</string>
++    <string name="calendar_weekday_sun_full">星期日</string>
++    <plurals name="calendar_day_items">
++        <item quantity="one">%1$d 笔支出</item>
++        <item quantity="other">%1$d 笔支出</item>
++    </plurals>
+ </resources>
+diff --git a/shared/src/commonMain/composeResources/values-zh-rTW/strings.xml b/shared/src/commonMain/composeResources/values-zh-rTW/strings.xml
+index 3504396..b514f3e 100644
+--- a/shared/src/commonMain/composeResources/values-zh-rTW/strings.xml
++++ b/shared/src/commonMain/composeResources/values-zh-rTW/strings.xml
+@@ -13,6 +13,7 @@
+     <string name="top_app_bar_icon_button_grid_close_content_desc">關閉網格模式</string>
+     <string name="bottom_nav_home">首頁</string>
+     <string name="bottom_nav_upcoming">即將到期</string>
++    <string name="bottom_nav_calendar">行事曆</string>
+     <string name="bottom_nav_settings">設定</string>
+     <string name="home_summary_monthly">每月</string>
+     <string name="home_summary_weekly">每週</string>
+@@ -140,4 +141,30 @@
+     <string name="snackbar_expense_archived">支出已封存</string>
+     <string name="snackbar_expense_unarchived">支出已取消封存</string>
+     <string name="notification_auto_archived_title">支出已自動封存</string>
++
++    <!-- Calendar Tab -->
++    <string name="calendar_previous_month">上個月</string>
++    <string name="calendar_next_month">下個月</string>
++    <string name="calendar_empty_title">沒有計劃</string>
++    <string name="calendar_empty_description">此日期沒有安排訂閱付款</string>
++    <string name="calendar_paid">已付款</string>
++    <string name="calendar_unpaid">未付款</string>
++    <string name="calendar_weekday_mon_narrow">一</string>
++    <string name="calendar_weekday_tue_narrow">二</string>
++    <string name="calendar_weekday_wed_narrow">三</string>
++    <string name="calendar_weekday_thu_narrow">四</string>
++    <string name="calendar_weekday_fri_narrow">五</string>
++    <string name="calendar_weekday_sat_narrow">六</string>
++    <string name="calendar_weekday_sun_narrow">日</string>
++    <string name="calendar_weekday_mon_full">星期一</string>
++    <string name="calendar_weekday_tue_full">星期二</string>
++    <string name="calendar_weekday_wed_full">星期三</string>
++    <string name="calendar_weekday_thu_full">星期四</string>
++    <string name="calendar_weekday_fri_full">星期五</string>
++    <string name="calendar_weekday_sat_full">星期六</string>
++    <string name="calendar_weekday_sun_full">星期日</string>
++    <plurals name="calendar_day_items">
++        <item quantity="one">%1$d 筆支出</item>
++        <item quantity="other">%1$d 筆支出</item>
++    </plurals>
+ </resources>
+diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
+index 104c4b1..c71142e 100644
+--- a/shared/src/commonMain/composeResources/values/strings.xml
++++ b/shared/src/commonMain/composeResources/values/strings.xml
+@@ -14,6 +14,7 @@
+     <!-- Bottom Navigation -->
+     <string name="bottom_nav_home">Home</string>
+     <string name="bottom_nav_upcoming">Upcoming</string>
++    <string name="bottom_nav_calendar">Calendar</string>
+     <string name="bottom_nav_settings">Settings</string>
+ 
+     <!-- Home Tab -->
+@@ -84,6 +85,32 @@
+     <string name="upcoming_mark_as_paid">Mark as paid</string>
+     <string name="upcoming_mark_as_unpaid">Mark as unpaid</string>
+ 
++    <!-- Calendar Tab -->
++    <string name="calendar_previous_month">Previous month</string>
++    <string name="calendar_next_month">Next month</string>
++    <string name="calendar_empty_title">Nothing planned</string>
++    <string name="calendar_empty_description">There are no subscription payments scheduled on this date</string>
++    <string name="calendar_paid">Paid</string>
++    <string name="calendar_unpaid">Unpaid</string>
++    <string name="calendar_weekday_mon_narrow">M</string>
++    <string name="calendar_weekday_tue_narrow">T</string>
++    <string name="calendar_weekday_wed_narrow">W</string>
++    <string name="calendar_weekday_thu_narrow">T</string>
++    <string name="calendar_weekday_fri_narrow">F</string>
++    <string name="calendar_weekday_sat_narrow">S</string>
++    <string name="calendar_weekday_sun_narrow">S</string>
++    <string name="calendar_weekday_mon_full">Monday</string>
++    <string name="calendar_weekday_tue_full">Tuesday</string>
++    <string name="calendar_weekday_wed_full">Wednesday</string>
++    <string name="calendar_weekday_thu_full">Thursday</string>
++    <string name="calendar_weekday_fri_full">Friday</string>
++    <string name="calendar_weekday_sat_full">Saturday</string>
++    <string name="calendar_weekday_sun_full">Sunday</string>
++    <plurals name="calendar_day_items">
++        <item quantity="one">%1$d expense</item>
++        <item quantity="other">%1$d expenses</item>
++    </plurals>
++
+     <!-- Settings Tab -->
+     <string name="settings_title">Settings</string>
+     <string name="settings_general">General</string>
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/Navigation.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/Navigation.kt
+index f0c34c0..7719749 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/Navigation.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/Navigation.kt
+@@ -21,6 +21,9 @@ data class HomePane(val showArchived: Boolean = false) : MainNavRoute
+ @Serializable
+ object UpcomingPane : MainNavRoute
+ 
++@Serializable
++object CalendarPane : MainNavRoute
++
+ @Serializable
+ object SettingsPane : MainNavRoute
+ 
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/BottomNavBar.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/BottomNavBar.kt
+index ab5ba7e..08a33a4 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/BottomNavBar.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/BottomNavBar.kt
+@@ -1,6 +1,7 @@
+ package de.dbauer.expensetracker.shared.ui
+ 
+ import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.CalendarMonth
+ import androidx.compose.material.icons.rounded.Home
+ import androidx.compose.material.icons.rounded.Payment
+ import androidx.compose.material.icons.rounded.Settings
+@@ -16,11 +17,13 @@ import androidx.navigation.NavDestination.Companion.hasRoute
+ import androidx.navigation.NavGraph.Companion.findStartDestination
+ import androidx.navigation.compose.currentBackStackEntryAsState
+ import de.dbauer.expensetracker.shared.data.BottomNavigation
++import de.dbauer.expensetracker.shared.data.CalendarPane
+ import de.dbauer.expensetracker.shared.data.HomePane
+ import de.dbauer.expensetracker.shared.data.SettingsPane
+ import de.dbauer.expensetracker.shared.data.UpcomingPane
+ import org.jetbrains.compose.resources.stringResource
+ import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.bottom_nav_calendar
+ import recurringexpensetracker.shared.generated.resources.bottom_nav_home
+ import recurringexpensetracker.shared.generated.resources.bottom_nav_settings
+ import recurringexpensetracker.shared.generated.resources.bottom_nav_upcoming
+@@ -35,6 +38,7 @@ fun BottomNavBar(
+         listOf(
+             BottomNavigation(HomePane(), Res.string.bottom_nav_home, Icons.Rounded.Home),
+             BottomNavigation(UpcomingPane, Res.string.bottom_nav_upcoming, Icons.Rounded.Payment),
++            BottomNavigation(CalendarPane, Res.string.bottom_nav_calendar, Icons.Rounded.CalendarMonth),
+             BottomNavigation(SettingsPane, Res.string.bottom_nav_settings, Icons.Rounded.Settings),
+         )
+ 
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt
+index 523581f..a86aff7 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt
+@@ -3,6 +3,7 @@ package de.dbauer.expensetracker.shared.ui
+ enum class DefaultTab(val value: Int) {
+     Home(0),
+     Upcoming(1),
++    Calendar(2),
+     ;
+ 
+     companion object {
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+index c705c10..f78393f 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+@@ -69,6 +69,7 @@ import androidx.navigationevent.NavigationEventInfo
+ import androidx.navigationevent.compose.NavigationBackHandler
+ import androidx.navigationevent.compose.rememberNavigationEventState
+ import de.dbauer.expensetracker.shared.conditional
++import de.dbauer.expensetracker.shared.data.CalendarPane
+ import de.dbauer.expensetracker.shared.data.EditExpensePane
+ import de.dbauer.expensetracker.shared.data.HomePane
+ import de.dbauer.expensetracker.shared.data.MainNavRoute
+@@ -78,6 +79,7 @@ import de.dbauer.expensetracker.shared.data.UpcomingPane
+ import de.dbauer.expensetracker.shared.data.WhatsNew
+ import de.dbauer.expensetracker.shared.data.isInRoute
+ import de.dbauer.expensetracker.shared.model.database.IExpenseRepository
++import de.dbauer.expensetracker.shared.ui.calendar.CalendarScreen
+ import de.dbauer.expensetracker.shared.ui.editexpense.EditRecurringExpenseScreen
+ import de.dbauer.expensetracker.shared.ui.settings.SettingsScreen
+ import de.dbauer.expensetracker.shared.ui.tags.TagsScreen
+@@ -91,6 +93,7 @@ import org.jetbrains.compose.resources.stringResource
+ import org.koin.compose.koinInject
+ import org.koin.compose.viewmodel.koinViewModel
+ import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.bottom_nav_calendar
+ import recurringexpensetracker.shared.generated.resources.edit_expense_button_add
+ import recurringexpensetracker.shared.generated.resources.home_filter_chip_archived
+ import recurringexpensetracker.shared.generated.resources.home_filter_content_desc
+@@ -420,6 +423,22 @@ fun MainContent(
+                         modifier = Modifier.padding(paddingValues),
+                     )
+                 }
++                composable<CalendarPane> {
++                    mainNavigationViewModel.topAppBar = {
++                        TopAppBar(
++                            title = {
++                                Text(
++                                    text = stringResource(Res.string.bottom_nav_calendar),
++                                )
++                            },
++                        )
++                    }
++
++                    CalendarScreen(
++                        navController = navController,
++                        modifier = Modifier.padding(paddingValues),
++                    )
++                }
+                 composable<SettingsPane> {
+                     var topAppBar by remember { mutableStateOf<@Composable () -> Unit>({}) }
+                     SettingsScreen(
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+index 348cf52..f78c1f0 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+@@ -50,7 +50,7 @@ import recurringexpensetracker.shared.generated.resources.home_summary_total
+ import recurringexpensetracker.shared.generated.resources.home_summary_weekly
+ import recurringexpensetracker.shared.generated.resources.home_summary_yearly
+ 
+-private val TillaCardShape = RoundedCornerShape(26.dp)
++internal val TillaCardShape = RoundedCornerShape(26.dp)
+ 
+ /** Muted mint / deep green page backgrounds used by Tilla. */
+ val TillaBackgroundLight = Color(0xFFEFF6F2)
+@@ -78,8 +78,9 @@ fun ExpenseServiceIconView(
+     service: ExpenseService?,
+     tint: Color,
+     modifier: Modifier = Modifier,
++    overrideServiceTint: Boolean = false,
+ ) {
+-    val iconTint = service?.iconTint ?: tint
++    val iconTint = if (overrideServiceTint) tint else service?.iconTint ?: tint
+     val contentDescription = service?.name
+     when (val icon = service?.icon) {
+         is ExpenseServiceIcon.Brand ->
+@@ -215,7 +216,7 @@ fun TillaExpenseCard(
+     }
+ }
+ 
+-private data class TillaCardStyle(
++internal data class TillaCardStyle(
+     val service: ExpenseService?,
+     val background: Color,
+     val foreground: Color,
+@@ -224,7 +225,7 @@ private data class TillaCardStyle(
+     val labelColor: Color,
+ )
+ 
+-private fun buildCardStyle(
++internal fun buildCardStyle(
+     serviceId: String?,
+     name: String,
+ ): TillaCardStyle {
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt
+new file mode 100644
+index 0000000..22ff2b7
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt
+@@ -0,0 +1,602 @@
++package de.dbauer.expensetracker.shared.ui.calendar
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.gestures.detectHorizontalDragGestures
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.aspectRatio
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
++import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
++import androidx.compose.material.icons.rounded.CheckCircle
++import androidx.compose.material.icons.rounded.CheckCircleOutline
++import androidx.compose.material.icons.rounded.EventBusy
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberUpdatedState
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.semantics.contentDescription
++import androidx.compose.ui.semantics.selected
++import androidx.compose.ui.semantics.semantics
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.intl.Locale
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.tooling.preview.Preview
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.navigation.NavController
++import androidx.navigation.compose.rememberNavController
++import de.dbauer.expensetracker.shared.data.EditExpensePane
++import de.dbauer.expensetracker.shared.model.calendar.CalendarDayCell
++import de.dbauer.expensetracker.shared.model.calendar.CalendarOccurrence
++import de.dbauer.expensetracker.shared.model.calendar.firstDayOfWeekIso
++import de.dbauer.expensetracker.shared.model.calendar.weekdayIndices
++import de.dbauer.expensetracker.shared.toLongDateString
++import de.dbauer.expensetracker.shared.toMonthYearStringUTC
++import de.dbauer.expensetracker.shared.ui.ExpenseServiceIconView
++import de.dbauer.expensetracker.shared.ui.TillaCardShape
++import de.dbauer.expensetracker.shared.ui.buildCardStyle
++import de.dbauer.expensetracker.shared.ui.theme.ExpenseTrackerThemePreview
++import de.dbauer.expensetracker.shared.viewmodel.CalendarViewModel
++import kotlinx.datetime.LocalDate
++import org.jetbrains.compose.resources.StringResource
++import org.jetbrains.compose.resources.pluralStringResource
++import org.jetbrains.compose.resources.stringResource
++import org.koin.compose.viewmodel.koinViewModel
++import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.calendar_day_items
++import recurringexpensetracker.shared.generated.resources.calendar_empty_description
++import recurringexpensetracker.shared.generated.resources.calendar_empty_title
++import recurringexpensetracker.shared.generated.resources.calendar_next_month
++import recurringexpensetracker.shared.generated.resources.calendar_paid
++import recurringexpensetracker.shared.generated.resources.calendar_previous_month
++import recurringexpensetracker.shared.generated.resources.calendar_unpaid
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_fri_full
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_fri_narrow
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_mon_full
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_mon_narrow
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_sat_full
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_sat_narrow
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_sun_full
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_sun_narrow
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_thu_full
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_thu_narrow
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_tue_full
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_tue_narrow
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_wed_full
++import recurringexpensetracker.shared.generated.resources.calendar_weekday_wed_narrow
++
++/** Tilla changes the month when the horizontal drag passes ~100 px; it does not follow the finger. */
++private const val SWIPE_THRESHOLD_PX = 100f
++
++private val narrowWeekdayLabels: List<StringResource> =
++    listOf(
++        Res.string.calendar_weekday_mon_narrow,
++        Res.string.calendar_weekday_tue_narrow,
++        Res.string.calendar_weekday_wed_narrow,
++        Res.string.calendar_weekday_thu_narrow,
++        Res.string.calendar_weekday_fri_narrow,
++        Res.string.calendar_weekday_sat_narrow,
++        Res.string.calendar_weekday_sun_narrow,
++    )
++
++private val fullWeekdayLabels: List<StringResource> =
++    listOf(
++        Res.string.calendar_weekday_mon_full,
++        Res.string.calendar_weekday_tue_full,
++        Res.string.calendar_weekday_wed_full,
++        Res.string.calendar_weekday_thu_full,
++        Res.string.calendar_weekday_fri_full,
++        Res.string.calendar_weekday_sat_full,
++        Res.string.calendar_weekday_sun_full,
++    )
++
++/**
++ * Tilla-style calendar tab: a month card, the selected day's long date and that day's expenses.
++ * The screen has no Scaffold of its own; [de.dbauer.expensetracker.shared.ui.MainContent] owns the
++ * Scaffold, top bar, bottom bar and content padding.
++ */
++@Composable
++fun CalendarScreen(
++    navController: NavController,
++    modifier: Modifier = Modifier,
++    calendarViewModel: CalendarViewModel = koinViewModel<CalendarViewModel>(),
++) {
++    val languageTag = Locale.current.toLanguageTag()
++    val localeFirstDayOfWeekIso = remember(languageTag) { firstDayOfWeekIso(languageTag) }
++    LaunchedEffect(localeFirstDayOfWeekIso) {
++        calendarViewModel.onFirstDayOfWeekChanged(localeFirstDayOfWeekIso)
++    }
++
++    val currentMonth = calendarViewModel.currentMonth
++    val selectedDate = calendarViewModel.selectedDate
++    val monthLabel = remember(currentMonth) { currentMonth.toMonthYearStringUTC() }
++    val selectedItems = calendarViewModel.itemsByDay[selectedDate].orEmpty()
++    val onExpenseClick: (Int) -> Unit =
++        remember(navController) {
++            { expenseId -> navController.navigate(EditExpensePane(expenseId)) }
++        }
++
++    Column(
++        modifier =
++            modifier
++                .fillMaxSize()
++                .verticalScroll(rememberScrollState())
++                .padding(horizontal = 16.dp, vertical = 8.dp),
++    ) {
++        MonthCard(
++            monthLabel = monthLabel,
++            days = calendarViewModel.days,
++            firstDayOfWeekIso = localeFirstDayOfWeekIso,
++            onPreviousMonth = calendarViewModel::onPreviousMonth,
++            onNextMonth = calendarViewModel::onNextMonth,
++            onDayClick = calendarViewModel::onDaySelected,
++        )
++        Spacer(modifier = Modifier.height(16.dp))
++        DayDetailHeader(selectedDate = selectedDate)
++        Spacer(modifier = Modifier.height(8.dp))
++        if (selectedItems.isEmpty()) {
++            EmptyDayState()
++        } else {
++            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
++                selectedItems.forEach { occurrence ->
++                    CalendarExpenseCard(
++                        occurrence = occurrence,
++                        onClick = onExpenseClick,
++                    )
++                }
++            }
++        }
++        Spacer(modifier = Modifier.height(24.dp))
++    }
++}
++
++@Composable
++private fun MonthCard(
++    monthLabel: String,
++    days: List<CalendarDayCell>,
++    firstDayOfWeekIso: Int,
++    onPreviousMonth: () -> Unit,
++    onNextMonth: () -> Unit,
++    onDayClick: (LocalDate) -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val currentOnPreviousMonth by rememberUpdatedState(onPreviousMonth)
++    val currentOnNextMonth by rememberUpdatedState(onNextMonth)
++    val previousMonthDescription = stringResource(Res.string.calendar_previous_month)
++    val nextMonthDescription = stringResource(Res.string.calendar_next_month)
++
++    Surface(
++        modifier =
++            modifier
++                .fillMaxWidth()
++                .pointerInput(Unit) {
++                    var dragDistance = 0f
++                    detectHorizontalDragGestures(
++                        onDragStart = { dragDistance = 0f },
++                        onHorizontalDrag = { change, dragAmount ->
++                            change.consume()
++                            dragDistance += dragAmount
++                        },
++                        onDragEnd = {
++                            when {
++                                dragDistance > SWIPE_THRESHOLD_PX -> currentOnPreviousMonth()
++                                dragDistance < -SWIPE_THRESHOLD_PX -> currentOnNextMonth()
++                            }
++                            dragDistance = 0f
++                        },
++                        onDragCancel = { dragDistance = 0f },
++                    )
++                },
++        shape = TillaCardShape,
++        color = MaterialTheme.colorScheme.surfaceContainerHigh,
++    ) {
++        Column(modifier = Modifier.padding(16.dp)) {
++            Row(
++                modifier = Modifier.fillMaxWidth(),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Text(
++                    text = monthLabel,
++                    modifier = Modifier.weight(1f),
++                    fontSize = 18.sp,
++                    fontWeight = FontWeight.Medium,
++                )
++                MonthArrowButton(
++                    icon = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
++                    contentDescription = previousMonthDescription,
++                    onClick = onPreviousMonth,
++                )
++                Spacer(modifier = Modifier.size(16.dp))
++                MonthArrowButton(
++                    icon = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
++                    contentDescription = nextMonthDescription,
++                    onClick = onNextMonth,
++                )
++            }
++            Spacer(modifier = Modifier.height(16.dp))
++            WeekdayHeader(firstDayOfWeekIso = firstDayOfWeekIso)
++            Spacer(modifier = Modifier.height(8.dp))
++            DayGrid(days = days, onDayClick = onDayClick)
++        }
++    }
++}
++
++@Composable
++private fun MonthArrowButton(
++    icon: ImageVector,
++    contentDescription: String,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    Box(
++        modifier =
++            modifier
++                .size(32.dp)
++                .clip(CircleShape)
++                .background(MaterialTheme.colorScheme.primaryContainer)
++                .clickable(role = Role.Button, onClick = onClick),
++        contentAlignment = Alignment.Center,
++    ) {
++        Icon(
++            imageVector = icon,
++            contentDescription = contentDescription,
++            tint = MaterialTheme.colorScheme.onPrimaryContainer,
++            modifier = Modifier.size(20.dp),
++        )
++    }
++}
++
++@Composable
++private fun WeekdayHeader(
++    firstDayOfWeekIso: Int,
++    modifier: Modifier = Modifier,
++) {
++    val indices = remember(firstDayOfWeekIso) { weekdayIndices(firstDayOfWeekIso) }
++    Row(modifier = modifier.fillMaxWidth()) {
++        indices.forEach { weekdayIndex ->
++            val label = stringResource(narrowWeekdayLabels[weekdayIndex])
++            val fullLabel = stringResource(fullWeekdayLabels[weekdayIndex])
++            Text(
++                text = label,
++                modifier =
++                    Modifier
++                        .weight(1f)
++                        .semantics { contentDescription = fullLabel },
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                fontSize = 12.sp,
++                fontWeight = FontWeight.Medium,
++                textAlign = TextAlign.Center,
++            )
++        }
++    }
++}
++
++@Composable
++private fun DayGrid(
++    days: List<CalendarDayCell>,
++    onDayClick: (LocalDate) -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    Column(modifier = modifier.fillMaxWidth()) {
++        days.chunked(7).forEach { week ->
++            Row(modifier = Modifier.fillMaxWidth()) {
++                week.forEach { day ->
++                    DayCell(
++                        day = day,
++                        onClick = onDayClick,
++                        modifier = Modifier.weight(1f),
++                    )
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun DayCell(
++    day: CalendarDayCell,
++    onClick: (LocalDate) -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val colorScheme = MaterialTheme.colorScheme
++    val background =
++        when {
++            day.isSelected -> colorScheme.primary
++            day.isToday -> colorScheme.primaryContainer
++            day.isCurrentMonth -> colorScheme.surfaceVariant.copy(alpha = 0.25f)
++            else -> Color.Transparent
++        }
++    val contentColor =
++        when {
++            day.isSelected -> colorScheme.onPrimary
++            day.isToday -> colorScheme.onPrimaryContainer
++            day.isCurrentMonth -> colorScheme.onSurface
++            else -> colorScheme.onSurface.copy(alpha = 0.4f)
++        }
++    val firstItem = day.firstItem
++    val cardStyle =
++        remember(firstItem?.serviceId, firstItem?.name) {
++            firstItem?.let { buildCardStyle(it.serviceId, it.name) }
++        }
++    val dateDescription = remember(day.date) { day.date.toLongDateString() }
++    val itemsDescription =
++        if (day.itemCount == 0) {
++            null
++        } else {
++            pluralStringResource(Res.plurals.calendar_day_items, day.itemCount, day.itemCount)
++        }
++    val contentDescription =
++        if (itemsDescription == null) dateDescription else "$dateDescription, $itemsDescription"
++    val badgeColor = if (day.isSelected) colorScheme.onPrimary else colorScheme.primary
++    val badgeContentColor = if (day.isSelected) colorScheme.primary else colorScheme.onPrimary
++    val handleClick = remember(day.date, onClick) { { onClick(day.date) } }
++
++    Box(
++        modifier =
++            modifier
++                .aspectRatio(1f)
++                .padding(4.dp)
++                .clip(RoundedCornerShape(12.dp))
++                .background(background)
++                .clickable(role = Role.Button, onClick = handleClick)
++                .semantics {
++                    this.contentDescription = contentDescription
++                    selected = day.isSelected
++                },
++        contentAlignment = Alignment.Center,
++    ) {
++        Column(horizontalAlignment = Alignment.CenterHorizontally) {
++            Text(
++                text = day.dayOfMonth.toString(),
++                color = contentColor,
++                fontSize = 10.sp,
++                lineHeight = 12.sp,
++                fontWeight = if (day.isToday || day.isSelected) FontWeight.Bold else FontWeight.Normal,
++            )
++            if (cardStyle != null) {
++                ExpenseServiceIconView(
++                    service = cardStyle.service,
++                    tint = if (day.isSelected) contentColor else cardStyle.background,
++                    modifier =
++                        Modifier
++                            .padding(top = 1.dp)
++                            .size(18.dp),
++                    overrideServiceTint = day.isSelected,
++                )
++            }
++        }
++        if (day.itemCount > 1) {
++            Box(
++                modifier =
++                    Modifier
++                        .align(Alignment.TopEnd)
++                        .size(12.dp)
++                        .clip(CircleShape)
++                        .background(badgeColor),
++                contentAlignment = Alignment.Center,
++            ) {
++                Text(
++                    text = "+${day.itemCount}",
++                    color = badgeContentColor,
++                    fontSize = 8.sp,
++                    lineHeight = 8.sp,
++                    fontWeight = FontWeight.Medium,
++                    maxLines = 1,
++                )
++            }
++        }
++        if (day.allItemsPaid) {
++            Icon(
++                imageVector = Icons.Rounded.CheckCircle,
++                contentDescription = null,
++                tint = contentColor,
++                modifier =
++                    Modifier
++                        .align(Alignment.BottomEnd)
++                        .size(10.dp),
++            )
++        }
++    }
++}
++
++@Composable
++private fun DayDetailHeader(
++    selectedDate: LocalDate,
++    modifier: Modifier = Modifier,
++) {
++    val longDate = remember(selectedDate) { selectedDate.toLongDateString() }
++    Text(
++        text = longDate,
++        modifier = modifier.fillMaxWidth(),
++        fontSize = 22.sp,
++        fontWeight = FontWeight.Bold,
++    )
++}
++
++@Composable
++private fun CalendarExpenseCard(
++    occurrence: CalendarOccurrence,
++    onClick: (Int) -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val cardStyle =
++        remember(occurrence.serviceId, occurrence.name) {
++            buildCardStyle(occurrence.serviceId, occurrence.name)
++        }
++    val priceText = remember(occurrence.price) { occurrence.price.toCurrencyString() }
++    val recurrenceLabel = stringResource(occurrence.recurrence.fullStringRes)
++    val subtitle =
++        remember(recurrenceLabel, occurrence.everyXRecurrence) {
++            if (occurrence.everyXRecurrence > 1) {
++                "$recurrenceLabel ×${occurrence.everyXRecurrence}"
++            } else {
++                recurrenceLabel
++            }
++        }
++    val statusLabel =
++        if (occurrence.requiresConfirmation) {
++            stringResource(if (occurrence.isPaid) Res.string.calendar_paid else Res.string.calendar_unpaid)
++        } else {
++            null
++        }
++    val statusIcon =
++        if (occurrence.requiresConfirmation) {
++            if (occurrence.isPaid) Icons.Rounded.CheckCircle else Icons.Rounded.CheckCircleOutline
++        } else {
++            null
++        }
++    val handleClick = remember(occurrence.expenseId, onClick) { { onClick(occurrence.expenseId) } }
++
++    Surface(
++        modifier =
++            modifier
++                .fillMaxWidth()
++                .clip(TillaCardShape)
++                .clickable(role = Role.Button, onClick = handleClick),
++        shape = TillaCardShape,
++        color = cardStyle.background,
++        contentColor = cardStyle.foreground,
++    ) {
++        Row(
++            modifier =
++                Modifier
++                    .fillMaxWidth()
++                    .padding(horizontal = 18.dp, vertical = 14.dp),
++            verticalAlignment = Alignment.CenterVertically,
++        ) {
++            ExpenseServiceIconView(
++                service = cardStyle.service,
++                tint = cardStyle.iconTint,
++                modifier = Modifier.size(32.dp),
++            )
++            Spacer(modifier = Modifier.size(14.dp))
++            Column(modifier = Modifier.weight(1f)) {
++                Text(
++                    text = occurrence.name,
++                    fontSize = 16.sp,
++                    fontWeight = FontWeight.SemiBold,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++                Row(
++                    modifier = Modifier.padding(top = 2.dp),
++                    verticalAlignment = Alignment.CenterVertically,
++                ) {
++                    Text(
++                        text = subtitle.uppercase(),
++                        color = cardStyle.labelColor,
++                        fontSize = 10.sp,
++                        fontWeight = FontWeight.Medium,
++                        letterSpacing = 0.4.sp,
++                        maxLines = 1,
++                        overflow = TextOverflow.Ellipsis,
++                    )
++                    if (statusLabel != null && statusIcon != null) {
++                        Text(
++                            text = " · ",
++                            color = cardStyle.labelColor,
++                            fontSize = 10.sp,
++                            fontWeight = FontWeight.Medium,
++                        )
++                        Icon(
++                            imageVector = statusIcon,
++                            contentDescription = null,
++                            tint = cardStyle.labelColor,
++                            modifier = Modifier.size(10.dp),
++                        )
++                        Spacer(modifier = Modifier.size(3.dp))
++                        Text(
++                            text = statusLabel.uppercase(),
++                            color = cardStyle.labelColor,
++                            fontSize = 10.sp,
++                            fontWeight = FontWeight.Medium,
++                            letterSpacing = 0.4.sp,
++                            maxLines = 1,
++                        )
++                    }
++                }
++            }
++            Spacer(modifier = Modifier.size(8.dp))
++            Text(
++                text = priceText,
++                fontSize = 17.sp,
++                fontWeight = FontWeight.Bold,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
++            )
++        }
++    }
++}
++
++@Composable
++private fun EmptyDayState(modifier: Modifier = Modifier) {
++    Column(
++        modifier =
++            modifier
++                .fillMaxWidth()
++                .padding(vertical = 32.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++    ) {
++        Icon(
++            imageVector = Icons.Rounded.EventBusy,
++            contentDescription = null,
++            tint = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.size(48.dp),
++        )
++        Spacer(modifier = Modifier.height(12.dp))
++        Text(
++            text = stringResource(Res.string.calendar_empty_title),
++            fontWeight = FontWeight.SemiBold,
++            style = MaterialTheme.typography.titleMedium,
++            textAlign = TextAlign.Center,
++        )
++        Spacer(modifier = Modifier.height(4.dp))
++        Text(
++            text = stringResource(Res.string.calendar_empty_description),
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            textAlign = TextAlign.Center,
++            modifier = Modifier.padding(horizontal = 16.dp),
++        )
++    }
++}
++
++@Preview
++@Composable
++private fun CalendarScreenPreview() {
++    ExpenseTrackerThemePreview {
++        Surface(
++            modifier = Modifier.fillMaxSize(),
++            color = MaterialTheme.colorScheme.background,
++        ) {
++            CalendarScreen(navController = rememberNavController())
++        }
++    }
++}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
+index a0a768e..68ff7ad 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
+@@ -54,6 +54,7 @@ import kotlinx.datetime.LocalTime
+ import org.jetbrains.compose.resources.stringResource
+ import org.koin.compose.viewmodel.koinViewModel
+ import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.bottom_nav_calendar
+ import recurringexpensetracker.shared.generated.resources.bottom_nav_home
+ import recurringexpensetracker.shared.generated.resources.bottom_nav_upcoming
+ import recurringexpensetracker.shared.generated.resources.dialog_ok
+@@ -140,6 +141,7 @@ fun SettingsMainScreen(
+                 when (defaultTab) {
+                     DefaultTab.Home -> stringResource(Res.string.bottom_nav_home)
+                     DefaultTab.Upcoming -> stringResource(Res.string.bottom_nav_upcoming)
++                    DefaultTab.Calendar -> stringResource(Res.string.bottom_nav_calendar)
+                 },
+             onClick = viewModel::onClickDefaultTabSelection,
+             icon = Icons.Rounded.Rocket,
+@@ -327,6 +329,11 @@ fun SettingsMainScreen(
+                         checked = defaultTab == DefaultTab.Upcoming,
+                         onClick = { viewModel.onSelectDefaultTab(DefaultTab.Upcoming) },
+                     )
++                    DialogCheckbox(
++                        text = stringResource(Res.string.bottom_nav_calendar),
++                        checked = defaultTab == DefaultTab.Calendar,
++                        onClick = { viewModel.onSelectDefaultTab(DefaultTab.Calendar) },
++                    )
+                 }
+             },
+             confirmButton = {},

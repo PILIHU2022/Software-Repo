@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 24 Oct 2026 11:19:40 +0800
+Subject: [PATCH] Run calendar month projection off the main thread
+
+A daily expense whose first payment is years old makes the linear
+getNextPaymentDayAfter walk expensive enough to jank a month swipe, so
+move the projection (and its payment-record reads) to Dispatchers.IO,
+matching UpcomingPaymentsViewModel. The weekday header now also reads the
+ViewModel's first day, so it can never disagree with the rendered grid.
+---
+ .../shared/ui/calendar/CalendarScreen.kt      |  2 +-
+ .../shared/viewmodel/CalendarViewModel.kt     | 20 +++++++++++--------
+ 2 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt
+index 22ff2b7..5e61bd5 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/calendar/CalendarScreen.kt
+@@ -153,7 +153,7 @@ fun CalendarScreen(
+         MonthCard(
+             monthLabel = monthLabel,
+             days = calendarViewModel.days,
+-            firstDayOfWeekIso = localeFirstDayOfWeekIso,
++            firstDayOfWeekIso = calendarViewModel.firstDayOfWeekIso,
+             onPreviousMonth = calendarViewModel::onPreviousMonth,
+             onNextMonth = calendarViewModel::onNextMonth,
+             onDayClick = calendarViewModel::onDaySelected,
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt
+index be1d507..96fdaf0 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/CalendarViewModel.kt
+@@ -14,9 +14,12 @@ import de.dbauer.expensetracker.shared.model.calendar.ISO_MONDAY
+ import de.dbauer.expensetracker.shared.model.calendar.monthGrid
+ import de.dbauer.expensetracker.shared.model.calendar.occurrencesForMonth
+ import de.dbauer.expensetracker.shared.model.database.IExpenseRepository
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.IO
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
+ import kotlinx.datetime.DateTimeUnit
+ import kotlinx.datetime.LocalDate
+ import kotlinx.datetime.plus
+@@ -127,15 +130,16 @@ class CalendarViewModel(
+     private suspend fun projectMonth(
+         expenses: List<RecurringExpenseData>,
+         monthStart: LocalDate,
+-    ): Map<LocalDate, List<CalendarOccurrence>> {
+-        // payment_records only exist for manual-confirmation expenses; fetching them per expense
+-        // keeps the repository interface unchanged.
+-        val paidDatesByExpense = mutableMapOf<Int, Set<Long>>()
+-        expenses.filter { it.requireManualConfirmation }.forEach { expense ->
+-            paidDatesByExpense[expense.id] = expenseRepository.getPaymentRecordsForExpense(expense.id).toSet()
++    ): Map<LocalDate, List<CalendarOccurrence>> =
++        withContext(Dispatchers.IO) {
++            // payment_records only exist for manual-confirmation expenses; fetching them per
++            // expense keeps the repository interface unchanged.
++            val paidDatesByExpense = mutableMapOf<Int, Set<Long>>()
++            expenses.filter { it.requireManualConfirmation }.forEach { expense ->
++                paidDatesByExpense[expense.id] = expenseRepository.getPaymentRecordsForExpense(expense.id).toSet()
++            }
++            occurrencesForMonth(expenses, monthStart, paidDatesByExpense)
+         }
+-        return occurrencesForMonth(expenses, monthStart, paidDatesByExpense)
+-    }
+ 
+     private fun LocalDate.startOfMonth(): LocalDate = LocalDate(year, month, 1)
+ 
