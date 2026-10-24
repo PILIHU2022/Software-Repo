@@ -351,14 +351,22 @@ jobs:
           echo "::warning title=Commit-back failed::Pushing fdroid/repo to main failed (often HTTP 403)."
           echo "::warning::Pages will still be deployed from this run's artifact. To fix the commit-back, set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions'."
 
+      # Pages is optional: enablement needs a PAT/App token (a plain
+      # GITHUB_TOKEN cannot create the Pages site), so these steps must not
+      # turn a successful publish into a red run. The owner enables Pages once
+      # in Settings -> Pages -> Source: GitHub Actions.
       - name: Configure Pages
+        id: pages
         if: steps.apks.outputs.found == 'true'
+        continue-on-error: true
         uses: actions/configure-pages@v6
         with:
           enablement: true
 
       - name: Upload Pages artifact
+        id: pages_artifact
         if: steps.apks.outputs.found == 'true'
+        continue-on-error: true
         uses: actions/upload-pages-artifact@v5
         with:
           path: fdroid
@@ -366,7 +374,26 @@ jobs:
       - name: Deploy Pages
         id: deployment
         if: steps.apks.outputs.found == 'true'
+        continue-on-error: true
         uses: actions/deploy-pages@v5
+
+      - name: Report Pages deployment skipped
+        if: >-
+          steps.apks.outputs.found == 'true' &&
+          (steps.pages.outcome == 'failure' ||
+           steps.pages_artifact.outcome == 'failure' ||
+           steps.deployment.outcome == 'failure')
+        run: |
+          msg="GitHub Pages could not be deployed from this run. The F-Droid repo is still committed (and available via the raw.githubusercontent.com fallback). To enable Pages, open Settings -> Pages -> Build and deployment -> Source and select 'GitHub Actions'."
+          echo "::warning title=GitHub Pages not enabled::$msg"
+          {
+            echo '### GitHub Pages not deployed'
+            echo ''
+            echo "$msg"
+            echo ''
+            echo '- Canonical repo URL once Pages is enabled: https://pilihu2022.github.io/Software-Repo/repo'
+            echo '- Fallback while Pages is off: https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   notify-failure:
     name: Report failure

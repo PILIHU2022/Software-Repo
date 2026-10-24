@@ -68,6 +68,26 @@ SHA-1:   C7:CB:2C:10:F7:97:3E:80:C8:64:93:C5:31:69:B5:99:5D:6E:E2:F6
 > 不要把这个仓库和 F-Droid 官方源混在一起：两个应用的包名与官方版本相同，
 > 但签名密钥不同，Android 会拒绝覆盖安装。安装前请先卸载官方版本。
 
+### 启用 GitHub Pages（一次性）
+
+正式地址通过 GitHub Pages 提供。首次使用前需要仓库管理员在
+**Settings → Pages → Build and deployment → Source** 中选择
+**“GitHub Actions”**。`GITHUB_TOKEN` 无权自动创建 Pages 站点
+（`configure-pages` 的 `enablement: true` 需要 PAT / GitHub App token），
+因此工作流在 Pages 未启用时只打印 warning，不会让构建失败。
+
+### 备用地址（Pages 尚未启用时）
+
+Pages 未启用或返回 404 时，可以直接使用 `main` 分支上的原始文件地址：
+
+```
+https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
+```
+
+它提供与 Pages 完全相同的 `index-v2.json`、`entry.json` 和 APK
+（同样以 `/repo` 结尾）；Pages 启用后建议改回正式地址。
+两种地址的索引都由同一把仓库密钥签名，指纹见上。
+
 ## 版本号策略
 
 构建时会把上游 `app/build.gradle.kts` 中的版本改写为：
@@ -238,10 +258,11 @@ stdout 是一行可直接交给 `fromJSON` 的 JSON，stderr 是人类可读摘�
 
 - **与官方包名相同、签名不同**：首次安装必须卸载官方版本，否则会报
   `INSTALL_FAILED_UPDATE_INCOMPATIBLE`；卸载会丢失应用数据，请先备份。
-- **GitHub Pages 首次需要启用**：仓库 Settings → Pages → Source 选择
-  “GitHub Actions”，或让工作流中的 `configure-pages`（`enablement: true`）
-  自动开启；首次部署前仓库地址会 404。若 `configure-pages` 因权限不足
-  无法自动开启，需要仓库管理员手动执行这一步。
+- **GitHub Pages 首次需要启用**：仓库 Settings → Pages → Build and
+  deployment → Source 选择 “GitHub Actions”。`configure-pages` 的
+  `enablement: true` 需要 PAT / GitHub App token，普通 `GITHUB_TOKEN` 无法
+  自动创建 Pages 站点；工作流会把该失败降级为 warning，并使用上面的
+  raw.githubusercontent.com 备用地址。首次启用前正式地址会 404。
 - **Actions 写权限**：如果仓库 Settings → Actions → General → Workflow
   permissions 是 “Read-only”，publish 的“提交回 main”会返回 403。工作流会把
   该错误降级为 warning 并继续部署 Pages（本次运行的索引仍可访问），但
