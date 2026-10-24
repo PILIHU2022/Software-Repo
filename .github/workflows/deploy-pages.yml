@@ -1,0 +1,95 @@
+name: Deploy Pages
+
+# Safety net: publish the committed fdroid/ directory to GitHub Pages without
+# rebuilding anything. build.yml only deploys Pages from its publish job, which
+# runs when an upstream change is detected (or on an apps/** push); after the
+# owner enables Pages, this workflow makes sure a deployment happens anyway.
+# It is intentionally green while Pages is disabled (every Pages step is
+# continue-on-error), so a missing Pages site does not produce failure mail.
+
+on:
+  push:
+    paths:
+      - 'fdroid/**'
+      - '.github/workflows/deploy-pages.yml'
+  schedule:
+    - cron: '17 * * * *'      # hourly safety net
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      # No `enablement: true`: a plain GITHUB_TOKEN cannot create the Pages
+      # site (that needs a PAT / GitHub App token). The owner enables Pages
+      # once in Settings -> Pages -> Source: GitHub Actions.
+      - name: Configure Pages
+        id: pages
+        continue-on-error: true
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        id: pages_artifact
+        continue-on-error: true
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: fdroid
+
+      - name: Deploy Pages
+        id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Report Pages status
+        if: always()
+        env:
+          DEPLOYMENT_OUTCOME: ${{ steps.deployment.outcome }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEPLOYMENT_OUTCOME" != "success" ]]; then
+            msg="GitHub Pages is probably not enabled yet. The committed fdroid/ directory stays available via the raw fallback, and this workflow retries hourly."
+            echo "::warning title=GitHub Pages not enabled::$msg"
+            echo "Deployment outcome: ${DEPLOYMENT_OUTCOME:-unknown} (Pages steps are allowed to fail while Pages is disabled)."
+            echo "Enable it once in Settings -> Pages -> Build and deployment -> Source: GitHub Actions,"
+            echo "then this workflow (or its manual Run workflow button) publishes fdroid/ automatically."
+            {
+              echo '### GitHub Pages not deployed yet'
+              echo ''
+              echo 'The Pages steps failed softly, so this run is **green by design**.'
+              echo ''
+              echo "This usually means **GitHub Pages is not enabled yet** (deployment outcome: \`${DEPLOYMENT_OUTCOME:-unknown}\`)."
+              echo ''
+              echo 'Enable it once: **Settings → Pages → Build and deployment → Source: GitHub Actions**.'
+              echo ''
+              echo '- No rebuild is needed: the committed `fdroid/` directory is published by this workflow, which retries **hourly**.'
+              echo '- To publish immediately, open **Actions → Deploy Pages → Run workflow**.'
+              echo '- Until Pages is enabled, the repo is still served by the raw fallback: https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Deployment succeeded. Page URL: ${PAGE_URL:-<unset>}"
+            {
+              echo '### GitHub Pages deployed'
+              echo ''
+              echo "The committed \`fdroid/\` directory was published successfully."
+              echo ''
+              echo "Page URL: ${PAGE_URL:-<unset>}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -70,7 +70,9 @@ RecurringExpenseTracker 的改动最多：
 │   ├── patchwork-test.jks        # 故意提交的测试签名密钥（见下方警告）
 │   └── README.md
 ├── docs/design/                  # 设计文档（Tilla 日历规格、架构图谱）
-└── .github/workflows/build.yml   # GitHub Actions 工作流
+└── .github/workflows/
+    ├── build.yml                 # GitHub Actions 工作流（构建 / 发布 / Pages）
+    └── deploy-pages.yml          # Pages 安全网：小时级发布已提交的 fdroid/
 ```
 
 ## F-Droid 仓库
@@ -108,17 +110,27 @@ SHA-1:   C7:CB:2C:10:F7:97:3E:80:C8:64:93:C5:31:69:B5:99:5D:6E:E2:F6
 1. 打开仓库 **Settings**；
 2. 左侧 **Pages**；
 3. **Build and deployment → Source** 选择 **“GitHub Actions”**；
-4. 不需要手动配置分支或目录，工作流会在下一次 publish 时自动上传 `fdroid/`。
+4. 不需要手动配置分支或目录，启用后由 `Deploy Pages` 工作流自动上传
+   已提交的 `fdroid/`。
 
 `GITHUB_TOKEN` 无权自动创建 Pages 站点（`configure-pages` 的
 `enablement: true` 需要 PAT / GitHub App token），因此工作流在 Pages 未启用
 时只打印 warning，不会让构建失败。
 
-> **启用后必须手动强制运行一次。** publish 和 Pages 部署只在 `check` 判定
-> “上游有变化”时执行（push 触发，或手动勾选 `force`）。如果启用 Pages 时
-> 上游没有新提交，下一次定时运行会直接跳过 publish，什么都不会部署。启用
-> 后请打开 **Actions → Patchwork build → Run workflow → 勾选 `force` →
-> Run**，立即重建并部署 `/repo`；之后每 6 小时的定时任务会照常增量发布。
+> **启用后不需要重新构建。** `.github/workflows/deploy-pages.yml` 里的
+> **Deploy Pages** 工作流是独立的发布安全网，只把仓库中**已经提交**的
+> `fdroid/` 目录上传到 Pages，不构建任何 APK：
+>
+> - 它每小时（cron `17 * * * *`）运行一次，也监听 `fdroid/**` 的 push；
+> - 启用 Pages 后最多一小时内会自动部署；想立刻生效就打开
+>   **Actions → Deploy Pages → Run workflow → Run**；
+> - 它在 Pages 未启用时所有 Pages 步骤都是 `continue-on-error`，**运行结果
+>   仍然是绿色**（只在 Step Summary 里说明原因），不会产生失败通知。
+>
+> 仍然可用的老办法（**替代方案，不是必须**）：**Actions → Patchwork build
+> → Run workflow → 勾选 `force` → Run** 会完整重建并发布 `/repo`，同时顺带
+> 部署 Pages。如果只想让 Pages 发布已提交的内容，用 Deploy Pages 就够了。
+> 启用前或部署仍失败时，继续用下面的 raw 备用地址。
 
 ### 备用地址（Pages 尚未启用时）
 
@@ -202,8 +214,9 @@ PATCHWORK_REVISION=1 ./scripts/build-app.sh screentime
   的变更，避免机器人提交 `fdroid/**` 后再次触发。
 
 > publish 与 Pages 部署依赖 `check` 的 “上游有变化” 判断（push 触发时等价于
-> `--all`）。只想重新发布/刷新 Pages、而上游并没有新提交时，手动运行
-> workflow 并勾选 `force`。
+> `--all`）。只想重新发布/刷新 Pages、而上游并没有新提交时，用独立的
+> **Deploy Pages** 工作流即可（它只发布已提交的 `fdroid/`，无需重建）；
+> 需要重新构建 APK 和索引时，再手动运行本 workflow 并勾选 `force`。
 
 ## 如何手动触发
 
@@ -326,9 +339,10 @@ stdout 是一行可直接交给 `fromJSON` 的 JSON，stderr 是人类可读摘�
   deployment → Source 选择 “GitHub Actions”。`configure-pages` 的
   `enablement: true` 需要 PAT / GitHub App token，普通 `GITHUB_TOKEN` 无法
   自动创建 Pages 站点；工作流会把该失败降级为 warning，并使用上面的
-  raw.githubusercontent.com 备用地址。首次启用前正式地址会 404。启用后还需要
-  手动 **Run workflow → force** 一次，否则定时运行可能因“上游无变化”而跳过
-  publish/部署。
+  raw.githubusercontent.com 备用地址。首次启用前正式地址会 404。**启用后
+  不需要重建**：独立的 **Deploy Pages** 工作流每小时自动发布已提交的
+  `fdroid/`（也可在 Actions 里手动 dispatch 立即运行），期间运行结果保持
+  绿色；`Patchwork build → force` 只是可选的重建/发布替代方案。
 - **失败 issue 不会自动关闭**：历史上失败运行创建的 “Patchwork build failed”
   issue 在工作流恢复绿色后不会自动关闭（工作流只负责开新 issue 或追加评论），
   需要手动关闭。
