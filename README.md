@@ -11,6 +11,37 @@
 这样做的好处是上游的修复和新功能会自动进入构建，而不需要长期维护一个已经
 分叉的 fork。补丁一旦与上游冲突，流水线会失败并开出 issue，提醒我们更新补丁。
 
+## 功能特性
+
+本仓库的补丁在保留上游功能的前提下，给两个应用加上 Tilla 风格的界面与行为。
+RecurringExpenseTracker 的改动最多：
+
+- **Tilla 彩色卡片**：订阅按服务品牌色渲染成彩色磁贴；内置 92 项服务图标
+  目录，编辑页可选择图标，并按支出名称自动推荐。
+- **日历页**（补丁 `0011`–`0015`）：
+  - **位置**：底部导航第 4 个 tab **日历**（Home / Upcoming 之后、Settings
+    之前），有独立的 `TopAppBar`、没有 FAB；设置里可把默认启动 tab 设为日历
+    （`DefaultTab.Calendar=2`，持久化的旧值 0/1 仍然兼容）。
+  - **月历卡片**：7 列 1:1 日格、单行星期头；一周首日按系统 locale 的
+    BCP-47 tag 推断（周一或周日）。整月补齐前后周，相邻月份的日期淡化显示，
+    点击会切换到该月；换月支持标题两侧的圆形箭头和横向滑动（约 100px 阈值）。
+  - **日格**：日期数字 + 18dp 着色服务图标（Tilla 原版直接用图标替换日期，
+    这里保留数字以免某天有支出时整格失去日期语义）；同一天多条付款时右上角
+    显示 `+N` 徽标，当天全部已付款时右下角显示对勾。
+  - **日详情**：点击某天，卡片下方按 Tilla 卡片样式列出当天全部订阅付款
+    （名称、金额、服务色、已付款/未付款标记），空态显示“暂无计划”；点击
+    卡片进入该支出的编辑页。
+  - **数据与性能**：用与 Upcoming 相同的 `getNextPaymentDayAfter` 规则投影
+    整月 occurrence（月末 clamp、inclusive `endDate`），已付款状态只查询需要
+    手动确认的支出；投影和付款记录读取在 `Dispatchers.IO` 执行，月滑动不会
+    阻塞主线程。
+  - **文案**：英文、简体中文、繁体中文三套。
+- **列表与启动优化**：列表模式改为普通 `LazyColumn`，首页卡片缓存每张卡的
+  日期/图标/文字，启动首帧不再被数据库读取阻塞。
+- **备份/恢复**：恢复官方备份时关闭并重启数据库进程，恢复后按名称推断图标。
+
+设计依据见 [`docs/design/`](docs/design/)：Tilla 日历的逆向规格与上游架构图谱。
+
 ## 目录结构
 
 ```
@@ -38,13 +69,13 @@
 ├── signing/
 │   ├── patchwork-test.jks        # 故意提交的测试签名密钥（见下方警告）
 │   └── README.md
-├── docs/design/                  # 设计文档占位目录
+├── docs/design/                  # 设计文档（Tilla 日历规格、架构图谱）
 └── .github/workflows/build.yml   # GitHub Actions 工作流
 ```
 
 ## F-Droid 仓库
 
-仓库地址：
+仓库地址（正式地址；Pages 尚未启用时返回 404，见下方“备用地址”）：
 
 ```
 https://pilihu2022.github.io/Software-Repo/repo
@@ -68,13 +99,26 @@ SHA-1:   C7:CB:2C:10:F7:97:3E:80:C8:64:93:C5:31:69:B5:99:5D:6E:E2:F6
 > 不要把这个仓库和 F-Droid 官方源混在一起：两个应用的包名与官方版本相同，
 > 但签名密钥不同，Android 会拒绝覆盖安装。安装前请先卸载官方版本。
 
-### 启用 GitHub Pages（一次性）
+### 启用 GitHub Pages（一次性，仓库所有者操作）
 
-正式地址通过 GitHub Pages 提供。首次使用前需要仓库管理员在
-**Settings → Pages → Build and deployment → Source** 中选择
-**“GitHub Actions”**。`GITHUB_TOKEN` 无权自动创建 Pages 站点
-（`configure-pages` 的 `enablement: true` 需要 PAT / GitHub App token），
-因此工作流在 Pages 未启用时只打印 warning，不会让构建失败。
+正式地址 `https://pilihu2022.github.io/Software-Repo/repo` 通过 GitHub Pages
+提供，但**当前仓库尚未启用 Pages**，所以这个地址会返回 404。启用方法（只需
+一次）：
+
+1. 打开仓库 **Settings**；
+2. 左侧 **Pages**；
+3. **Build and deployment → Source** 选择 **“GitHub Actions”**；
+4. 不需要手动配置分支或目录，工作流会在下一次 publish 时自动上传 `fdroid/`。
+
+`GITHUB_TOKEN` 无权自动创建 Pages 站点（`configure-pages` 的
+`enablement: true` 需要 PAT / GitHub App token），因此工作流在 Pages 未启用
+时只打印 warning，不会让构建失败。
+
+> **启用后必须手动强制运行一次。** publish 和 Pages 部署只在 `check` 判定
+> “上游有变化”时执行（push 触发，或手动勾选 `force`）。如果启用 Pages 时
+> 上游没有新提交，下一次定时运行会直接跳过 publish，什么都不会部署。启用
+> 后请打开 **Actions → Patchwork build → Run workflow → 勾选 `force` →
+> Run**，立即重建并部署 `/repo`；之后每 6 小时的定时任务会照常增量发布。
 
 ### 备用地址（Pages 尚未启用时）
 
@@ -84,9 +128,14 @@ Pages 未启用或返回 404 时，可以直接使用 `main` 分支上的原始�
 https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 ```
 
-它提供与 Pages 完全相同的 `index-v2.json`、`entry.json` 和 APK
-（同样以 `/repo` 结尾）；Pages 启用后建议改回正式地址。
-两种地址的索引都由同一把仓库密钥签名，指纹见上。
+它提供与 Pages 完全相同的 `index-v2.json`、`entry.json` 和 APK（同样以
+`/repo` 结尾），索引里最新版本与 Pages 部署后一致。两种地址的索引都由同一把
+仓库密钥签名，指纹见上。
+
+> 索引里的 `repo.address` 始终写正式 Pages 地址；用 raw 地址添加仓库时，
+> 部分 F-Droid 客户端会提示“仓库地址与索引中的地址不一致”（address
+> mismatch）。内容完全相同，确认指纹后继续即可；Pages 启用后建议改回正式
+> 地址。
 
 ## 版本号策略
 
@@ -152,6 +201,10 @@ PATCHWORK_REVISION=1 ./scripts/build-app.sh screentime
 - **推送**：只监听 `apps/**`、`scripts/**`、`.github/workflows/build.yml`
   的变更，避免机器人提交 `fdroid/**` 后再次触发。
 
+> publish 与 Pages 部署依赖 `check` 的 “上游有变化” 判断（push 触发时等价于
+> `--all`）。只想重新发布/刷新 Pages、而上游并没有新提交时，手动运行
+> workflow 并勾选 `force`。
+
 ## 如何手动触发
 
 1. 打开 GitHub 仓库的 **Actions** 页面；
@@ -186,6 +239,10 @@ git commit -m "Update ScreenTime patch queue"
 可用于 CI 或本地检查。若 app clone 当前不在 `patchwork` 分支、工作区没有
 `.patchwork/patches`，脚本会尝试从该 clone 的 `patchwork` 分支用
 `git archive` 读取，不会修改 app clone。
+
+提交补丁变更时不需要手动改版本号：`scripts/build-app.sh` 会把
+`apps/<app>/patches` 的提交数作为补丁 revision 自动加进 `versionCode`
+（详见“版本号策略”），所以每次补丁提交后的构建都能被 F-Droid 识别为升级。
 
 > 补丁必须保持“从上游 `main` 的某个提交导出”的形式，并且基于当前上游仍能
 > 3-way apply。`git am -3` 需要完整历史，CI 已设置 `fetch-depth: 0`，本地
@@ -269,7 +326,12 @@ stdout 是一行可直接交给 `fromJSON` 的 JSON，stderr 是人类可读摘�
   deployment → Source 选择 “GitHub Actions”。`configure-pages` 的
   `enablement: true` 需要 PAT / GitHub App token，普通 `GITHUB_TOKEN` 无法
   自动创建 Pages 站点；工作流会把该失败降级为 warning，并使用上面的
-  raw.githubusercontent.com 备用地址。首次启用前正式地址会 404。
+  raw.githubusercontent.com 备用地址。首次启用前正式地址会 404。启用后还需要
+  手动 **Run workflow → force** 一次，否则定时运行可能因“上游无变化”而跳过
+  publish/部署。
+- **失败 issue 不会自动关闭**：历史上失败运行创建的 “Patchwork build failed”
+  issue 在工作流恢复绿色后不会自动关闭（工作流只负责开新 issue 或追加评论），
+  需要手动关闭。
 - **Actions 写权限**：如果仓库 Settings → Actions → General → Workflow
   permissions 是 “Read-only”，publish 的“提交回 main”会返回 403。工作流会把
   该错误降级为 warning 并继续部署 Pages（本次运行的索引仍可访问），但
