@@ -1,0 +1,79 @@
+name: Upstream watch
+
+# The schedule event is best-effort: GitHub throttles frequent crons on busy
+# runners, so `*/15` was observed to fire every 2-4 hours. This workflow keeps a
+# single long-lived poller instead: it starts every 6 hours and polls all
+# upstream branches every 15 minutes for the length of the job, dispatching
+# build.yml as soon as a new upstream commit shows up.
+#
+# It does not build anything itself; build.yml stays the single place that
+# patches and publishes.
+
+on:
+  schedule:
+    - cron: '7 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Poll upstream
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Poll upstream and dispatch builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          poll_interval=900     # 15 minutes between checks
+          settle_interval=1200  # after a dispatch, give the build time to run
+          iterations=23         # ~5h45m, under the 6h job limit
+
+          for i in $(seq 1 "$iterations"); do
+            echo "::group::Poll #$i at $(date -u +%FT%TZ)"
+            # stdout is the JSON matrix, stderr is the human summary (shown in the log).
+            if ! json="$(./scripts/check-upstream.sh)"; then
+              echo "check-upstream.sh failed; will retry next round"
+              echo "::endgroup::"
+              sleep "$poll_interval"
+              continue
+            fi
+            printf '%s\n' "$json"
+            echo "::endgroup::"
+
+            if [[ "$(jq -r '.changed // false' <<<"$json" 2>/dev/null)" != "true" ]]; then
+              sleep "$poll_interval"
+              continue
+            fi
+
+            apps="$(jq -r '[.matrix.include[].app] | join(", ")' <<<"$json")"
+            echo "Upstream changed for: $apps -> dispatching build.yml"
+            if curl -sf -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/$REPO/actions/workflows/build.yml/dispatches" \
+                -d '{"ref":"main"}'; then
+              echo "::notice::Dispatched Patchwork build for: $apps"
+            else
+              echo "::warning::Could not dispatch build.yml (token permissions?)"
+            fi
+            # The dispatched build updates .build-state.json when it publishes;
+            # wait for that instead of dispatching the same change again.
+            sleep "$settle_interval"
+          done
+          echo "Watch window finished."

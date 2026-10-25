@@ -8,12 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       app:
-        description: Which app to build
-        type: choice
-        options:
-          - all
-          - expenses
-          - screentime
+        description: App id, or "all" (apps come from apps/*/app.conf)
+        type: string
         default: all
       force:
         description: Build even when upstream has not changed
@@ -65,6 +61,11 @@ jobs:
           APP_INPUT: ${{ inputs.app }}
         run: |
           set -euo pipefail
+          # App list comes from apps/*/app.conf, so adding an app needs no
+          # workflow edit.
+          mapfile -t ALL_APPS < <(find apps -mindepth 2 -maxdepth 2 -name app.conf | LC_ALL=C sort | cut -d/ -f2)
+          all_apps="$(printf '%s ' "${ALL_APPS[@]}")"
+          all_apps="${all_apps%"${all_apps##*[! ]}"}"
           args=()
           if [[ "$EVENT" == "push" ]]; then
             selected=""
@@ -74,17 +75,20 @@ jobs:
               pick=()
               while IFS= read -r path; do
                 case "$path" in
-                  apps/expenses/*) pick+=(expenses) ;;
-                  apps/screentime/*) pick+=(screentime) ;;
-                  scripts/*|.github/workflows/*) pick=(expenses screentime); break ;;
+                  apps/*/*)
+                    app="${path#apps/}"
+                    app="${app%%/*}"
+                    printf '%s\n' "${ALL_APPS[@]}" | grep -Fxq "$app" && pick+=("$app")
+                    ;;
+                  scripts/*|.github/workflows/*) pick=("${ALL_APPS[@]}"); break ;;
                 esac
               done <<<"$changed_files"
               if [[ ${#pick[@]} -gt 0 ]]; then
                 selected="$(printf '%s\n' "${pick[@]}" | sort -u | paste -sd' ' -)"
               fi
             fi
-            # Unknown before-SHA (force push) or a non-app change: rebuild both.
-            [[ -n "$selected" ]] || selected="expenses screentime"
+            # Unknown before-SHA (force push) or a non-app change: rebuild all.
+            [[ -n "$selected" ]] || selected="$all_apps"
             echo "Push changed these apps: $selected"
             args=(--apps "$selected")
           elif [[ "$EVENT" == "workflow_dispatch" ]]; then
