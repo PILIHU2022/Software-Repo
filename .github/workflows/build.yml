@@ -418,6 +418,16 @@ jobs:
           printf 'Build state: %s\n' "$state"
           ./scripts/publish-fdroid.sh --apk-dir dist --state-json "$state"
 
+      # Keep README.md / README.zh-CN.md in sync with what was actually built:
+      # upstream revision, patch count and the versionCode/versionName of the
+      # APKs published above. Apps without a fresh APK keep their row untouched,
+      # so a failed matrix leg never rolls another app's row back.
+      - name: Update README app table
+        if: steps.apks.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          ./scripts/update-readme.sh --apk-dir dist
+
       - name: Commit repository changes
         id: commit
         if: steps.apks.outputs.found == 'true'
@@ -432,7 +442,7 @@ jobs:
           set -euo pipefail
           git config user.name "DeepSeek Harness"
           git config user.email "noreply@deepseek.com"
-          git add fdroid/repo fdroid/.build-state.json
+          git add fdroid/repo fdroid/.build-state.json README.md README.zh-CN.md
           if git diff --cached --quiet; then
             echo "No repository changes to commit"
             exit 0
