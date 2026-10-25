@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 25 Oct 2026 14:45:12 +0800
+Subject: [PATCH] fix(app): use a horizontal back arrow in the file manager
+
+The file manager used an upward arrow even though the action navigates
+back/up one level.  Use a theme-tinted horizontal arrow so it stays
+visible on both light and dark toolbars.
+---
+ .../fcitx5/android/ui/files/FileManagerActivity.kt    |  5 ++++-
+ app/src/main/res/drawable/ic_arrow_back_24.xml        | 11 +++++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+ create mode 100644 app/src/main/res/drawable/ic_arrow_back_24.xml
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt
+index 91cce229..dc25d71f 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt
+@@ -98,7 +98,10 @@ class FileManagerActivity : AppCompatActivity() {
+         setSupportActionBar(binding.toolbar)
+         supportActionBar?.apply {
+             setDisplayHomeAsUpEnabled(true)
+-            setHomeAsUpIndicator(R.drawable.ic_arrow_up_24)
++            // Horizontal back arrow.  The dedicated drawable is tinted with the
++            // AppCompat colorControlNormal attribute so it stays visible on both
++            // light and dark toolbars.
++            setHomeAsUpIndicator(R.drawable.ic_arrow_back_24)
+         }
+         binding.toolbar.overflowIcon =
+             ContextCompat.getDrawable(this, R.drawable.ic_more_vert_24)
+diff --git a/app/src/main/res/drawable/ic_arrow_back_24.xml b/app/src/main/res/drawable/ic_arrow_back_24.xml
+new file mode 100644
+index 00000000..91f18b3e
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_arrow_back_24.xml
+@@ -0,0 +1,11 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:autoMirrored="true"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M20,11H7.83l5.59,-5.59L12,4l-8,8 8,8 1.41,-1.41L7.83,13H20v-2z" />
++</vector>

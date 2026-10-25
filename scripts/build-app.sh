@@ -4,7 +4,10 @@
 # version, then (unless --no-build) run Gradle and verify the APK.
 #
 # Usage:
-#   scripts/build-app.sh <expenses|screentime> [--out DIR] [--no-build]
+#   scripts/build-app.sh <app> [--out DIR] [--no-build]
+#
+# <app> is any directory under apps/ with an app.conf (currently expenses,
+# screentime and fcitx5). The list is not hard-coded here.
 #
 # Environment:
 #   PATCHWORK_REVISION        patch revision appended after the upstream
@@ -25,12 +28,13 @@ WORK_ROOT="$CACHE/work"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/build-app.sh <expenses|screentime> [--out DIR] [--no-build]
+Usage: scripts/build-app.sh <app> [--out DIR] [--no-build]
 
-Fetches the upstream default branch into .cache/mirror/<app>.git, creates a
+<app> is any directory under apps/ with an app.conf (expenses, screentime,
+fcitx5). Fetches the upstream branch into .cache/mirror/<app>.git, creates a
 fresh checkout in .cache/work/<app>, applies apps/<app>/patches/*.patch with
-`git am -3`, rewrites versionCode/versionName in app/build.gradle.kts, and
-builds a signed release APK.
+`git am -3`, sets versionCode/versionName (file rewrite, or environment
+variables for VERSION_STYLE=build-logic), and builds a signed release APK.
 
 Options:
   --out DIR    copy the APK and build-info.txt here (default: dist/)
@@ -82,15 +86,19 @@ done
     usage >&2
     exit 2
 }
-case "$APP" in
-    expenses|screentime) ;;
-    *) die "unknown app '$APP' (expected expenses or screentime)" ;;
-esac
-
 CONF="$ROOT/apps/$APP/app.conf"
-[[ -f "$CONF" ]] || die "missing app config: $CONF"
+# The app list is derived from apps/*/app.conf so that adding an app needs no
+# change here. Reject path tricks such as `../expenses` before touching CONF.
+[[ "$APP" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid app name '$APP'"
+[[ -f "$CONF" ]] || {
+    known="$(find "$ROOT/apps" -mindepth 2 -maxdepth 2 -name app.conf -printf '%h\n' 2>/dev/null \
+        | sed 's#.*/##' | LC_ALL=C sort | paste -sd',' - | sed 's/,/, /g')"
+    die "unknown app '$APP' (expected one of: ${known:-none})"
+}
 # shellcheck source=/dev/null
 source "$CONF"
+[[ "${APP_ID:-}" == "$APP" ]] \
+    || die "$CONF sets APP_ID='${APP_ID:-<unset>}', expected '$APP'"
 
 for var in APP_ID PROJECT_NAME UPSTREAM_URL UPSTREAM_BRANCH PACKAGE \
     GRADLE_TASK APK_SUBDIR VERSION_FILE SIGNING_STYLE APK_NAME_PREFIX; do
@@ -168,53 +176,89 @@ done
 VERSION_PATH="$WORK/$VERSION_FILE"
 [[ -f "$VERSION_PATH" ]] || die "version file not found in upstream: $VERSION_FILE"
 
-CODE_RE='^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$'
-NAME_RE='^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]*)"[[:space:]]*$'
+if [[ "${VERSION_STYLE:-gradle}" == "build-logic" ]]; then
+    # fcitx5-android computes versionCode/versionName inside build-logic
+    # (Versions.kt) instead of a Gradle file. Read the upstream constants,
+    # derive the per-ABI code exactly like Versions.calculateVersionCode(),
+    # then hand the patchwork values to the build through the environment
+    # (see apps/fcitx5/app.conf and the PATCHWORK_REVISION patch).
+    BASE_CODE_RE='^[[:space:]]*const val baseVersionCode[[:space:]]*=[[:space:]]*([0-9]+)'
+    BASE_NAME_RE='^[[:space:]]*const val baseVersionName[[:space:]]*=[[:space:]]*"([^"]*)"'
+    base_code="$(sed -nE "s/${BASE_CODE_RE}/\1/p" "$VERSION_PATH" | head -n 1)"
+    base_name="$(sed -nE "s/${BASE_NAME_RE}/\1/p" "$VERSION_PATH" | head -n 1)"
+    [[ "$base_code" =~ ^[0-9]+$ ]] || die "could not parse baseVersionCode from $VERSION_FILE"
+    [[ -n "$base_name" ]] || die "could not parse baseVersionName from $VERSION_FILE"
 
-code_matches="$(grep -cE "$CODE_RE" "$VERSION_PATH" || true)"
-[[ "$code_matches" -eq 1 ]] \
-    || die "expected exactly one versionCode line in $VERSION_FILE, found $code_matches"
-name_matches="$(grep -cE "$NAME_RE" "$VERSION_PATH" || true)"
-[[ "$name_matches" -eq 1 ]] \
-    || die "expected exactly one versionName line in $VERSION_FILE, found $name_matches"
+    export BUILD_ABI="${BUILD_ABI:-arm64-v8a}"
+    case "$BUILD_ABI" in
+        armeabi-v7a) ABI_ID=1 ;;
+        arm64-v8a) ABI_ID=2 ;;
+        x86) ABI_ID=3 ;;
+        x86_64) ABI_ID=4 ;;
+        *) die "unsupported BUILD_ABI '$BUILD_ABI'" ;;
+    esac
 
-UPSTREAM_CODE="$(sed -nE "s/${CODE_RE}/\1/p" "$VERSION_PATH")"
-UPSTREAM_NAME="$(sed -nE "s/${NAME_RE}/\1/p" "$VERSION_PATH")"
-[[ "$UPSTREAM_CODE" =~ ^[0-9]+$ ]] || die "could not parse versionCode from $VERSION_FILE"
-[[ -n "$UPSTREAM_NAME" ]] || die "could not parse versionName from $VERSION_FILE"
+    UPSTREAM_CODE=$((10#$base_code * 10 + ABI_ID))
+    UPSTREAM_NAME="$base_name"
+    NEW_CODE=$((10#$UPSTREAM_CODE * 100 + 10#$PATCHWORK_REVISION))
+    NEW_NAME="${UPSTREAM_NAME}-patchwork"
 
-NEW_CODE=$((10#$UPSTREAM_CODE * 100 + 10#$PATCHWORK_REVISION))
-if [[ "$UPSTREAM_NAME" == *-patchwork ]]; then
-    NEW_NAME="$UPSTREAM_NAME"
+    export PATCHWORK_REVISION
+    export BUILD_VERSION_NAME="$NEW_NAME"
+
+    echo "==> Version is computed by build-logic, no file rewrite"
+    echo "    ABI:         $BUILD_ABI (id $ABI_ID)"
+    echo "    versionCode: $UPSTREAM_CODE -> $NEW_CODE"
+    echo "    versionName: $UPSTREAM_NAME -> $NEW_NAME"
 else
-    NEW_NAME="$UPSTREAM_NAME-patchwork"
+    CODE_RE='^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$'
+    NAME_RE='^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]*)"[[:space:]]*$'
+
+    code_matches="$(grep -cE "$CODE_RE" "$VERSION_PATH" || true)"
+    [[ "$code_matches" -eq 1 ]] \
+        || die "expected exactly one versionCode line in $VERSION_FILE, found $code_matches"
+    name_matches="$(grep -cE "$NAME_RE" "$VERSION_PATH" || true)"
+    [[ "$name_matches" -eq 1 ]] \
+        || die "expected exactly one versionName line in $VERSION_FILE, found $name_matches"
+
+    UPSTREAM_CODE="$(sed -nE "s/${CODE_RE}/\1/p" "$VERSION_PATH")"
+    UPSTREAM_NAME="$(sed -nE "s/${NAME_RE}/\1/p" "$VERSION_PATH")"
+    [[ "$UPSTREAM_CODE" =~ ^[0-9]+$ ]] || die "could not parse versionCode from $VERSION_FILE"
+    [[ -n "$UPSTREAM_NAME" ]] || die "could not parse versionName from $VERSION_FILE"
+
+    NEW_CODE=$((10#$UPSTREAM_CODE * 100 + 10#$PATCHWORK_REVISION))
+    if [[ "$UPSTREAM_NAME" == *-patchwork ]]; then
+        NEW_NAME="$UPSTREAM_NAME"
+    else
+        NEW_NAME="$UPSTREAM_NAME-patchwork"
+    fi
+
+    echo "==> Rewriting $VERSION_FILE"
+    echo "    versionCode: $UPSTREAM_CODE -> $NEW_CODE"
+    echo "    versionName: $UPSTREAM_NAME -> $NEW_NAME"
+
+    tmp="$(mktemp "${VERSION_PATH}.XXXXXX")"
+    awk -v code="$NEW_CODE" -v name="$NEW_NAME" '
+        /^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*$/ {
+            match($0, /^[[:space:]]*/)
+            print substr($0, 1, RLENGTH) "versionCode = " code
+            next
+        }
+        /^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*$/ {
+            match($0, /^[[:space:]]*/)
+            print substr($0, 1, RLENGTH) "versionName = \"" name "\""
+            next
+        }
+        { print }
+    ' "$VERSION_PATH" >"$tmp"
+    chmod --reference="$VERSION_PATH" "$tmp"
+    mv "$tmp" "$VERSION_PATH"
+
+    grep -qE "^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*${NEW_CODE}[[:space:]]*$" "$VERSION_PATH" \
+        || die "versionCode rewrite failed in $VERSION_FILE"
+    grep -qF "versionName = \"$NEW_NAME\"" "$VERSION_PATH" \
+        || die "versionName rewrite failed in $VERSION_FILE"
 fi
-
-echo "==> Rewriting $VERSION_FILE"
-echo "    versionCode: $UPSTREAM_CODE -> $NEW_CODE"
-echo "    versionName: $UPSTREAM_NAME -> $NEW_NAME"
-
-tmp="$(mktemp "${VERSION_PATH}.XXXXXX")"
-awk -v code="$NEW_CODE" -v name="$NEW_NAME" '
-    /^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*$/ {
-        match($0, /^[[:space:]]*/)
-        print substr($0, 1, RLENGTH) "versionCode = " code
-        next
-    }
-    /^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*$/ {
-        match($0, /^[[:space:]]*/)
-        print substr($0, 1, RLENGTH) "versionName = \"" name "\""
-        next
-    }
-    { print }
-' "$VERSION_PATH" >"$tmp"
-chmod --reference="$VERSION_PATH" "$tmp"
-mv "$tmp" "$VERSION_PATH"
-
-grep -qE "^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*${NEW_CODE}[[:space:]]*$" "$VERSION_PATH" \
-    || die "versionCode rewrite failed in $VERSION_FILE"
-grep -qF "versionName = \"$NEW_NAME\"" "$VERSION_PATH" \
-    || die "versionName rewrite failed in $VERSION_FILE"
 
 print_result() {
     echo "PATCHWORK_RESULT_app=$APP"
@@ -265,8 +309,26 @@ elif [[ "$SIGNING_STYLE" == "screentime" ]]; then
     export ANDROID_KEY_STORE_PASSWORD="$STORE_PASSWORD"
     export ANDROID_KEY_ALIAS="$KEY_ALIAS"
     export ANDROID_KEY_PASSWORD="$KEY_PASSWORD"
+elif [[ "$SIGNING_STYLE" == "fcitx5" ]]; then
+    # build-logic ProjectExtensions.fromProjectEnv(): the release signing config
+    # only exists when SIGN_KEY_FILE (or SIGN_KEY_BASE64) is present. Upstream
+    # uses a single SIGN_KEY_PWD for both the keystore and the key.
+    [[ "$KEY_PASSWORD" == "$STORE_PASSWORD" ]] \
+        || die "fcitx5 signing needs PATCHWORK_KEY_PASSWORD == PATCHWORK_STORE_PASSWORD (upstream exposes one SIGN_KEY_PWD)"
+    export SIGN_KEY_FILE="$KEYSTORE"
+    export SIGN_KEY_PWD="$STORE_PASSWORD"
+    export SIGN_KEY_ALIAS="$KEY_ALIAS"
 else
     die "unknown SIGNING_STYLE '$SIGNING_STYLE' in $CONF"
+fi
+
+# fcitx5-android compiles C++ from submodules (~450 MB with the shallow
+# `prebuilt`); the patch queue itself never touches them. Doing this here (and
+# not before `git am`) keeps `--no-build` from downloading them. Unset for the
+# Gradle-only apps.
+if [[ "${SUBMODULES:-}" == "recursive" ]]; then
+    echo "==> Initializing submodules (recursive)"
+    git -C "$WORK" submodule update --init --recursive
 fi
 
 echo "==> Building $GRADLE_TASK"
@@ -277,11 +339,17 @@ chmod +x "$WORK/gradlew"
 )
 
 APK_DIR="$WORK/$APK_SUBDIR"
-mapfile -t APKS < <(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' ! -name '*-unsigned.apk' | LC_ALL=C sort)
-[[ ${#APKS[@]} -gt 0 ]] || die "build succeeded but no APK was found in $APK_SUBDIR"
+# Apps that build per-ABI split APKs (no universal APK) select the one ABI this
+# run built, so a stray APK from another ABI is never picked up.
+APK_FIND_NAME='*.apk'
+if [[ -n "${BUILD_ABI:-}" ]]; then
+    APK_FIND_NAME="*-${BUILD_ABI}-release.apk"
+fi
+mapfile -t APKS < <(find "$APK_DIR" -maxdepth 1 -type f -name "$APK_FIND_NAME" ! -name '*-unsigned.apk' | LC_ALL=C sort)
+[[ ${#APKS[@]} -gt 0 ]] || die "build succeeded but no APK was found in $APK_SUBDIR (filter: $APK_FIND_NAME)"
 APK_PATH="${APKS[0]}"
 
-DEST="$OUT/${APK_NAME_PREFIX}-${NEW_NAME}.apk"
+DEST="$OUT/${APK_NAME_PREFIX}-${NEW_NAME}${APK_NAME_SUFFIX:+-$APK_NAME_SUFFIX}.apk"
 cp "$APK_PATH" "$DEST"
 echo "==> APK: $DEST"
 
@@ -338,6 +406,11 @@ apk=$(basename "$DEST")
 apk_size=$APK_SIZE
 sha256=$SHA256
 INFO
+# Only per-ABI builds carry an abi= line; the Gradle-only apps keep their
+# historical build-info.txt exactly as before.
+if [[ -n "${BUILD_ABI:-}" ]]; then
+    printf 'abi=%s\n' "$BUILD_ABI" >>"$OUT/build-info.txt"
+fi
 
 echo "==> Build info"
 cat "$OUT/build-info.txt"

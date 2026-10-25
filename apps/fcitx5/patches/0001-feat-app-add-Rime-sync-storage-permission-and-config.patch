@@ -1,0 +1,2525 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 25 Oct 2026 13:44:11 +0800
+Subject: [PATCH] feat(app): add Rime sync storage permission and config file
+ manager
+
+- request MANAGE_EXTERNAL_STORAGE so librime can write sync_dir in
+  shared storage (for example Download/Rime-Sync) on Android 11+
+- add a built-in file manager and UTF-8 editor for Rime/Fcitx5 configs
+- clean up a stale .temp.userdb before Fcitx starts
+- fix plugin discovery for debug builds and preserve the manifest queries
+- add a debug-only broadcast hook for sync/shared-storage testing
+---
+ app/src/debug/AndroidManifest.xml             |  14 +
+ .../fcitx5/android/debug/DebugSyncReceiver.kt |  85 ++
+ app/src/main/AndroidManifest.xml              |  44 +-
+ app/src/main/cpp/native-lib.cpp               |  22 +
+ .../org/fcitx/fcitx5/android/core/Fcitx.kt    |  10 +
+ .../org/fcitx/fcitx5/android/core/FcitxAPI.kt |   6 +
+ .../fcitx5/android/core/data/DataManager.kt   |   5 +-
+ .../android/ui/files/FileEditorActivity.kt    | 346 +++++++++
+ .../fcitx5/android/ui/files/FileEntry.kt      | 109 +++
+ .../android/ui/files/FileListAdapter.kt       |  87 +++
+ .../android/ui/files/FileManagerActivity.kt   | 723 ++++++++++++++++++
+ .../fcitx5/android/ui/files/StorageAccess.kt  |  71 ++
+ .../android/ui/files/StoragePermission.kt     | 116 +++
+ .../fcitx5/android/ui/main/MainActivity.kt    |  21 +-
+ .../fcitx5/android/ui/main/MainFragment.kt    |   9 +
+ .../behavior/AdvancedSettingsFragment.kt      |  16 +
+ .../fcitx5/android/utils/RimeSyncUtils.kt     |  43 ++
+ app/src/main/res/drawable/ic_arrow_up_24.xml  |  10 +
+ .../main/res/drawable/ic_create_folder_24.xml |  10 +
+ app/src/main/res/drawable/ic_file_24.xml      |  10 +
+ app/src/main/res/drawable/ic_file_text_24.xml |  10 +
+ app/src/main/res/drawable/ic_folder_24.xml    |  10 +
+ app/src/main/res/drawable/ic_more_vert_24.xml |  10 +
+ app/src/main/res/drawable/ic_note_add_24.xml  |  10 +
+ app/src/main/res/drawable/ic_refresh_24.xml   |  10 +
+ .../main/res/layout/activity_file_editor.xml  |  53 ++
+ .../main/res/layout/activity_file_manager.xml |  64 ++
+ app/src/main/res/layout/item_file.xml         |  48 ++
+ .../main/res/values-zh-rCN/strings_files.xml  |  65 ++
+ .../res/values-zh-rCN/strings_storage.xml     |  12 +
+ app/src/main/res/values/strings_files.xml     |  65 ++
+ app/src/main/res/values/strings_storage.xml   |  12 +
+ 32 files changed, 2120 insertions(+), 6 deletions(-)
+ create mode 100644 app/src/debug/AndroidManifest.xml
+ create mode 100644 app/src/debug/java/org/fcitx/fcitx5/android/debug/DebugSyncReceiver.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEditorActivity.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEntry.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileListAdapter.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/files/StorageAccess.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/files/StoragePermission.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/utils/RimeSyncUtils.kt
+ create mode 100644 app/src/main/res/drawable/ic_arrow_up_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_create_folder_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_file_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_file_text_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_folder_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_more_vert_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_note_add_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_refresh_24.xml
+ create mode 100644 app/src/main/res/layout/activity_file_editor.xml
+ create mode 100644 app/src/main/res/layout/activity_file_manager.xml
+ create mode 100644 app/src/main/res/layout/item_file.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_files.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_storage.xml
+ create mode 100644 app/src/main/res/values/strings_files.xml
+ create mode 100644 app/src/main/res/values/strings_storage.xml
+
+diff --git a/app/src/debug/AndroidManifest.xml b/app/src/debug/AndroidManifest.xml
+new file mode 100644
+index 00000000..f1adc3f9
+--- /dev/null
++++ b/app/src/debug/AndroidManifest.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++
++    <application>
++        <receiver
++            android:name="org.fcitx.fcitx5.android.debug.DebugSyncReceiver"
++            android:exported="true">
++            <intent-filter>
++                <action android:name="org.fcitx.fcitx5.android.debug.SYNC_TEST" />
++                <action android:name="org.fcitx.fcitx5.android.debug.WRITE_TEST" />
++            </intent-filter>
++        </receiver>
++    </application>
++</manifest>
+diff --git a/app/src/debug/java/org/fcitx/fcitx5/android/debug/DebugSyncReceiver.kt b/app/src/debug/java/org/fcitx/fcitx5/android/debug/DebugSyncReceiver.kt
+new file mode 100644
+index 00000000..1f69135b
+--- /dev/null
++++ b/app/src/debug/java/org/fcitx/fcitx5/android/debug/DebugSyncReceiver.kt
+@@ -0,0 +1,85 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.debug
++
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.os.Environment
++import kotlinx.coroutines.launch
++import org.fcitx.fcitx5.android.FcitxApplication
++import org.fcitx.fcitx5.android.daemon.FcitxDaemon
++import timber.log.Timber
++import java.io.File
++
++/**
++ * Debug-only hook used by the maintainer to verify native addon actions and
++ * shared-storage access over `adb shell am broadcast`.
++ *
++ *     adb shell am broadcast \
++ *       -a org.fcitx.fcitx5.android.debug.SYNC_TEST \
++ *       -n org.fcitx.fcitx5.android.debug/.DebugSyncReceiver
++ *
++ *     adb shell am broadcast \
++ *       -a org.fcitx.fcitx5.android.debug.WRITE_TEST \
++ *       -n org.fcitx.fcitx5.android.debug/.DebugSyncReceiver
++ */
++class DebugSyncReceiver : BroadcastReceiver() {
++
++    override fun onReceive(context: Context, intent: Intent) {
++        when (intent.action) {
++            ACTION_SYNC -> sync()
++            ACTION_WRITE -> writeTest()
++        }
++    }
++
++    private fun sync() {
++        val fcitx = FcitxDaemon.getFirstConnectionOrNull()
++        if (fcitx == null) {
++            Timber.w("DebugSyncReceiver: no fcitx connection")
++            return
++        }
++        FcitxApplication.getInstance().coroutineScope.launch {
++            fcitx.runOnReady {
++                // The Rime engine (and its `fcitx-rime-sync` action) is only
++                // created once an input context actually uses it.
++                Timber.i(
++                    "DebugSyncReceiver: addons=%s available=%s enabled=%s",
++                    addons().joinToString { "${it.uniqueName}:${it.enabled}" },
++                    availableIme().joinToString { it.uniqueName },
++                    enabledIme().joinToString { it.uniqueName }
++                )
++                setEnabledIme(arrayOf("rime"))
++                activate(android.os.Process.myUid(), "org.fcitx.fcitx5.android.debug")
++                runCatching { activateIme("rime") }
++                    .onFailure { Timber.w(it, "DebugSyncReceiver: activateIme failed") }
++                kotlinx.coroutines.delay(1000L)
++                val current = runCatching { currentIme().uniqueName }.getOrNull()
++                val ok = activateActionByName("fcitx-rime-sync")
++                Timber.i("DebugSyncReceiver: current=$current fcitx-rime-sync activated=$ok")
++            }
++        }
++    }
++
++    private fun writeTest() {
++        val target = File(
++            Environment.getExternalStorageDirectory(),
++            "Download/Rime-Sync/Android/_fcitx_write_test"
++        )
++        val result = runCatching {
++            target.parentFile?.mkdirs()
++            target.writeText("fcitx5 write test")
++            val read = target.readText()
++            target.delete()
++            read == "fcitx5 write test"
++        }
++        Timber.i("DebugSyncReceiver: shared-storage write test ok=${result.getOrNull()} err=${result.exceptionOrNull()}")
++    }
++
++    companion object {
++        const val ACTION_SYNC = "org.fcitx.fcitx5.android.debug.SYNC_TEST"
++        const val ACTION_WRITE = "org.fcitx.fcitx5.android.debug.WRITE_TEST"
++    }
++}
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index fcc089b6..d6934085 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -14,12 +14,35 @@
+     <uses-permission android:name="android.permission.VIBRATE" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+ 
+-    <!-- remove intent queries merged from library manifest (namely Android-Image-Cropper) -->
+-    <queries tools:node="removeAll" />
+-
++    <!--
++      Rime writes its sync directory directly with POSIX calls.  A directory
++      such as /sdcard/Download/Rime-Sync is only writable with "All files
++      access" on Android 11+.  The legacy permissions cover Android 10 and
++      below (see requestLegacyExternalStorage on <application>).
++    -->
++    <uses-permission
++        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
++        tools:ignore="ScopedStorage" />
++    <uses-permission
++        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
++        android:maxSdkVersion="29" />
++    <uses-permission
++        android:name="android.permission.READ_EXTERNAL_STORAGE"
++        android:maxSdkVersion="32" />
++
++    <!--
++      Keep only the queries we need.  The previous `tools:node="removeAll"`
++      element also removed the queries block below during manifest merging,
++      which made plugin discovery return an empty list.
++    -->
+     <queries>
++        <!--
++          Hard-coded release package name so that a `.debug` build can see
++          plugins installed from F-Droid / GitHub releases.  See also
++          DataManager.PLUGIN_INTENT.
++        -->
+         <intent>
+-            <action android:name="${applicationId}.plugin.MANIFEST" />
++            <action android:name="org.fcitx.fcitx5.android.plugin.MANIFEST" />
+         </intent>
+         <intent>
+             <action android:name="android.view.InputMethod" />
+@@ -43,6 +66,7 @@
+         android:fullBackupContent="@xml/full_backup_content"
+         android:icon="@mipmap/app_icon"
+         android:label="@string/app_name"
++        android:requestLegacyExternalStorage="true"
+         android:roundIcon="@mipmap/app_icon_round"
+         android:supportsRtl="true"
+         android:theme="@style/Theme.FcitxAppTheme"
+@@ -121,6 +145,18 @@
+             android:theme="@style/Theme.DialogTheme"
+             android:windowSoftInputMode="stateAlwaysVisible|adjustPan" />
+ 
++        <activity
++            android:name=".ui.files.FileManagerActivity"
++            android:exported="false"
++            android:label="@string/file_manager"
++            android:parentActivityName=".ui.main.MainActivity" />
++
++        <activity
++            android:name=".ui.files.FileEditorActivity"
++            android:exported="false"
++            android:parentActivityName=".ui.files.FileManagerActivity"
++            android:windowSoftInputMode="adjustResize" />
++
+         <service
+             android:name=".input.FcitxInputMethodService"
+             android:directBootAware="true"
+diff --git a/app/src/main/cpp/native-lib.cpp b/app/src/main/cpp/native-lib.cpp
+index 88c1c76e..5d30eca3 100644
+--- a/app/src/main/cpp/native-lib.cpp
++++ b/app/src/main/cpp/native-lib.cpp
+@@ -410,6 +410,16 @@ public:
+         action->activate(ic);
+     }
+ 
++    bool activateActionByName(const std::string &name) {
++        auto *ic = p_frontend->call<fcitx::IAndroidFrontend::activeInputContext>();
++        if (!ic) ic = p_instance->mostRecentInputContext();
++        if (!ic) return false;
++        auto *action = p_instance->userInterfaceManager().lookupAction(name);
++        if (!action) return false;
++        action->activate(ic);
++        return true;
++    }
++
+     std::vector<CandidateEntity> getCandidates(int offset, int limit) {
+         return p_frontend->call<fcitx::IAndroidFrontend::getCandidates>(offset, limit);
+     }
+@@ -1057,6 +1067,18 @@ Java_org_fcitx_fcitx5_android_core_Fcitx_activateUserInterfaceAction(JNIEnv *env
+     Fcitx::Instance().activateAction(static_cast<int>(id));
+ }
+ 
++extern "C"
++JNIEXPORT jboolean JNICALL
++Java_org_fcitx_fcitx5_android_core_Fcitx_activateActionByNameNative(JNIEnv *env, jclass clazz, jstring name) {
++    RETURN_VALUE_IF_NOT_RUNNING(false)
++    if (!name) return false;
++    const char *str = env->GetStringUTFChars(name, nullptr);
++    if (!str) return false;
++    bool ok = Fcitx::Instance().activateActionByName(str);
++    env->ReleaseStringUTFChars(name, str);
++    return ok;
++}
++
+ extern "C"
+ JNIEXPORT jobjectArray JNICALL
+ Java_org_fcitx_fcitx5_android_core_Fcitx_getFcitxCandidates(JNIEnv *env, jclass clazz, jint offset, jint limit) {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/core/Fcitx.kt b/app/src/main/java/org/fcitx/fcitx5/android/core/Fcitx.kt
+index 3a2aa0b4..9c21317c 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/core/Fcitx.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/core/Fcitx.kt
+@@ -20,6 +20,7 @@ import org.fcitx.fcitx5.android.data.clipboard.ClipboardManager
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.utils.ImmutableGraph
+ import org.fcitx.fcitx5.android.utils.Locales
++import org.fcitx.fcitx5.android.utils.RimeSyncUtils
+ import org.fcitx.fcitx5.android.utils.appContext
+ import org.fcitx.fcitx5.android.utils.toast
+ import timber.log.Timber
+@@ -178,6 +179,9 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
+     override suspend fun activateAction(id: Int) =
+         withFcitxContext { activateUserInterfaceAction(id) }
+ 
++    override suspend fun activateActionByName(name: String): Boolean =
++        withFcitxContext { activateActionByNameNative(name) }
++
+     override suspend fun getCandidates(offset: Int, limit: Int): Array<CandidateWord> =
+         withFcitxContext { getFcitxCandidates(offset, limit) ?: emptyArray() }
+ 
+@@ -365,6 +369,9 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
+         @JvmStatic
+         external fun activateUserInterfaceAction(id: Int)
+ 
++        @JvmStatic
++        external fun activateActionByNameNative(name: String): Boolean
++
+         @JvmStatic
+         external fun getFcitxCandidates(offset: Int, limit: Int): Array<CandidateWord>?
+ 
+@@ -422,6 +429,9 @@ class Fcitx(private val context: Context) : FcitxAPI, FcitxLifecycleOwner {
+ 
+     private val dispatcher = FcitxDispatcher(object : FcitxDispatcher.FcitxController {
+         override fun nativeStartup() {
++            // Drop a .temp.userdb left behind by a sync that failed or was killed,
++            // otherwise the next sync fails with "LOCK: already held by process".
++            RimeSyncUtils.cleanupStaleTempDatabase()
+             DataManager.sync()
+             val locale = Locales.fcitxLocale
+             val dataDir = DataManager.dataDir.absolutePath
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/core/FcitxAPI.kt b/app/src/main/java/org/fcitx/fcitx5/android/core/FcitxAPI.kt
+index 1df5cc30..dc75eb67 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/core/FcitxAPI.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/core/FcitxAPI.kt
+@@ -100,6 +100,12 @@ interface FcitxAPI {
+ 
+     suspend fun activateAction(id: Int)
+ 
++    /**
++     * Activate a named user-interface action, e.g. `fcitx-rime-sync`.
++     * Returns false when the action is not registered (addon disabled/missing).
++     */
++    suspend fun activateActionByName(name: String): Boolean
++
+     suspend fun getCandidates(offset: Int, limit: Int): Array<CandidateWord>
+ 
+     suspend fun getCandidateActions(idx: Int): Array<CandidateAction>
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/core/data/DataManager.kt b/app/src/main/java/org/fcitx/fcitx5/android/core/data/DataManager.kt
+index f134cc76..d8b63a26 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/core/data/DataManager.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/core/data/DataManager.kt
+@@ -34,7 +34,10 @@ object DataManager {
+         val failed: Map<String, PluginLoadFailed>
+     )
+ 
+-    const val PLUGIN_INTENT = "${BuildConfig.APPLICATION_ID}.plugin.MANIFEST"
++    // Use the release package name here so that a `.debug` build can load
++    // plugins installed from F-Droid / GitHub releases.  Plugin APKs advertise
++    // this action in their manifest (see plugin/*/src/main/AndroidManifest.xml).
++    const val PLUGIN_INTENT = "org.fcitx.fcitx5.android.plugin.MANIFEST"
+ 
+     private val lock = ReentrantLock()
+ 
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEditorActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEditorActivity.kt
+new file mode 100644
+index 00000000..26c6b6b5
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEditorActivity.kt
+@@ -0,0 +1,346 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.files
++
++import android.content.Intent
++import android.os.Bundle
++import android.view.Menu
++import android.view.MenuItem
++import android.view.ViewGroup
++import android.widget.Toast
++import androidx.activity.addCallback
++import androidx.activity.enableEdgeToEdge
++import androidx.appcompat.app.AlertDialog
++import androidx.appcompat.app.AppCompatActivity
++import androidx.core.view.ViewCompat
++import androidx.core.view.WindowInsetsCompat
++import androidx.core.view.updateLayoutParams
++import androidx.core.view.updatePadding
++import androidx.core.widget.doAfterTextChanged
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.databinding.ActivityFileEditorBinding
++import java.io.File
++import java.io.IOException
++
++/**
++ * Plain text editor for Rime/Fcitx5 configuration files.
++ *
++ * Files are small (the editor refuses anything above 2 MB), so IO is done
++ * synchronously on the main thread to keep the implementation simple.
++ */
++class FileEditorActivity : AppCompatActivity() {
++
++    private lateinit var binding: ActivityFileEditorBinding
++    private var file: File? = null
++    private var dirty = false
++    private var wrapEnabled = true
++    private var acceptingEdits = false
++    private var suppressTextWatcher = false
++    private var unsavedDialog: AlertDialog? = null
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        enableEdgeToEdge()
++
++        val path = savedInstanceState?.getString(KEY_PATH)
++            ?: intent.getStringExtra(EXTRA_PATH)
++        if (path.isNullOrBlank()) {
++            toast(R.string.file_editor_error_invalid_path)
++            finish()
++            return
++        }
++        val target = File(path)
++        if (!target.isFile) {
++            toast(R.string.file_editor_error_not_found)
++            finish()
++            return
++        }
++
++        binding = ActivityFileEditorBinding.inflate(layoutInflater)
++        // Same as the file manager: grow the fixed-height toolbar by the status
++        // bar inset, otherwise the title/subtitle are clipped at the bottom.
++        val toolbarHeight = binding.toolbar.minimumHeight.takeIf { it > 0 }
++            ?: binding.toolbar.layoutParams.height
++        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, windowInsets ->
++            val statusBars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
++            val navBars = windowInsets.getInsets(WindowInsetsCompat.Type.navigationBars())
++            val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
++            val cutout = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
++            binding.root.updateLayoutParams<ViewGroup.MarginLayoutParams> {
++                leftMargin = maxOf(navBars.left, cutout.left)
++                rightMargin = maxOf(navBars.right, cutout.right)
++            }
++            binding.toolbar.updateLayoutParams {
++                height = toolbarHeight + statusBars.top
++            }
++            binding.toolbar.updatePadding(top = statusBars.top)
++            binding.root.updatePadding(bottom = maxOf(navBars.bottom, ime.bottom))
++            windowInsets
++        }
++        setContentView(binding.root)
++
++        setSupportActionBar(binding.toolbar)
++        supportActionBar?.apply {
++            setDisplayHomeAsUpEnabled(true)
++            title = target.name
++            subtitle = target.parent
++        }
++        binding.toolbar.setNavigationOnClickListener {
++            onBackPressedDispatcher.onBackPressed()
++        }
++
++        wrapEnabled = savedInstanceState?.getBoolean(KEY_WRAP, true) ?: true
++        dirty = savedInstanceState?.getBoolean(KEY_DIRTY, false) ?: false
++
++        val content = readTextFile(target)
++        if (content == null) {
++            finish()
++            return
++        }
++        file = target
++
++        suppressTextWatcher = true
++        binding.editor.setText(content)
++        binding.editor.setSelection(0)
++        suppressTextWatcher = false
++        applyWrapMode()
++        updateStatus()
++
++        binding.editor.doAfterTextChanged {
++            if (acceptingEdits && !suppressTextWatcher) {
++                dirty = true
++            }
++            updateStatus()
++        }
++
++        onBackPressedDispatcher.addCallback(this) {
++            if (dirty) showUnsavedChangesDialog() else finish()
++        }
++    }
++
++    override fun onPostResume() {
++        super.onPostResume()
++        // View state (including the restored text) has been applied by now, so
++        // text changes from here on are real user edits.
++        acceptingEdits = true
++    }
++
++    override fun onSaveInstanceState(outState: Bundle) {
++        super.onSaveInstanceState(outState)
++        file?.let { outState.putString(KEY_PATH, it.absolutePath) }
++        outState.putBoolean(KEY_DIRTY, dirty)
++        outState.putBoolean(KEY_WRAP, wrapEnabled)
++    }
++
++    override fun onCreateOptionsMenu(menu: Menu): Boolean {
++        menu.add(Menu.NONE, MENU_SAVE, 0, R.string.file_editor_save)
++            .setIcon(R.drawable.ic_baseline_save_24)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
++        menu.add(Menu.NONE, MENU_RELOAD, 1, R.string.file_editor_reload)
++            .setIcon(R.drawable.ic_refresh_24)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        menu.add(Menu.NONE, MENU_WRAP, 2, R.string.file_editor_wrap)
++            .setCheckable(true)
++            .setChecked(wrapEnabled)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        return true
++    }
++
++    override fun onOptionsItemSelected(item: MenuItem): Boolean {
++        return when (item.itemId) {
++            android.R.id.home -> {
++                onBackPressedDispatcher.onBackPressed()
++                true
++            }
++
++            MENU_SAVE -> {
++                saveFile()
++                true
++            }
++
++            MENU_RELOAD -> {
++                reloadFile()
++                true
++            }
++
++            MENU_WRAP -> {
++                wrapEnabled = !wrapEnabled
++                item.isChecked = wrapEnabled
++                applyWrapMode()
++                true
++            }
++
++            else -> super.onOptionsItemSelected(item)
++        }
++    }
++
++    override fun onSupportNavigateUp(): Boolean {
++        onBackPressedDispatcher.onBackPressed()
++        return true
++    }
++
++    private fun applyWrapMode() {
++        // Let TextView wrap long lines instead of laying them out horizontally.
++        binding.editor.setHorizontallyScrolling(!wrapEnabled)
++    }
++
++    private fun readTextFile(target: File): String? {
++        if (target.length() > FileEntry.MAX_TEXT_FILE_SIZE) {
++            toast(R.string.file_editor_error_too_large)
++            return null
++        }
++        val bytes = try {
++            target.readBytes()
++        } catch (_: IOException) {
++            toast(R.string.file_editor_error_read)
++            return null
++        } catch (_: SecurityException) {
++            toast(R.string.file_editor_error_read)
++            return null
++        }
++        if (bytes.size > FileEntry.MAX_TEXT_FILE_SIZE) {
++            toast(R.string.file_editor_error_too_large)
++            return null
++        }
++        if (bytes.any { it == 0.toByte() }) {
++            toast(R.string.file_editor_error_binary)
++            return null
++        }
++        var content = String(bytes, Charsets.UTF_8)
++        if (content.startsWith("\uFEFF")) {
++            content = content.substring(1)
++        }
++        return content
++    }
++
++    private fun reloadFile() {
++        if (dirty) {
++            AlertDialog.Builder(this)
++                .setTitle(R.string.file_editor_unsaved_title)
++                .setMessage(R.string.file_editor_reload_message)
++                .setPositiveButton(R.string.file_editor_discard) { _, _ -> doReload() }
++                .setNegativeButton(R.string.file_editor_cancel, null)
++                .show()
++        } else {
++            doReload()
++        }
++    }
++
++    private fun doReload() {
++        val target = file ?: return
++        val content = readTextFile(target) ?: return
++        suppressTextWatcher = true
++        binding.editor.setText(content)
++        binding.editor.setSelection(0)
++        suppressTextWatcher = false
++        dirty = false
++        updateStatus()
++    }
++
++    /**
++     * Save [file] atomically where possible.
++     *
++     * The previous contents are copied to `<name>.bak` first. The new contents
++     * are written to a temporary file in the same directory and renamed over
++     * the original; if the rename fails, the file is written directly.
++     */
++    private fun saveFile(): Boolean {
++        val target = file ?: return false
++        val parent = target.parentFile
++        if (parent == null || !parent.isDirectory) {
++            toast(R.string.file_editor_error_save)
++            return false
++        }
++        if (target.exists() && !target.canWrite()) {
++            toast(R.string.file_editor_error_read_only)
++            return false
++        }
++
++        if (target.exists() && !target.name.endsWith(".bak", ignoreCase = true)) {
++            val backup = File(parent, "${target.name}.bak")
++            val backedUp = try {
++                target.copyTo(backup, overwrite = true)
++                true
++            } catch (_: IOException) {
++                false
++            } catch (_: SecurityException) {
++                false
++            }
++            if (!backedUp) {
++                toast(R.string.file_editor_error_backup)
++                return false
++            }
++        }
++
++        val content = binding.editor.text.toString()
++        val saved = try {
++            val temp = File.createTempFile("fcitx5_edit_", ".tmp", parent)
++            try {
++                temp.writeText(content, Charsets.UTF_8)
++                if (!temp.renameTo(target)) {
++                    target.writeText(content, Charsets.UTF_8)
++                }
++            } finally {
++                if (temp.exists()) temp.delete()
++            }
++            true
++        } catch (_: IOException) {
++            false
++        } catch (_: SecurityException) {
++            false
++        }
++
++        if (!saved) {
++            toast(R.string.file_editor_error_save)
++            return false
++        }
++        dirty = false
++        updateStatus()
++        toast(R.string.file_editor_saved)
++        return true
++    }
++
++    private fun showUnsavedChangesDialog() {
++        if (unsavedDialog?.isShowing == true) return
++        val dialog = AlertDialog.Builder(this)
++            .setTitle(R.string.file_editor_unsaved_title)
++            .setMessage(R.string.file_editor_unsaved_message)
++            .setPositiveButton(R.string.file_editor_save) { _, _ ->
++                if (saveFile()) finish()
++            }
++            .setNegativeButton(R.string.file_editor_discard) { _, _ -> finish() }
++            .setNeutralButton(R.string.file_editor_cancel, null)
++            .create()
++        dialog.setOnDismissListener { unsavedDialog = null }
++        unsavedDialog = dialog
++        dialog.show()
++    }
++
++    private fun updateStatus() {
++        val chars = binding.editor.length()
++        val messageRes = if (dirty) {
++            R.string.file_editor_status_modified
++        } else {
++            R.string.file_editor_status_chars
++        }
++        binding.status.text = getString(messageRes, chars)
++    }
++
++    private fun toast(messageRes: Int) {
++        Toast.makeText(this, messageRes, Toast.LENGTH_SHORT).show()
++    }
++
++    companion object {
++        const val EXTRA_PATH = "path"
++
++        private const val KEY_PATH = "state_path"
++        private const val KEY_DIRTY = "state_dirty"
++        private const val KEY_WRAP = "state_wrap"
++
++        private const val MENU_SAVE = 1
++        private const val MENU_RELOAD = 2
++        private const val MENU_WRAP = 3
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEntry.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEntry.kt
+new file mode 100644
+index 00000000..9fbdb42e
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileEntry.kt
+@@ -0,0 +1,109 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.files
++
++import java.io.File
++import java.io.IOException
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
++
++/**
++ * One row in the file manager list.
++ */
++data class FileEntry(
++    val name: String,
++    val file: File,
++    val isDirectory: Boolean,
++    val size: Long,
++    val lastModified: Long
++) {
++    val formattedSize: String
++        get() = if (isDirectory) "" else formatSize(size)
++
++    val formattedDate: String
++        get() = formatDate(lastModified)
++
++    val isHidden: Boolean
++        get() = name.startsWith(".")
++
++    companion object {
++        /** Files bigger than this are never opened in the text editor. */
++        const val MAX_TEXT_FILE_SIZE: Long = 2L * 1024L * 1024L
++
++        private val TEXT_EXTENSIONS = setOf(
++            "yaml", "yml", "txt", "json", "conf", "custom", "lua",
++            "dict", "schema", "md", "properties", "ini", "xml"
++        )
++
++        /**
++         * Human readable file size, e.g. `512 B`, `1.5 KB`, `12 MB`.
++         */
++        fun formatSize(bytes: Long): String {
++            if (bytes < 0L) return "—"
++            if (bytes < 1024L) return "$bytes B"
++
++            val units = arrayOf("KB", "MB", "GB", "TB")
++            var value = bytes.toDouble() / 1024.0
++            var unitIndex = 0
++            while (value >= 1024.0 && unitIndex < units.lastIndex) {
++                value /= 1024.0
++                unitIndex++
++            }
++            val pattern = if (value >= 100.0) "%.0f %s" else "%.1f %s"
++            return String.format(Locale.getDefault(), pattern, value, units[unitIndex])
++        }
++
++        /**
++         * Locale-aware modification time, e.g. `2026-10-25 12:30`.
++         */
++        fun formatDate(timestamp: Long): String {
++            if (timestamp <= 0L) return "—"
++            return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
++                .format(Date(timestamp))
++        }
++
++        /**
++         * Cheap check used to pick the icon in the list. It deliberately does not
++         * read the file, since the adapter may bind many rows.
++         */
++        fun hasTextExtension(name: String): Boolean {
++            val dot = name.lastIndexOf('.')
++            if (dot < 0 || dot == name.lastIndex) return false
++            return name.substring(dot + 1).lowercase(Locale.ROOT) in TEXT_EXTENSIONS
++        }
++
++        /**
++         * Full check used before opening a file in the editor: text extension,
++         * at most [MAX_TEXT_FILE_SIZE] bytes, and no NUL byte in the content.
++         */
++        fun isTextual(entry: FileEntry): Boolean =
++            !entry.isDirectory && isTextual(entry.file)
++
++        fun isTextual(file: File): Boolean {
++            if (!file.isFile) return false
++            if (!hasTextExtension(file.name)) return false
++            if (file.length() > MAX_TEXT_FILE_SIZE) return false
++
++            return try {
++                file.inputStream().use { input ->
++                    val buffer = ByteArray(8192)
++                    while (true) {
++                        val read = input.read(buffer)
++                        if (read <= 0) break
++                        for (i in 0 until read) {
++                            if (buffer[i] == 0.toByte()) return false
++                        }
++                    }
++                }
++                true
++            } catch (_: IOException) {
++                false
++            } catch (_: SecurityException) {
++                false
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileListAdapter.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileListAdapter.kt
+new file mode 100644
+index 00000000..d12847c6
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileListAdapter.kt
+@@ -0,0 +1,87 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.files
++
++import android.view.LayoutInflater
++import android.view.ViewGroup
++import androidx.recyclerview.widget.DiffUtil
++import androidx.recyclerview.widget.ListAdapter
++import androidx.recyclerview.widget.RecyclerView
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.databinding.ItemFileBinding
++
++/**
++ * Adapter for [FileEntry] rows. Sorting and filtering are done by the activity;
++ * this class only binds data and forwards clicks.
++ */
++class FileListAdapter(
++    private val onEntryClick: (FileEntry) -> Unit,
++    private val onEntryLongClick: (FileEntry) -> Unit
++) : ListAdapter<FileEntry, FileListAdapter.ViewHolder>(DiffCallback) {
++
++    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
++        val binding = ItemFileBinding.inflate(
++            LayoutInflater.from(parent.context), parent, false
++        )
++        return ViewHolder(binding)
++    }
++
++    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
++        holder.bind(getItem(position))
++    }
++
++    inner class ViewHolder(
++        val binding: ItemFileBinding
++    ) : RecyclerView.ViewHolder(binding.root) {
++
++        init {
++            binding.root.setOnClickListener {
++                val position = bindingAdapterPosition
++                if (position != RecyclerView.NO_POSITION) {
++                    onEntryClick(getItem(position))
++                }
++            }
++            binding.root.setOnLongClickListener {
++                val position = bindingAdapterPosition
++                if (position != RecyclerView.NO_POSITION) {
++                    onEntryLongClick(getItem(position))
++                    true
++                } else {
++                    false
++                }
++            }
++        }
++
++        fun bind(entry: FileEntry) {
++            val context = binding.root.context
++            binding.icon.setImageResource(
++                when {
++                    entry.isDirectory -> R.drawable.ic_folder_24
++                    FileEntry.hasTextExtension(entry.name) &&
++                        entry.size <= FileEntry.MAX_TEXT_FILE_SIZE -> R.drawable.ic_file_text_24
++                    else -> R.drawable.ic_file_24
++                }
++            )
++            binding.name.text = entry.name
++            binding.detail.text = if (entry.isDirectory) {
++                context.getString(R.string.file_manager_folder)
++            } else {
++                context.getString(
++                    R.string.file_manager_file_detail,
++                    entry.formattedSize,
++                    entry.formattedDate
++                )
++            }
++        }
++    }
++
++    private object DiffCallback : DiffUtil.ItemCallback<FileEntry>() {
++        override fun areItemsTheSame(oldItem: FileEntry, newItem: FileEntry): Boolean =
++            oldItem.file == newItem.file
++
++        override fun areContentsTheSame(oldItem: FileEntry, newItem: FileEntry): Boolean =
++            oldItem == newItem
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt
+new file mode 100644
+index 00000000..91cce229
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/FileManagerActivity.kt
+@@ -0,0 +1,723 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.files
++
++import android.content.ActivityNotFoundException
++import android.content.ClipData
++import android.content.ClipboardManager
++import android.content.Context
++import android.content.Intent
++import android.content.SharedPreferences
++import android.os.Build
++import android.os.Bundle
++import android.text.InputType
++import android.view.Menu
++import android.view.MenuItem
++import android.view.View
++import android.view.ViewGroup
++import android.view.WindowManager
++import android.widget.EditText
++import android.widget.Toast
++import androidx.activity.addCallback
++import androidx.activity.enableEdgeToEdge
++import androidx.appcompat.app.AlertDialog
++import androidx.appcompat.app.AppCompatActivity
++import androidx.core.content.ContextCompat
++import androidx.core.view.ViewCompat
++import androidx.core.view.WindowInsetsCompat
++import androidx.core.view.updateLayoutParams
++import androidx.core.view.updatePadding
++import androidx.recyclerview.widget.LinearLayoutManager
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.databinding.ActivityFileManagerBinding
++import java.io.File
++import java.io.IOException
++import java.util.Locale
++
++/**
++ * Minimal file browser used to edit Rime/Fcitx5 configuration files.
++ *
++ * The activity only browses inside one of two roots: the app-specific external
++ * files directory or shared storage (when "All files access" is granted).
++ */
++class FileManagerActivity : AppCompatActivity() {
++
++    private lateinit var binding: ActivityFileManagerBinding
++    private lateinit var adapter: FileListAdapter
++    private lateinit var preferences: SharedPreferences
++    private lateinit var appRoot: File
++    private lateinit var sharedRoot: File
++
++    private var rootType = RootType.APP
++    private var currentDir: File = File("/")
++    private var lastAppDir: File? = null
++    private var lastSharedDir: File? = null
++    private var showHidden = true
++
++    private val rootDir: File
++        get() = when (rootType) {
++            RootType.APP -> appRoot
++            RootType.SHARED -> sharedRoot
++        }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        enableEdgeToEdge()
++
++        binding = ActivityFileManagerBinding.inflate(layoutInflater)
++        // The toolbar has a fixed ?attr/actionBarSize height.  Adding the status
++        // bar inset as padding without growing the toolbar clips its title and
++        // navigation icon, so keep the original height and add the inset to it.
++        // minimumHeight is the resolved ?attr/actionBarSize; fall back to the
++        // layout height for safety.
++        val toolbarHeight = binding.toolbar.minimumHeight.takeIf { it > 0 }
++            ?: binding.toolbar.layoutParams.height
++        val recyclerBottomPadding = binding.recyclerView.paddingBottom
++        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, windowInsets ->
++            val statusBars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
++            val navBars = windowInsets.getInsets(WindowInsetsCompat.Type.navigationBars())
++            val cutout = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
++            binding.root.updateLayoutParams<ViewGroup.MarginLayoutParams> {
++                leftMargin = maxOf(navBars.left, cutout.left)
++                rightMargin = maxOf(navBars.right, cutout.right)
++            }
++            binding.toolbar.updateLayoutParams {
++                height = toolbarHeight + statusBars.top
++            }
++            binding.toolbar.updatePadding(top = statusBars.top)
++            binding.recyclerView.updatePadding(bottom = recyclerBottomPadding + navBars.bottom)
++            binding.emptyView.updateLayoutParams<ViewGroup.MarginLayoutParams> {
++                bottomMargin = navBars.bottom
++            }
++            windowInsets
++        }
++        setContentView(binding.root)
++
++        setSupportActionBar(binding.toolbar)
++        supportActionBar?.apply {
++            setDisplayHomeAsUpEnabled(true)
++            setHomeAsUpIndicator(R.drawable.ic_arrow_up_24)
++        }
++        binding.toolbar.overflowIcon =
++            ContextCompat.getDrawable(this, R.drawable.ic_more_vert_24)
++
++        preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
++        appRoot = StorageAccess.appFilesRoot(this)
++        sharedRoot = StorageAccess.sharedStorageRoot()
++
++        showHidden = savedInstanceState?.getBoolean(KEY_SHOW_HIDDEN, true) ?: true
++        restoreInitialState(savedInstanceState)
++        updateToolbar()
++
++        adapter = FileListAdapter(::onEntryClick, ::onEntryLongClick)
++        binding.recyclerView.layoutManager = LinearLayoutManager(this)
++        binding.recyclerView.adapter = adapter
++
++        onBackPressedDispatcher.addCallback(this) {
++            if (isAtRoot()) finish() else goUp()
++        }
++    }
++
++    override fun onResume() {
++        super.onResume()
++        // Also refreshes file sizes after returning from the editor and the
++        // "All files access" menu after returning from system settings.
++        invalidateOptionsMenu()
++        refresh()
++    }
++
++    override fun onPause() {
++        super.onPause()
++        saveLastPath()
++    }
++
++    override fun onSaveInstanceState(outState: Bundle) {
++        super.onSaveInstanceState(outState)
++        outState.putString(KEY_CURRENT_PATH, currentDir.absolutePath)
++        outState.putString(KEY_ROOT, rootType.name)
++        outState.putBoolean(KEY_SHOW_HIDDEN, showHidden)
++    }
++
++    override fun onCreateOptionsMenu(menu: Menu): Boolean {
++        menu.add(Menu.NONE, MENU_NEW_FILE, 0, R.string.file_manager_new_file)
++            .setIcon(R.drawable.ic_note_add_24)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        menu.add(Menu.NONE, MENU_NEW_FOLDER, 1, R.string.file_manager_new_folder)
++            .setIcon(R.drawable.ic_create_folder_24)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        menu.add(Menu.NONE, MENU_REFRESH, 2, R.string.file_manager_refresh)
++            .setIcon(R.drawable.ic_refresh_24)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        menu.add(Menu.NONE, MENU_SWITCH_ROOT, 3, R.string.file_manager_switch_root)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        menu.add(Menu.NONE, MENU_TOGGLE_HIDDEN, 4, R.string.file_manager_show_hidden)
++            .setCheckable(true)
++            .setChecked(showHidden)
++            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
++            !StorageAccess.hasAllFilesAccess(this)
++        ) {
++            menu.add(
++                Menu.NONE,
++                MENU_ALL_FILES_SETTINGS,
++                5,
++                R.string.file_manager_open_all_files_settings
++            ).setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
++        }
++        return true
++    }
++
++    override fun onOptionsItemSelected(item: MenuItem): Boolean {
++        return when (item.itemId) {
++            android.R.id.home -> {
++                if (isAtRoot()) finish() else goUp()
++                true
++            }
++
++            MENU_NEW_FILE -> {
++                showCreateEntryDialog(isDirectory = false)
++                true
++            }
++
++            MENU_NEW_FOLDER -> {
++                showCreateEntryDialog(isDirectory = true)
++                true
++            }
++
++            MENU_REFRESH -> {
++                refresh()
++                true
++            }
++
++            MENU_SWITCH_ROOT -> {
++                showSwitchRootDialog()
++                true
++            }
++
++            MENU_TOGGLE_HIDDEN -> {
++                showHidden = !showHidden
++                item.isChecked = showHidden
++                refresh()
++                true
++            }
++
++            MENU_ALL_FILES_SETTINGS -> {
++                openAllFilesSettings()
++                true
++            }
++
++            else -> super.onOptionsItemSelected(item)
++        }
++    }
++
++    private fun restoreInitialState(savedInstanceState: Bundle?) {
++        val restored = restoreFromState(savedInstanceState)
++        if (restored != null) {
++            applyInitialState(restored.first, restored.second)
++            return
++        }
++
++        val extraDir = intent.getStringExtra(EXTRA_START_PATH)?.let(::File)
++        if (extraDir != null && extraDir.isDirectory) {
++            val type = rootTypeFor(extraDir)
++            if (type != null) {
++                applyInitialState(type, extraDir)
++                return
++            }
++        }
++
++        val savedDir = preferences.getString(KEY_LAST_PATH, null)?.let(::File)
++        if (savedDir != null && savedDir.isDirectory && isInside(savedDir, appRoot)) {
++            applyInitialState(RootType.APP, savedDir)
++            return
++        }
++
++        applyInitialState(RootType.APP, StorageAccess.defaultStartDir(this))
++    }
++
++    private fun restoreFromState(savedInstanceState: Bundle?): Pair<RootType, File>? {
++        if (savedInstanceState == null) return null
++        val path = savedInstanceState.getString(KEY_CURRENT_PATH) ?: return null
++        val type = if (savedInstanceState.getString(KEY_ROOT) == RootType.SHARED.name) {
++            RootType.SHARED
++        } else {
++            RootType.APP
++        }
++        val dir = File(path)
++        val root = if (type == RootType.SHARED) sharedRoot else appRoot
++        if (!dir.isDirectory || !isInside(dir, root)) return null
++        if (type == RootType.SHARED && !StorageAccess.hasAllFilesAccess(this)) return null
++        return type to dir
++    }
++
++    private fun rootTypeFor(dir: File): RootType? {
++        return when {
++            isInside(dir, appRoot) -> RootType.APP
++            isInside(dir, sharedRoot) && StorageAccess.hasAllFilesAccess(this) -> RootType.SHARED
++            else -> null
++        }
++    }
++
++    private fun applyInitialState(type: RootType, dir: File) {
++        rootType = type
++        currentDir = dir
++        if (type == RootType.APP) {
++            lastAppDir = dir
++        } else {
++            lastSharedDir = dir
++        }
++    }
++
++    private fun refresh() {
++        val directory = currentDir
++        val entries: List<FileEntry> = if (!directory.isDirectory) {
++            toast(R.string.file_manager_error_list)
++            emptyList()
++        } else {
++            val files = try {
++                directory.listFiles()
++            } catch (_: SecurityException) {
++                null
++            }
++            if (files == null) {
++                toast(R.string.file_manager_error_list)
++                emptyList()
++            } else {
++                files.asSequence()
++                    .filter { showHidden || !it.name.startsWith(".") }
++                    .map { file ->
++                        FileEntry(
++                            name = file.name,
++                            file = file,
++                            isDirectory = file.isDirectory,
++                            size = if (file.isDirectory) 0L else file.length(),
++                            lastModified = file.lastModified()
++                        )
++                    }
++                    .sortedWith(
++                        compareBy<FileEntry> { if (it.isDirectory) 0 else 1 }
++                            .thenBy { it.name.lowercase(Locale.ROOT) }
++                    )
++                    .toList()
++            }
++        }
++
++        adapter.submitList(entries)
++        binding.emptyView.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
++        updatePath()
++        updateToolbar()
++    }
++
++    private fun updatePath() {
++        binding.path.text = try {
++            val rootPath = rootDir.canonicalPath
++            val currentPath = currentDir.canonicalPath
++            when {
++                currentPath == rootPath -> "/"
++                currentPath.startsWith(rootPath + File.separator) ->
++                    currentPath.removePrefix(rootPath)
++                else -> currentDir.absolutePath
++            }
++        } catch (_: IOException) {
++            currentDir.absolutePath
++        }
++    }
++
++    private fun updateToolbar() {
++        supportActionBar?.title = getString(R.string.file_manager_title)
++        supportActionBar?.subtitle = getString(
++            if (rootType == RootType.APP) {
++                R.string.file_manager_root_app
++            } else {
++                R.string.file_manager_root_shared
++            }
++        )
++    }
++
++    private fun onEntryClick(entry: FileEntry) {
++        if (entry.isDirectory) {
++            enterDirectory(entry.file)
++            return
++        }
++        if (FileEntry.isTextual(entry.file)) {
++            try {
++                startActivity(
++                    Intent(this, FileEditorActivity::class.java)
++                        .putExtra(FileEditorActivity.EXTRA_PATH, entry.file.absolutePath)
++                )
++            } catch (_: ActivityNotFoundException) {
++                toast(R.string.file_manager_error_open_file)
++            }
++        } else {
++            showFileInfoDialog(entry)
++        }
++    }
++
++    private fun onEntryLongClick(entry: FileEntry) {
++        val actions = arrayOf(
++            getString(R.string.file_manager_rename),
++            getString(R.string.file_manager_delete),
++            getString(R.string.file_manager_copy_path)
++        )
++        AlertDialog.Builder(this)
++            .setTitle(entry.name)
++            .setItems(actions) { _, which ->
++                when (which) {
++                    0 -> showRenameDialog(entry)
++                    1 -> confirmDelete(entry)
++                    2 -> copyPath(entry)
++                }
++            }
++            .setNegativeButton(R.string.file_manager_cancel, null)
++            .show()
++    }
++
++    private fun enterDirectory(dir: File) {
++        if (!dir.isDirectory) {
++            toast(R.string.file_manager_error_list)
++            refresh()
++            return
++        }
++        if (!isInside(dir, rootDir)) {
++            toast(R.string.file_manager_error_outside_root)
++            return
++        }
++        setCurrentDir(dir)
++    }
++
++    private fun goUp() {
++        val parent = currentDir.parentFile
++        if (isAtRoot() || parent == null || !isInside(parent, rootDir)) {
++            finish()
++            return
++        }
++        setCurrentDir(parent)
++    }
++
++    private fun setCurrentDir(dir: File) {
++        currentDir = dir
++        if (rootType == RootType.APP) {
++            lastAppDir = dir
++            saveLastPath()
++        } else {
++            lastSharedDir = dir
++        }
++        refresh()
++        binding.recyclerView.scrollToPosition(0)
++    }
++
++    private fun isAtRoot(): Boolean = runCatching {
++        currentDir.canonicalPath == rootDir.canonicalPath
++    }.getOrDefault(currentDir == rootDir)
++
++    private fun isInside(file: File, root: File): Boolean = runCatching {
++        val path = file.canonicalPath
++        val rootPath = root.canonicalPath.trimEnd(File.separatorChar)
++        path == rootPath || path.startsWith(rootPath + File.separator)
++    }.getOrDefault(false)
++
++    private fun saveLastPath() {
++        if (rootType != RootType.APP) return
++        preferences.edit().putString(KEY_LAST_PATH, currentDir.absolutePath).apply()
++    }
++
++    private fun showSwitchRootDialog() {
++        val labels = arrayOf(
++            getString(R.string.file_manager_root_app),
++            getString(R.string.file_manager_root_shared)
++        )
++        AlertDialog.Builder(this)
++            .setTitle(R.string.file_manager_switch_root)
++            .setItems(labels) { _, which ->
++                when (which) {
++                    0 -> switchRoot(RootType.APP)
++                    1 -> if (StorageAccess.hasAllFilesAccess(this)) {
++                        switchRoot(RootType.SHARED)
++                    } else {
++                        showAllFilesPermissionDialog()
++                    }
++                }
++            }
++            .setNegativeButton(R.string.file_manager_cancel, null)
++            .show()
++    }
++
++    private fun switchRoot(type: RootType) {
++        if (type == rootType) return
++        rootType = type
++        currentDir = when (type) {
++            RootType.APP -> lastAppDir
++                ?.takeIf { it.isDirectory && isInside(it, appRoot) }
++                ?: StorageAccess.defaultStartDir(this)
++
++            RootType.SHARED -> lastSharedDir
++                ?.takeIf { it.isDirectory && isInside(it, sharedRoot) }
++                ?: sharedRoot
++        }
++        if (type == RootType.APP) {
++            lastAppDir = currentDir
++            saveLastPath()
++        } else {
++            lastSharedDir = currentDir
++        }
++        updateToolbar()
++        refresh()
++        invalidateOptionsMenu()
++    }
++
++    private fun showAllFilesPermissionDialog() {
++        val settingsIntent = StorageAccess.allFilesAccessIntent(this)
++        val builder = AlertDialog.Builder(this)
++            .setTitle(R.string.file_manager_permission_title)
++            .setMessage(R.string.file_manager_permission_message)
++        if (settingsIntent != null) {
++            builder.setPositiveButton(R.string.file_manager_permission_open_settings) { _, _ ->
++                launchSettings(settingsIntent)
++            }
++            builder.setNegativeButton(R.string.file_manager_cancel, null)
++        } else {
++            builder.setPositiveButton(R.string.file_manager_ok, null)
++        }
++        builder.show()
++    }
++
++    private fun openAllFilesSettings() {
++        val settingsIntent = StorageAccess.allFilesAccessIntent(this)
++        if (settingsIntent == null) {
++            toast(R.string.file_manager_permission_unavailable)
++            return
++        }
++        launchSettings(settingsIntent)
++    }
++
++    private fun launchSettings(intent: Intent) {
++        try {
++            startActivity(intent)
++        } catch (_: ActivityNotFoundException) {
++            toast(R.string.file_manager_permission_unavailable)
++        } catch (_: SecurityException) {
++            toast(R.string.file_manager_permission_unavailable)
++        }
++    }
++
++    private fun showCreateEntryDialog(isDirectory: Boolean) {
++        val titleRes = if (isDirectory) {
++            R.string.file_manager_new_folder
++        } else {
++            R.string.file_manager_new_file
++        }
++        val hintRes = if (isDirectory) {
++            R.string.file_manager_new_folder_hint
++        } else {
++            R.string.file_manager_new_file_hint
++        }
++        showNameDialog(
++            titleRes = titleRes,
++            initialValue = "",
++            hintRes = hintRes,
++            validate = { name ->
++                validateEntryName(name) ?: if (File(currentDir, name).exists()) {
++                    R.string.file_manager_error_name_exists
++                } else {
++                    null
++                }
++            },
++            onConfirm = { name -> createEntry(name, isDirectory) }
++        )
++    }
++
++    private fun createEntry(name: String, isDirectory: Boolean): Boolean {
++        val target = File(currentDir, name)
++        val created = try {
++            if (isDirectory) target.mkdirs() else target.createNewFile()
++        } catch (_: IOException) {
++            false
++        } catch (_: SecurityException) {
++            false
++        }
++        if (!created) {
++            toast(
++                if (isDirectory) {
++                    R.string.file_manager_error_create_folder
++                } else {
++                    R.string.file_manager_error_create_file
++                }
++            )
++            return false
++        }
++        refresh()
++        return true
++    }
++
++    private fun showRenameDialog(entry: FileEntry) {
++        showNameDialog(
++            titleRes = R.string.file_manager_rename,
++            initialValue = entry.name,
++            hintRes = R.string.file_manager_rename_hint,
++            validate = { name ->
++                if (name == entry.name) {
++                    null
++                } else {
++                    validateEntryName(name) ?: if (
++                        File(entry.file.parentFile ?: currentDir, name).exists()
++                    ) {
++                        R.string.file_manager_error_name_exists
++                    } else {
++                        null
++                    }
++                }
++            },
++            onConfirm = { name -> renameEntry(entry, name) }
++        )
++    }
++
++    private fun renameEntry(entry: FileEntry, newName: String): Boolean {
++        if (newName == entry.name) return true
++        val target = File(entry.file.parentFile ?: currentDir, newName)
++        val renamed = try {
++            entry.file.renameTo(target)
++        } catch (_: SecurityException) {
++            false
++        }
++        if (!renamed) {
++            toast(R.string.file_manager_error_rename)
++            return false
++        }
++        refresh()
++        return true
++    }
++
++    private fun confirmDelete(entry: FileEntry) {
++        AlertDialog.Builder(this)
++            .setTitle(R.string.file_manager_delete)
++            .setMessage(getString(R.string.file_manager_delete_confirm, entry.name))
++            .setPositiveButton(R.string.file_manager_delete) { _, _ -> deleteEntry(entry) }
++            .setNegativeButton(R.string.file_manager_cancel, null)
++            .show()
++    }
++
++    private fun deleteEntry(entry: FileEntry) {
++        val deleted = try {
++            if (entry.isDirectory) {
++                entry.file.deleteRecursively()
++            } else {
++                entry.file.delete()
++            }
++        } catch (_: Exception) {
++            false
++        }
++        if (deleted) {
++            refresh()
++        } else {
++            toast(R.string.file_manager_error_delete)
++        }
++    }
++
++    private fun copyPath(entry: FileEntry) {
++        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
++        if (clipboard == null) {
++            toast(R.string.file_manager_error_copy_path)
++            return
++        }
++        clipboard.setPrimaryClip(
++            ClipData.newPlainText(
++                getString(R.string.file_manager_copy_path),
++                entry.file.absolutePath
++            )
++        )
++        toast(R.string.file_manager_path_copied)
++    }
++
++    private fun showFileInfoDialog(entry: FileEntry) {
++        AlertDialog.Builder(this)
++            .setTitle(R.string.file_manager_file_info_title)
++            .setMessage(
++                getString(
++                    R.string.file_manager_file_info_message,
++                    entry.name,
++                    entry.file.absolutePath,
++                    entry.formattedSize,
++                    entry.formattedDate
++                )
++            )
++            .setPositiveButton(R.string.file_manager_ok, null)
++            .show()
++    }
++
++    private fun validateEntryName(name: String): Int? {
++        if (name.isEmpty()) return R.string.file_manager_error_empty_name
++        if (name == "." || name == "..") return R.string.file_manager_error_invalid_name
++        if (name.contains('/') || name.contains('\u0000')) {
++            return R.string.file_manager_error_invalid_name
++        }
++        return null
++    }
++
++    private fun showNameDialog(
++        titleRes: Int,
++        initialValue: String,
++        hintRes: Int,
++        validate: (String) -> Int?,
++        onConfirm: (String) -> Boolean
++    ) {
++        val input = EditText(this).apply {
++            hint = getString(hintRes)
++            inputType = InputType.TYPE_CLASS_TEXT
++            setText(initialValue)
++            if (initialValue.isEmpty()) {
++                setSelection(0)
++            } else {
++                setSelection(0, text.length)
++            }
++        }
++        val dialog = AlertDialog.Builder(this)
++            .setTitle(titleRes)
++            .setView(input)
++            .setPositiveButton(R.string.file_manager_ok, null)
++            .setNegativeButton(R.string.file_manager_cancel, null)
++            .create()
++        dialog.setOnShowListener {
++            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
++                val name = input.text.toString().trim()
++                val errorRes = validate(name)
++                if (errorRes != null) {
++                    input.error = getString(errorRes)
++                    return@setOnClickListener
++                }
++                if (onConfirm(name)) {
++                    dialog.dismiss()
++                }
++            }
++            input.requestFocus()
++            dialog.window?.setSoftInputMode(
++                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
++            )
++        }
++        dialog.show()
++    }
++
++    private fun toast(messageRes: Int) {
++        Toast.makeText(this, messageRes, Toast.LENGTH_SHORT).show()
++    }
++
++    private enum class RootType { APP, SHARED }
++
++    companion object {
++        const val EXTRA_START_PATH = "start_path"
++
++        private const val PREFS_NAME = "file_manager"
++        private const val KEY_LAST_PATH = "last_path"
++        private const val KEY_CURRENT_PATH = "current_path"
++        private const val KEY_ROOT = "root"
++        private const val KEY_SHOW_HIDDEN = "show_hidden"
++
++        private const val MENU_NEW_FILE = 1
++        private const val MENU_NEW_FOLDER = 2
++        private const val MENU_REFRESH = 3
++        private const val MENU_SWITCH_ROOT = 4
++        private const val MENU_TOGGLE_HIDDEN = 5
++        private const val MENU_ALL_FILES_SETTINGS = 6
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/StorageAccess.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/StorageAccess.kt
+new file mode 100644
+index 00000000..6615b40d
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/StorageAccess.kt
+@@ -0,0 +1,71 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.files
++
++import android.Manifest
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Build
++import android.os.Environment
++import android.provider.Settings
++import java.io.File
++
++/**
++ * Small, dependency-free helpers describing where the file manager is allowed to
++ * browse. Kept separate from the UI so the entry point can reuse the same roots.
++ */
++object StorageAccess {
++
++    /**
++     * Whether the app currently holds the broad storage permission needed to
++     * browse all of shared storage.
++     */
++    fun hasAllFilesAccess(context: Context): Boolean {
++        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++            Environment.isExternalStorageManager()
++        } else {
++            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
++                PackageManager.PERMISSION_GRANTED
++        }
++    }
++
++    /**
++     * Intent that opens the system page for granting "All files access".
++     *
++     * Returns `null` on Android 10 and below, where the legacy runtime permission
++     * has to be requested by the caller instead.
++     */
++    fun allFilesAccessIntent(context: Context): Intent? {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
++
++        val appSpecific = Intent(
++            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
++            Uri.parse("package:${context.packageName}")
++        )
++        return if (context.packageManager.resolveActivity(appSpecific, 0) != null) {
++            appSpecific
++        } else {
++            // Some ROMs only implement the global settings page.
++            Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
++        }
++    }
++
++    /** Root of shared storage, usually `/storage/emulated/0`. */
++    fun sharedStorageRoot(): File = Environment.getExternalStorageDirectory()
++
++    /** App-specific external files directory, falling back to internal storage. */
++    fun appFilesRoot(context: Context): File =
++        context.getExternalFilesDir(null) ?: context.filesDir
++
++    /** Directory where Rime/Fcitx5 user data lives. */
++    fun rimeDataDir(context: Context): File =
++        File(appFilesRoot(context), "data/rime")
++
++    /** The most useful starting directory: Rime data if it exists, else app files. */
++    fun defaultStartDir(context: Context): File =
++        rimeDataDir(context).takeIf { it.isDirectory } ?: appFilesRoot(context)
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/files/StoragePermission.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/StoragePermission.kt
+new file mode 100644
+index 00000000..1353da81
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/files/StoragePermission.kt
+@@ -0,0 +1,116 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.files
++
++import android.Manifest
++import android.app.Activity
++import android.content.Context
++import android.content.Intent
++import android.net.Uri
++import android.os.Build
++import android.provider.Settings
++import androidx.appcompat.app.AlertDialog
++import androidx.core.app.ActivityCompat
++import org.fcitx.fcitx5.android.R
++
++/**
++ * Helpers for the "All files access" permission.
++ *
++ * Rime (librime) performs plain POSIX writes into the directory configured by
++ * `sync_dir` in `installation.yaml`.  When that directory lives in shared
++ * storage (for example `/sdcard/Download/Rime-Sync`) Android's scoped storage
++ * denies the write unless the app holds [Manifest.permission.MANAGE_EXTERNAL_STORAGE]
++ * (Android 11+) or the legacy write permission (Android 10 and below).
++ */
++object StoragePermission {
++
++    const val REQUEST_LEGACY_STORAGE = 0x5701
++
++    private const val PREFS = "storage_permission"
++    private const val KEY_PROMPTED = "prompted"
++
++    fun hasAccess(context: Context): Boolean = StorageAccess.hasAllFilesAccess(context)
++
++    fun wasPrompted(context: Context): Boolean =
++        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++            .getBoolean(KEY_PROMPTED, false)
++
++    fun markPrompted(context: Context) {
++        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++            .edit().putBoolean(KEY_PROMPTED, true).apply()
++    }
++
++    /**
++     * Open the system settings page where the user can grant "All files access".
++     * On Android 10 and below this requests the legacy storage permission instead.
++     */
++    fun request(activity: Activity) {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++            val appIntent = Intent(
++                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
++                Uri.parse("package:${activity.packageName}")
++            )
++            try {
++                activity.startActivity(appIntent)
++                return
++            } catch (_: Exception) {
++                // Some ROMs only implement the global page.
++            }
++            try {
++                activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
++            } catch (e: Exception) {
++                activity.toastError(e)
++            }
++        } else {
++            ActivityCompat.requestPermissions(
++                activity,
++                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
++                REQUEST_LEGACY_STORAGE
++            )
++        }
++    }
++
++    /**
++     * Explain why shared-storage access is needed and offer to open the settings page.
++     *
++     * @param onDismiss called when the dialog is dismissed without granting.
++     */
++    fun showDialog(
++        activity: Activity,
++        onDismiss: (() -> Unit)? = null
++    ) {
++        markPrompted(activity)
++        AlertDialog.Builder(activity)
++            .setIconAttribute(android.R.attr.alertDialogIcon)
++            .setTitle(R.string.storage_permission_title)
++            .setMessage(R.string.storage_permission_message)
++            .setPositiveButton(R.string.storage_permission_grant) { _, _ ->
++                request(activity)
++            }
++            .setNegativeButton(R.string.storage_permission_later) { _, _ -> }
++            .setOnDismissListener {
++                onDismiss?.invoke()
++            }
++            .show()
++    }
++
++    /**
++     * Show a short toast describing the current state after returning from settings.
++     */
++    fun toastState(context: Context) {
++        val msg = if (hasAccess(context)) {
++            R.string.storage_permission_granted
++        } else {
++            R.string.storage_permission_not_granted
++        }
++        android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
++    }
++
++    private fun Activity.toastError(e: Exception) {
++        android.widget.Toast.makeText(
++            this, e.message ?: e.javaClass.simpleName, android.widget.Toast.LENGTH_LONG
++        ).show()
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
+index b7a8ee1c..652f4ff3 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
+@@ -25,6 +25,7 @@ import org.fcitx.fcitx5.android.BuildConfig
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.databinding.ActivityMainBinding
++import org.fcitx.fcitx5.android.ui.files.StoragePermission
+ import org.fcitx.fcitx5.android.ui.main.settings.SettingsRoute
+ import org.fcitx.fcitx5.android.ui.setup.SetupActivity
+ import org.fcitx.fcitx5.android.utils.navigateWithAnim
+@@ -123,10 +124,14 @@ class MainActivity : AppCompatActivity() {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+             if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                 needNotifications = true
++                promptStoragePermission()
+                 return
+             }
+             // do not ask again if user denied the request
+-            if (!needNotifications) return
++            if (!needNotifications) {
++                promptStoragePermission()
++                return
++            }
+             // always show a dialog to explain why we need notification permission,
+             // regardless of `shouldShowRequestPermissionRationale(...)`
+             AlertDialog.Builder(this)
+@@ -136,14 +141,27 @@ class MainActivity : AppCompatActivity() {
+                 .setNegativeButton(R.string.i_do_not_need_it) { _, _ ->
+                     // do not ask again if user denied the request
+                     needNotifications = false
++                    promptStoragePermission()
+                 }
+                 .setPositiveButton(R.string.grant_permission) { _, _ ->
+                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+                 }
+                 .show()
++        } else {
++            promptStoragePermission()
+         }
+     }
+ 
++    /**
++     * Rime writes to its configured sync directory with plain POSIX calls.
++     * Ask for "All files access" once so syncing to e.g. Download/Rime-Sync works.
++     */
++    private fun promptStoragePermission() {
++        if (StoragePermission.hasAccess(this)) return
++        if (StoragePermission.wasPrompted(this)) return
++        StoragePermission.showDialog(this)
++    }
++
+     override fun onRequestPermissionsResult(
+         requestCode: Int,
+         permissions: Array<out String>,
+@@ -153,6 +171,7 @@ class MainActivity : AppCompatActivity() {
+         if (requestCode != 0) return
+         // do not ask again if user denied the request
+         needNotifications = grantResults.getOrNull(0) == PackageManager.PERMISSION_GRANTED
++        promptStoragePermission()
+     }
+ 
+     override fun onStop() {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt
+index f1273cb6..b29a5e71 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt
+@@ -18,12 +18,14 @@ import androidx.lifecycle.Lifecycle
+ import androidx.preference.PreferenceCategory
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.ui.common.PaddingPreferenceFragment
++import org.fcitx.fcitx5.android.ui.files.FileManagerActivity
+ import org.fcitx.fcitx5.android.ui.main.settings.SettingsRoute
+ import org.fcitx.fcitx5.android.utils.Const
+ import org.fcitx.fcitx5.android.utils.addCategory
+ import org.fcitx.fcitx5.android.utils.addPreference
+ import org.fcitx.fcitx5.android.utils.item
+ import org.fcitx.fcitx5.android.utils.navigateWithAnim
++import org.fcitx.fcitx5.android.utils.startActivity
+ 
+ class MainFragment : PaddingPreferenceFragment() {
+ 
+@@ -114,6 +116,13 @@ class MainFragment : PaddingPreferenceFragment() {
+                     R.drawable.ic_baseline_android_24,
+                     SettingsRoute.Plugin
+                 )
++                addPreference(
++                    R.string.file_manager,
++                    R.string.file_manager_summary,
++                    R.drawable.ic_folder_24
++                ) {
++                    startActivity<FileManagerActivity>()
++                }
+                 addDestinationPreference(
+                     R.string.advanced,
+                     R.drawable.ic_baseline_more_horiz_24,
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
+index 40d1da17..04103e83 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
+@@ -22,6 +22,7 @@ import org.fcitx.fcitx5.android.data.UserDataManager
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.data.prefs.ManagedPreferenceFragment
+ import org.fcitx.fcitx5.android.ui.common.withLoadingDialog
++import org.fcitx.fcitx5.android.ui.files.StoragePermission
+ import org.fcitx.fcitx5.android.ui.main.MainViewModel
+ import org.fcitx.fcitx5.android.utils.AppUtil
+ import org.fcitx.fcitx5.android.utils.addPreference
+@@ -98,6 +99,21 @@ class AdvancedSettingsFragment : ManagedPreferenceFragment(AppPrefs.getInstance(
+ 
+     override fun onPreferenceUiCreated(screen: PreferenceScreen) {
+         val ctx = requireContext()
++        screen.addPreference(
++            R.string.storage_permission_settings_title,
++            if (StoragePermission.hasAccess(ctx)) {
++                R.string.storage_permission_granted
++            } else {
++                R.string.storage_permission_not_granted
++            },
++            onClick = {
++                if (StoragePermission.hasAccess(ctx)) {
++                    StoragePermission.toastState(ctx)
++                } else {
++                    StoragePermission.showDialog(requireActivity())
++                }
++            }
++        )
+         screen.addPreference(
+             R.string.browse_user_data_dir,
+             onClick = {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeSyncUtils.kt b/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeSyncUtils.kt
+new file mode 100644
+index 00000000..4e1cf82c
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeSyncUtils.kt
+@@ -0,0 +1,43 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.utils
++
++import org.fcitx.fcitx5.android.FcitxApplication
++import timber.log.Timber
++import java.io.File
++
++/**
++ * Maintenance helpers for the Rime user data directory.
++ *
++ * librime uses a temporary LevelDB (`.temp.userdb`) while merging user
++ * dictionaries during `sync_user_data()`.  If the process is killed or a sync
++ * aborts (for example because the configured sync directory is not writable),
++ * the temporary database and its LOCK file can be left behind.  Every later
++ * sync in the same process then fails with:
++ *
++ *     Error opening db '.temp': IO error: lock .../.temp.userdb/LOCK: already held by process
++ *
++ * Deleting the temporary database before Fcitx starts is safe: it contains no
++ * user data, only intermediate merge state.
++ */
++object RimeSyncUtils {
++
++    fun rimeUserDataDir(): File =
++        File(FcitxApplication.getInstance().getExternalFilesDir(null) ?: FcitxApplication.getInstance().filesDir, "data/rime")
++
++    /**
++     * Remove a leftover `.temp.userdb` from an interrupted sync.  Must only be
++     * called when no sync is running (i.e. before the Fcitx core starts).
++     */
++    fun cleanupStaleTempDatabase() {
++        val temp = File(rimeUserDataDir(), ".temp.userdb")
++        if (!temp.exists()) return
++        if (temp.deleteRecursively()) {
++            Timber.w("Removed stale Rime sync database: ${temp.absolutePath}")
++        } else {
++            Timber.w("Failed to remove stale Rime sync database: ${temp.absolutePath}")
++        }
++    }
++}
+diff --git a/app/src/main/res/drawable/ic_arrow_up_24.xml b/app/src/main/res/drawable/ic_arrow_up_24.xml
+new file mode 100644
+index 00000000..5d1be784
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_arrow_up_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M4,12l1.41,1.41L11,7.83V20h2V7.83l5.58,5.59L20,12l-8,-8 -8,8z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_create_folder_24.xml b/app/src/main/res/drawable/ic_create_folder_24.xml
+new file mode 100644
+index 00000000..2b0e0032
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_create_folder_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M20,6h-8l-2,-2H4C2.9,4 2,4.9 2,6v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V8c0,-1.1 -0.9,-2 -2,-2zM19,14h-3v3h-2v-3h-3v-2h3V9h2v3h3v2z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_file_24.xml b/app/src/main/res/drawable/ic_file_24.xml
+new file mode 100644
+index 00000000..c838dbd0
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_file_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M14,2H6C4.9,2 4,2.9 4,4v16c0,1.1 0.9,2 2,2h12c1.1,0 2,-0.9 2,-2V8l-6,-6zM13,9V4l5,5h-5z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_file_text_24.xml b/app/src/main/res/drawable/ic_file_text_24.xml
+new file mode 100644
+index 00000000..6f45a0a4
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_file_text_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M14,2H6C4.9,2 4,2.9 4,4v16c0,1.1 0.9,2 2,2h12c1.1,0 2,-0.9 2,-2V8l-6,-6zM13,9V4l5,5h-5zM8,13h8v2H8v-2zM8,17h8v2H8v-2z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_folder_24.xml b/app/src/main/res/drawable/ic_folder_24.xml
+new file mode 100644
+index 00000000..cafb8a75
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_folder_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M10,4H4C2.9,4 2,4.9 2,6v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V8c0,-1.1 -0.9,-2 -2,-2h-8l-2,-2z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_more_vert_24.xml b/app/src/main/res/drawable/ic_more_vert_24.xml
+new file mode 100644
+index 00000000..b53661d3
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_more_vert_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M12,8c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM12,10c-1.1,0 -2,0.9 -2,2s0.9,2 2,2 2,-0.9 2,-2 -0.9,-2 -2,-2zM12,16c-1.1,0 -2,0.9 -2,2s0.9,2 2,2 2,-0.9 2,-2 -0.9,-2 -2,-2z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_note_add_24.xml b/app/src/main/res/drawable/ic_note_add_24.xml
+new file mode 100644
+index 00000000..a857917f
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_note_add_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M14,2H6C4.9,2 4,2.9 4,4v16c0,1.1 0.9,2 2,2h12c1.1,0 2,-0.9 2,-2V8l-6,-6zM13,9V4l5,5h-5zM12,18v-3H9v-2h3v-3h2v3h3v2h-3v3h-2z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_refresh_24.xml b/app/src/main/res/drawable/ic_refresh_24.xml
+new file mode 100644
+index 00000000..6c8bbc9f
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_refresh_24.xml
+@@ -0,0 +1,10 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M17.65,6.35C16.2,4.9 14.21,4 12,4c-4.42,0 -7.99,3.58 -8,8s3.58,8 8,8c3.73,0 6.84,-2.55 7.73,-6h-2.08c-0.82,2.33 -3.04,4 -5.65,4 -3.31,0 -6,-2.69 -6,-6s2.69,-6 6,-6c1.66,0 3.14,0.69 4.22,1.78L13,11h7V4l-2.35,2.35z" />
++</vector>
+diff --git a/app/src/main/res/layout/activity_file_editor.xml b/app/src/main/res/layout/activity_file_editor.xml
+new file mode 100644
+index 00000000..6aef9b3e
+--- /dev/null
++++ b/app/src/main/res/layout/activity_file_editor.xml
+@@ -0,0 +1,53 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:orientation="vertical"
++    tools:context=".ui.files.FileEditorActivity">
++
++    <androidx.appcompat.widget.Toolbar
++        android:id="@+id/toolbar"
++        android:layout_width="match_parent"
++        android:layout_height="?attr/actionBarSize"
++        android:background="?android:attr/colorPrimary"
++        android:elevation="4dp"
++        android:minHeight="?attr/actionBarSize"
++        app:titleTextColor="?android:attr/textColorPrimary" />
++
++    <androidx.core.widget.NestedScrollView
++        android:id="@+id/scrollView"
++        android:layout_width="match_parent"
++        android:layout_height="0dp"
++        android:layout_weight="1"
++        android:fillViewport="true">
++
++        <EditText
++            android:id="@+id/editor"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:background="@null"
++            android:fontFamily="monospace"
++            android:gravity="top|start"
++            android:importantForAutofill="no"
++            android:inputType="textMultiLine|textNoSuggestions"
++            android:lineSpacingMultiplier="1.1"
++            android:minHeight="320dp"
++            android:padding="12dp"
++            android:scrollbars="vertical"
++            android:textSize="13sp" />
++    </androidx.core.widget.NestedScrollView>
++
++    <TextView
++        android:id="@+id/status"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:background="?android:attr/colorBackground"
++        android:paddingStart="16dp"
++        android:paddingTop="6dp"
++        android:paddingEnd="16dp"
++        android:paddingBottom="6dp"
++        android:textAppearance="?android:attr/textAppearanceSmall"
++        tools:text="128 characters" />
++</LinearLayout>
+diff --git a/app/src/main/res/layout/activity_file_manager.xml b/app/src/main/res/layout/activity_file_manager.xml
+new file mode 100644
+index 00000000..8dea0f45
+--- /dev/null
++++ b/app/src/main/res/layout/activity_file_manager.xml
+@@ -0,0 +1,64 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:orientation="vertical"
++    tools:context=".ui.files.FileManagerActivity">
++
++    <androidx.appcompat.widget.Toolbar
++        android:id="@+id/toolbar"
++        android:layout_width="match_parent"
++        android:layout_height="?attr/actionBarSize"
++        android:background="?android:attr/colorPrimary"
++        android:elevation="4dp"
++        android:minHeight="?attr/actionBarSize"
++        app:titleTextColor="?android:attr/textColorPrimary" />
++
++    <TextView
++        android:id="@+id/path"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:background="?android:attr/colorBackground"
++        android:clickable="false"
++        android:ellipsize="start"
++        android:focusable="false"
++        android:maxLines="1"
++        android:paddingStart="16dp"
++        android:paddingTop="8dp"
++        android:paddingEnd="16dp"
++        android:paddingBottom="8dp"
++        android:textAppearance="?android:attr/textAppearanceSmall"
++        tools:text="/data/rime" />
++
++    <View
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:background="?android:attr/listDivider" />
++
++    <FrameLayout
++        android:layout_width="match_parent"
++        android:layout_height="0dp"
++        android:layout_weight="1">
++
++        <androidx.recyclerview.widget.RecyclerView
++            android:id="@+id/recyclerView"
++            android:layout_width="match_parent"
++            android:layout_height="match_parent"
++            android:clipToPadding="false"
++            android:paddingTop="4dp"
++            android:paddingBottom="4dp"
++            android:scrollbars="vertical" />
++
++        <TextView
++            android:id="@+id/emptyView"
++            android:layout_width="match_parent"
++            android:layout_height="match_parent"
++            android:gravity="center"
++            android:padding="24dp"
++            android:text="@string/file_manager_error_list"
++            android:textAppearance="?android:attr/textAppearanceMedium"
++            android:visibility="gone" />
++    </FrameLayout>
++</LinearLayout>
+diff --git a/app/src/main/res/layout/item_file.xml b/app/src/main/res/layout/item_file.xml
+new file mode 100644
+index 00000000..b113a872
+--- /dev/null
++++ b/app/src/main/res/layout/item_file.xml
+@@ -0,0 +1,48 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:background="?android:attr/selectableItemBackground"
++    android:gravity="center_vertical"
++    android:minHeight="56dp"
++    android:orientation="horizontal"
++    android:paddingStart="16dp"
++    android:paddingTop="8dp"
++    android:paddingEnd="16dp"
++    android:paddingBottom="8dp">
++
++    <ImageView
++        android:id="@+id/icon"
++        android:layout_width="24dp"
++        android:layout_height="24dp"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no"
++        tools:src="@drawable/ic_folder_24" />
++
++    <LinearLayout
++        android:layout_width="0dp"
++        android:layout_height="wrap_content"
++        android:layout_marginStart="16dp"
++        android:layout_weight="1"
++        android:orientation="vertical">
++
++        <TextView
++            android:id="@+id/name"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:ellipsize="middle"
++            android:maxLines="1"
++            android:textAppearance="?android:attr/textAppearanceMedium"
++            tools:text="installation.yaml" />
++
++        <TextView
++            android:id="@+id/detail"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:ellipsize="end"
++            android:maxLines="1"
++            android:textAppearance="?android:attr/textAppearanceSmall"
++            tools:text="267 B · 2026-10-25 12:34" />
++    </LinearLayout>
++</LinearLayout>
+diff --git a/app/src/main/res/values-zh-rCN/strings_files.xml b/app/src/main/res/values-zh-rCN/strings_files.xml
+new file mode 100644
+index 00000000..fcc8d330
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_files.xml
+@@ -0,0 +1,65 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="file_manager_title">配置文件</string>
++    <string name="file_manager_root_app">应用数据</string>
++    <string name="file_manager_root_shared">共享存储</string>
++    <string name="file_manager_folder">文件夹</string>
++    <string name="file_manager_file_detail">%1$s · %2$s</string>
++    <string name="file_manager_file_info_title">文件信息</string>
++    <string name="file_manager_file_info_message">名称：%1$s\n路径：%2$s\n大小：%3$s\n修改时间：%4$s</string>
++
++    <string name="file_manager_new_file">新建文件</string>
++    <string name="file_manager_new_folder">新建文件夹</string>
++    <string name="file_manager_new_file_hint">文件名</string>
++    <string name="file_manager_new_folder_hint">文件夹名</string>
++    <string name="file_manager_refresh">刷新</string>
++    <string name="file_manager_switch_root">切换根目录</string>
++    <string name="file_manager_show_hidden">显示隐藏文件</string>
++    <string name="file_manager_open_all_files_settings">所有文件访问权限设置</string>
++
++    <string name="file_manager_rename">重命名</string>
++    <string name="file_manager_rename_hint">新名称</string>
++    <string name="file_manager_delete">删除</string>
++    <string name="file_manager_delete_confirm">要删除“%1$s”吗？此操作不可撤销。</string>
++    <string name="file_manager_copy_path">复制路径</string>
++    <string name="file_manager_path_copied">路径已复制</string>
++    <string name="file_manager_ok">确定</string>
++    <string name="file_manager_cancel">取消</string>
++
++    <string name="file_manager_error_list">无法列出该目录</string>
++    <string name="file_manager_error_open_file">无法打开该文件</string>
++    <string name="file_manager_error_create_file">无法创建文件</string>
++    <string name="file_manager_error_create_folder">无法创建文件夹</string>
++    <string name="file_manager_error_rename">无法重命名</string>
++    <string name="file_manager_error_delete">无法删除</string>
++    <string name="file_manager_error_empty_name">名称不能为空</string>
++    <string name="file_manager_error_invalid_name">名称无效</string>
++    <string name="file_manager_error_name_exists">同名文件或文件夹已存在</string>
++    <string name="file_manager_error_outside_root">文件位于当前根目录之外</string>
++    <string name="file_manager_error_copy_path">无法复制路径</string>
++
++    <string name="file_manager_permission_title">所有文件访问权限</string>
++    <string name="file_manager_permission_message">要浏览共享存储（例如 Download/Rime-Sync），需要为 Fcitx5 授予“所有文件访问”权限。请在系统设置中开启。</string>
++    <string name="file_manager_permission_open_settings">打开设置</string>
++    <string name="file_manager_permission_unavailable">无法在此设备上打开存储权限设置</string>
++
++    <string name="file_editor_save">保存</string>
++    <string name="file_editor_reload">重新加载</string>
++    <string name="file_editor_wrap">自动换行</string>
++    <string name="file_editor_saved">已保存</string>
++    <string name="file_editor_status_chars">%1$d 个字符</string>
++    <string name="file_editor_status_modified">%1$d 个字符 · 未保存</string>
++    <string name="file_editor_unsaved_title">未保存的修改</string>
++    <string name="file_editor_unsaved_message">离开前要保存修改吗？</string>
++    <string name="file_editor_reload_message">放弃未保存的修改并从磁盘重新加载？</string>
++    <string name="file_editor_discard">放弃</string>
++    <string name="file_editor_cancel">取消</string>
++    <string name="file_editor_error_invalid_path">文件路径无效</string>
++    <string name="file_editor_error_not_found">文件不存在</string>
++    <string name="file_editor_error_read">无法读取文件</string>
++    <string name="file_editor_error_too_large">文件过大，无法编辑</string>
++    <string name="file_editor_error_binary">这似乎不是文本文件</string>
++    <string name="file_editor_error_save">无法保存文件</string>
++    <string name="file_editor_error_read_only">文件只读</string>
++    <string name="file_editor_error_backup">无法创建 .bak 备份，已取消保存</string>
++</resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings_storage.xml b/app/src/main/res/values-zh-rCN/strings_storage.xml
+new file mode 100644
+index 00000000..8fc7124d
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_storage.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="storage_permission_title">Rime 同步所需的存储权限</string>
++    <string name="storage_permission_message">Rime 会直接写入 installation.yaml 中 sync_dir 指定的目录（例如 Download/Rime-Sync）来备份配置和合并词库。Android 11 及以上系统默认禁止应用写入共享存储中的其他目录，除非授予 Fcitx5「所有文件访问」权限。\n\n授予后，内置文件管理器也能编辑共享存储中的配置文件。</string>
++    <string name="storage_permission_grant">去授权</string>
++    <string name="storage_permission_later">稍后</string>
++    <string name="storage_permission_granted">已授予所有文件访问权限</string>
++    <string name="storage_permission_not_granted">尚未授予所有文件访问权限——同步到共享存储会失败</string>
++    <string name="storage_permission_settings_title">所有文件访问权限</string>
++    <string name="file_manager">文件管理器</string>
++    <string name="file_manager_summary">浏览并编辑 Rime / Fcitx5 配置文件</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_files.xml b/app/src/main/res/values/strings_files.xml
+new file mode 100644
+index 00000000..78db0c91
+--- /dev/null
++++ b/app/src/main/res/values/strings_files.xml
+@@ -0,0 +1,65 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="file_manager_title">Config files</string>
++    <string name="file_manager_root_app">App data</string>
++    <string name="file_manager_root_shared">Shared storage</string>
++    <string name="file_manager_folder">Folder</string>
++    <string name="file_manager_file_detail">%1$s · %2$s</string>
++    <string name="file_manager_file_info_title">File information</string>
++    <string name="file_manager_file_info_message">Name: %1$s\nPath: %2$s\nSize: %3$s\nModified: %4$s</string>
++
++    <string name="file_manager_new_file">New file</string>
++    <string name="file_manager_new_folder">New folder</string>
++    <string name="file_manager_new_file_hint">File name</string>
++    <string name="file_manager_new_folder_hint">Folder name</string>
++    <string name="file_manager_refresh">Refresh</string>
++    <string name="file_manager_switch_root">Switch root</string>
++    <string name="file_manager_show_hidden">Show hidden files</string>
++    <string name="file_manager_open_all_files_settings">All files access settings</string>
++
++    <string name="file_manager_rename">Rename</string>
++    <string name="file_manager_rename_hint">New name</string>
++    <string name="file_manager_delete">Delete</string>
++    <string name="file_manager_delete_confirm">Delete “%1$s”? This cannot be undone.</string>
++    <string name="file_manager_copy_path">Copy path</string>
++    <string name="file_manager_path_copied">Path copied</string>
++    <string name="file_manager_ok">OK</string>
++    <string name="file_manager_cancel">Cancel</string>
++
++    <string name="file_manager_error_list">Cannot list this directory</string>
++    <string name="file_manager_error_open_file">Cannot open this file</string>
++    <string name="file_manager_error_create_file">Cannot create the file</string>
++    <string name="file_manager_error_create_folder">Cannot create the folder</string>
++    <string name="file_manager_error_rename">Cannot rename this item</string>
++    <string name="file_manager_error_delete">Cannot delete this item</string>
++    <string name="file_manager_error_empty_name">Name cannot be empty</string>
++    <string name="file_manager_error_invalid_name">Invalid name</string>
++    <string name="file_manager_error_name_exists">An item with this name already exists</string>
++    <string name="file_manager_error_outside_root">The file is outside the current root</string>
++    <string name="file_manager_error_copy_path">Cannot copy the path</string>
++
++    <string name="file_manager_permission_title">All files access</string>
++    <string name="file_manager_permission_message">To browse shared storage (for example Download/Rime-Sync), Fcitx5 needs the “All files access” permission. Open the system settings and grant it to Fcitx5.</string>
++    <string name="file_manager_permission_open_settings">Open settings</string>
++    <string name="file_manager_permission_unavailable">Cannot open the storage settings on this device</string>
++
++    <string name="file_editor_save">Save</string>
++    <string name="file_editor_reload">Reload</string>
++    <string name="file_editor_wrap">Wrap lines</string>
++    <string name="file_editor_saved">Saved</string>
++    <string name="file_editor_status_chars">%1$d characters</string>
++    <string name="file_editor_status_modified">%1$d characters · unsaved changes</string>
++    <string name="file_editor_unsaved_title">Unsaved changes</string>
++    <string name="file_editor_unsaved_message">Save the changes before leaving?</string>
++    <string name="file_editor_reload_message">Discard the unsaved changes and reload the file from disk?</string>
++    <string name="file_editor_discard">Discard</string>
++    <string name="file_editor_cancel">Cancel</string>
++    <string name="file_editor_error_invalid_path">Invalid file path</string>
++    <string name="file_editor_error_not_found">File not found</string>
++    <string name="file_editor_error_read">Cannot read the file</string>
++    <string name="file_editor_error_too_large">The file is too large to edit</string>
++    <string name="file_editor_error_binary">This does not look like a text file</string>
++    <string name="file_editor_error_save">Cannot save the file</string>
++    <string name="file_editor_error_read_only">The file is read-only</string>
++    <string name="file_editor_error_backup">Cannot create the .bak backup, save aborted</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_storage.xml b/app/src/main/res/values/strings_storage.xml
+new file mode 100644
+index 00000000..ac67d3b2
+--- /dev/null
++++ b/app/src/main/res/values/strings_storage.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="storage_permission_title">Storage access for Rime sync</string>
++    <string name="storage_permission_message">Rime writes its synced dictionaries and configuration backup directly to the directory set by sync_dir in installation.yaml (for example Download/Rime-Sync). Android 11 and later block such writes unless Fcitx5 is granted “All files access”.\n\nThe same permission also lets the built-in file manager edit configuration files in shared storage.</string>
++    <string name="storage_permission_grant">Open settings</string>
++    <string name="storage_permission_later">Later</string>
++    <string name="storage_permission_granted">All files access granted</string>
++    <string name="storage_permission_not_granted">All files access not granted — Rime sync to shared storage will fail</string>
++    <string name="storage_permission_settings_title">All files access</string>
++    <string name="file_manager">File manager</string>
++    <string name="file_manager_summary">Browse and edit Rime/Fcitx5 configuration files</string>
++</resources>

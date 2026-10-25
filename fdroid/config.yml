@@ -1,7 +1,7 @@
 repo_url: https://software.sparkzh.top/repo
 repo_name: Patchwork
 repo_description: |
-  Personal patchwork builds of ScreenTime and RecurringExpenseTracker.
+  Personal patchwork builds of ScreenTime, RecurringExpenseTracker and Fcitx5 for Android.
 keystore: keystore.jks
 repo_keyalias: patchwork
 keystorepass: patchwork123

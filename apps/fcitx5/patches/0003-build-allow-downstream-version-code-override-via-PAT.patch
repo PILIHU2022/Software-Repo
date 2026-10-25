@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 25 Oct 2026 15:49:00 +0800
+Subject: [PATCH] build: allow downstream version-code override via
+ PATCHWORK_REVISION
+
+Patchwork rebuilds cannot edit build-logic at build time, and versionCode is
+computed in Versions.calculateVersionCode() rather than declared in a Gradle
+file. Honour an optional PATCHWORK_REVISION environment variable there:
+versionCode becomes <upstream per-ABI code> * 100 + revision (0..99), which is
+strictly greater than the upstream build it derives from and still far below
+the next upstream release (baseVersionCode + 1 adds 1000). Unset, the build is
+bit-for-bit the upstream behaviour.
+
+versionName needs no patch: BUILD_VERSION_NAME (or -PbuildVersionName) is
+already honoured upstream.
+---
+ .../convention/src/main/kotlin/Versions.kt    | 29 ++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/build-logic/convention/src/main/kotlin/Versions.kt b/build-logic/convention/src/main/kotlin/Versions.kt
+index 51ae91d3..ced5bddc 100644
+--- a/build-logic/convention/src/main/kotlin/Versions.kt
++++ b/build-logic/convention/src/main/kotlin/Versions.kt
+@@ -23,6 +23,32 @@ object Versions {
+     val supportedABIs = setOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+     const val fallbackABI = "arm64-v8a"
+ 
++    /**
++     * Optional downstream (patchwork) release revision.
++     *
++     * When the `PATCHWORK_REVISION` environment variable is set to an integer in
++     * `0..99`, [calculateVersionCode] returns
++     * `<upstream per-ABI version code> * 100 + PATCHWORK_REVISION` instead of the
++     * plain upstream code. That keeps patch-only rebuilds installable as updates
++     * of the upstream release while never catching up with the next upstream
++     * version (upstream increments [baseVersionCode] by one, i.e. by 1000).
++     *
++     * Unset (the default) keeps upstream's exact version code, so official and
++     * F-Droid builds are unaffected.
++     */
++    private val patchworkRevision: Int? by lazy {
++        val raw = System.getenv("PATCHWORK_REVISION")?.trim()
++        if (raw.isNullOrEmpty()) {
++            null
++        } else {
++            val revision = raw.toIntOrNull()
++            require(revision != null && revision in 0..99) {
++                "PATCHWORK_REVISION must be an integer in 0..99, got '$raw'"
++            }
++            revision
++        }
++    }
++
+     fun calculateVersionCode(abi: String = fallbackABI): Int {
+         val abiId = when (abi) {
+             "armeabi-v7a" -> 1
+@@ -31,6 +57,7 @@ object Versions {
+             "x86_64" -> 4
+             else -> 0
+         }
+-        return baseVersionCode * 10 + abiId
++        val upstream = baseVersionCode * 10 + abiId
++        return patchworkRevision?.let { upstream * 100 + it } ?: upstream
+     }
+ }
