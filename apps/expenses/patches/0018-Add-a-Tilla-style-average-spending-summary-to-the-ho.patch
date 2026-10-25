@@ -1,0 +1,447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 25 Oct 2026 09:07:22 +0800
+Subject: [PATCH] Add a Tilla-style average spending summary to the home screen
+
+Pin a full-width summary card to the bottom of the home screen, using the dark #1C222F / light #E5ECFA colours sampled from Tilla 2.8.1 over adb. The card has 8 dp top corners only, shows the total monthly spend of active subscriptions converted to week/month/year, and cycles the period on tap while persisting the existing average-expenses preference.
+---
+ .../values-zh-rCN/strings.xml                 |   4 +
+ .../composeResources/values/strings.xml       |   4 +
+ .../expensetracker/shared/ui/MainContent.kt   |  22 +++
+ .../shared/ui/TillaExpenseCard.kt             |  73 --------
+ .../shared/ui/home/HomeSpendingSummary.kt     | 173 ++++++++++++++++++
+ .../viewmodel/RecurringExpenseViewModel.kt    |  17 +-
+ .../ui/home/HomeSpendingSummaryMathTest.kt    |  20 ++
+ 7 files changed, 239 insertions(+), 74 deletions(-)
+ create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummary.kt
+ create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummaryMathTest.kt
+
+diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+index b9bce35..c48079b 100644
+--- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
++++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
+@@ -118,7 +118,11 @@
+ 
+     <!-- Tilla style home & service icons -->
+     <string name="home_summary_total">总支出</string>
++    <string name="home_summary_average">平均支出</string>
+     <string name="home_summary_per_month">每月</string>
++    <string name="home_summary_per_week">每周</string>
++    <string name="home_summary_per_year">每年</string>
++    <string name="home_summary_switch_period">切换平均支出周期</string>
+         <plurals name="home_card_days">
+         <item quantity="one">%1$d 天</item>
+         <item quantity="other">%1$d 天</item>
+diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
+index afb583f..77c3eaf 100644
+--- a/shared/src/commonMain/composeResources/values/strings.xml
++++ b/shared/src/commonMain/composeResources/values/strings.xml
+@@ -213,7 +213,11 @@
+ 
+     <!-- Tilla style home & service icons -->
+     <string name="home_summary_total">Total expenses</string>
++    <string name="home_summary_average">Average expenses</string>
+     <string name="home_summary_per_month">per month</string>
++    <string name="home_summary_per_week">per week</string>
++    <string name="home_summary_per_year">per year</string>
++    <string name="home_summary_switch_period">Switch average expenses period</string>
+         <plurals name="home_card_days">
+         <item quantity="one">%1$d DAY</item>
+         <item quantity="other">%1$d DAYS</item>
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+index 4b9bff1..79fb56c 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
+@@ -55,12 +55,16 @@ import de.dbauer.expensetracker.shared.data.UpcomingPane
+ import de.dbauer.expensetracker.shared.data.WhatsNew
+ import de.dbauer.expensetracker.shared.data.isInRoute
+ import de.dbauer.expensetracker.shared.model.database.IExpenseRepository
++import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
++import de.dbauer.expensetracker.shared.model.getSystemCurrencyCode
+ import de.dbauer.expensetracker.shared.ui.analytics.AnalyticsScreen
+ import de.dbauer.expensetracker.shared.ui.archive.ArchiveScreen
+ import de.dbauer.expensetracker.shared.ui.calendar.CalendarScreen
+ import de.dbauer.expensetracker.shared.ui.editexpense.EditRecurringExpenseScreen
+ import de.dbauer.expensetracker.shared.ui.home.HomeSearchField
++import de.dbauer.expensetracker.shared.ui.home.HomeSpendingSummary
+ import de.dbauer.expensetracker.shared.ui.home.TillaHomeTopBar
++import de.dbauer.expensetracker.shared.ui.home.nextAverageExpensePeriod
+ import de.dbauer.expensetracker.shared.ui.settings.SettingsScreen
+ import de.dbauer.expensetracker.shared.ui.tags.TagsScreen
+ import de.dbauer.expensetracker.shared.ui.theme.ExpenseTrackerThemePreview
+@@ -105,6 +109,7 @@ fun MainContent(
+     onDeferredStartRouteApplied: () -> Unit = {},
+     mainNavigationViewModel: MainNavigationViewModel = koinViewModel<MainNavigationViewModel>(),
+     whatsNew: IWhatsNew = koinInject<IWhatsNew>(),
++    userPreferencesRepository: IUserPreferencesRepository = koinInject(),
+ ) {
+     val navController = rememberNavController()
+     val backStackEntry by navController.currentBackStackEntryAsState()
+@@ -114,6 +119,9 @@ fun MainContent(
+     val selectedFilter by homeViewModel.selectedFilter.collectAsState()
+     val sortMode by homeViewModel.selectedSortMode.collectAsState()
+     val sortReverse by homeViewModel.sortReverse.collectAsState()
++    val averageExpensesPeriod by homeViewModel.averageExpensesPeriod.collectAsState()
++    val defaultCurrency by userPreferencesRepository.defaultCurrency.collectAsState()
++    val currencyCode = defaultCurrency.ifBlank { getSystemCurrencyCode() }
+ 
+     var isSearchActive by rememberSaveable { mutableStateOf(false) }
+ 
+@@ -155,6 +163,20 @@ fun MainContent(
+     Scaffold(
+         modifier = modifier,
+         containerColor = MaterialTheme.colorScheme.background,
++        bottomBar = {
++            if (isHome && homeViewModel.hasExpenses) {
++                HomeSpendingSummary(
++                    monthlyExpense = homeViewModel.monthlyExpense,
++                    period = averageExpensesPeriod,
++                    currencyCode = currencyCode,
++                    onClick = {
++                        homeViewModel.onAverageExpensesPeriodSelected(
++                            nextAverageExpensePeriod(averageExpensesPeriod),
++                        )
++                    },
++                )
++            }
++        },
+         topBar = {
+             when {
+                 isHome && isSearchActive -> {
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+index 4bbb4da..9c8d04c 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxWidth
+-import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.shape.CircleShape
+@@ -54,10 +53,6 @@ import recurringexpensetracker.shared.generated.resources.home_card_next_payment
+ import recurringexpensetracker.shared.generated.resources.home_card_today
+ import recurringexpensetracker.shared.generated.resources.home_card_tomorrow
+ import recurringexpensetracker.shared.generated.resources.home_card_years
+-import recurringexpensetracker.shared.generated.resources.home_summary_per_month
+-import recurringexpensetracker.shared.generated.resources.home_summary_total
+-import recurringexpensetracker.shared.generated.resources.home_summary_weekly
+-import recurringexpensetracker.shared.generated.resources.home_summary_yearly
+ import recurringexpensetracker.shared.generated.resources.home_suspended_badge
+ 
+ internal val TillaCardShape = RoundedCornerShape(20.dp)
+@@ -483,71 +478,3 @@ private fun rememberLabelText(remaining: Remaining): String {
+         }
+     return remember(label) { label.uppercase() }
+ }
+-
+-@Composable
+-fun TillaExpenseSummary(
+-    monthlyExpense: String,
+-    weeklyExpense: String,
+-    yearlyExpense: String,
+-    modifier: Modifier = Modifier,
+-) {
+-    Surface(
+-        modifier = modifier.fillMaxWidth(),
+-        shape = RoundedCornerShape(24.dp),
+-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+-    ) {
+-        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+-            Row(verticalAlignment = Alignment.CenterVertically) {
+-                Column(modifier = Modifier.weight(1f)) {
+-                    Text(
+-                        text = stringResource(Res.string.home_summary_total),
+-                        style = MaterialTheme.typography.titleMedium,
+-                        fontWeight = FontWeight.SemiBold,
+-                    )
+-                    Text(
+-                        text = stringResource(Res.string.home_summary_per_month),
+-                        style = MaterialTheme.typography.bodySmall,
+-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                        modifier = Modifier.padding(top = 2.dp),
+-                    )
+-                }
+-                Text(
+-                    text = monthlyExpense,
+-                    style = MaterialTheme.typography.headlineSmall,
+-                    fontWeight = FontWeight.Bold,
+-                )
+-            }
+-            Spacer(modifier = Modifier.height(10.dp))
+-            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+-                SummaryMiniValue(
+-                    label = stringResource(Res.string.home_summary_weekly),
+-                    value = weeklyExpense,
+-                )
+-                SummaryMiniValue(
+-                    label = stringResource(Res.string.home_summary_yearly),
+-                    value = yearlyExpense,
+-                )
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun SummaryMiniValue(
+-    label: String,
+-    value: String,
+-) {
+-    Row(verticalAlignment = Alignment.CenterVertically) {
+-        Text(
+-            text = label,
+-            style = MaterialTheme.typography.bodySmall,
+-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+-        )
+-        Text(
+-            text = value,
+-            style = MaterialTheme.typography.bodyMedium,
+-            fontWeight = FontWeight.Medium,
+-            modifier = Modifier.padding(start = 6.dp),
+-        )
+-    }
+-}
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummary.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummary.kt
+new file mode 100644
+index 0000000..819117d
+--- /dev/null
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummary.kt
+@@ -0,0 +1,173 @@
++package de.dbauer.expensetracker.shared.ui.home
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.WindowInsets
++import androidx.compose.foundation.layout.asPaddingValues
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.navigationBars
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.luminance
++import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import de.dbauer.expensetracker.shared.toCurrencyString
++import org.jetbrains.compose.resources.stringResource
++import recurringexpensetracker.shared.generated.resources.Res
++import recurringexpensetracker.shared.generated.resources.home_summary_average
++import recurringexpensetracker.shared.generated.resources.home_summary_per_month
++import recurringexpensetracker.shared.generated.resources.home_summary_per_week
++import recurringexpensetracker.shared.generated.resources.home_summary_per_year
++import recurringexpensetracker.shared.generated.resources.home_summary_switch_period
++
++/**
++ * Colours sampled over adb from Tilla 2.8.1's home "Average expenses" card.
++ *
++ * Dark: 1080x2414 screenshot, card pixel (540, 2200) = #1C222F, page #0F131C.
++ * Light: same card with Tilla dark mode disabled, pixel (540, 2200) = #E5ECFA.
++ *
++ * The card only rounds its top corners (24 px = 8 dp on the 480 dpi device) and
++ * runs edge to edge at the bottom of the home screen, exactly like Tilla.
++ */
++private val SummaryCardDark = Color(0xFF1C222F)
++private val SummaryTitleDark = Color(0xFFDFE2EF)
++private val SummaryPeriodDark = Color(0xFFC2C6D6)
++private val SummaryCardLight = Color(0xFFE5ECFA)
++private val SummaryTitleLight = Color(0xFF181B25)
++private val SummaryPeriodLight = Color(0xFF424754)
++
++private val SummaryShape =
++    RoundedCornerShape(
++        topStart = 8.dp,
++        topEnd = 8.dp,
++        bottomStart = 0.dp,
++        bottomEnd = 0.dp,
++    )
++
++/**
++ * The Tilla-style payment summary pinned to the bottom of the home screen.
++ *
++ * Tapping the card cycles the average-expenses period week -> month -> year.
++ * The amount is the total monthly spend of all active subscriptions converted
++ * to the selected period (52 weeks / 12 months / 1 year).
++ */
++@Composable
++fun HomeSpendingSummary(
++    monthlyExpense: Float,
++    period: Int,
++    currencyCode: String,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
++    val cardColor = if (isDark) SummaryCardDark else SummaryCardLight
++    val titleColor = if (isDark) SummaryTitleDark else SummaryTitleLight
++    val periodColor = if (isDark) SummaryPeriodDark else SummaryPeriodLight
++
++    // Tilla draws behind the transparent gesture bar, which keeps the card 80 dp tall.
++    // With a taller (three-button) navigation bar, lift the text above the buttons.
++    val navigationBarBottom =
++        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
++    val contentBottomPadding = if (navigationBarBottom > 32.dp) navigationBarBottom else 16.dp
++
++    val periodLabel =
++        stringResource(
++            when (period) {
++                0 -> Res.string.home_summary_per_week
++                2 -> Res.string.home_summary_per_year
++                else -> Res.string.home_summary_per_month
++            },
++        )
++    val switchPeriodLabel = stringResource(Res.string.home_summary_switch_period)
++    val amount =
++        "≈ " +
++            averageExpenseForPeriod(monthlyExpense, period).toCurrencyString(currencyCode)
++
++    Box(
++        modifier =
++            modifier
++                .fillMaxWidth()
++                .clip(SummaryShape)
++                .background(cardColor)
++                .clickable(
++                    role = Role.Button,
++                    onClickLabel = switchPeriodLabel,
++                    onClick = onClick,
++                ),
++    ) {
++        Row(
++            modifier =
++                Modifier
++                    .fillMaxWidth()
++                    .padding(
++                        start = 16.dp,
++                        top = 16.dp,
++                        end = 16.dp,
++                        bottom = contentBottomPadding,
++                    ),
++            horizontalArrangement = Arrangement.spacedBy(12.dp),
++            verticalAlignment = Alignment.CenterVertically,
++        ) {
++            Column(modifier = Modifier.weight(1f)) {
++                Text(
++                    text = stringResource(Res.string.home_summary_average),
++                    color = titleColor,
++                    fontSize = 16.sp,
++                    lineHeight = 24.sp,
++                    fontWeight = FontWeight.SemiBold,
++                )
++                Text(
++                    text = periodLabel,
++                    color = periodColor,
++                    fontSize = 14.sp,
++                    lineHeight = 24.sp,
++                )
++            }
++            Text(
++                text = amount,
++                color = titleColor,
++                fontSize = 22.sp,
++                fontWeight = FontWeight.SemiBold,
++                maxLines = 1,
++                softWrap = false,
++                overflow = TextOverflow.Ellipsis,
++            )
++        }
++    }
++}
++
++/**
++ * Converts the total monthly spend into the average for [period]:
++ * 0 = week (12 months / 52 weeks), 1 = month (unchanged), 2 = year.
++ */
++internal fun averageExpenseForPeriod(
++    monthlyExpense: Float,
++    period: Int,
++): Float =
++    when (period) {
++        0 -> monthlyExpense * 12f / 52f
++        2 -> monthlyExpense * 12f
++        else -> monthlyExpense
++    }
++
++/** Tilla cycles its summary month -> year -> week; the setting uses 0/1/2. */
++internal fun nextAverageExpensePeriod(period: Int): Int =
++    when (period) {
++        0 -> 1
++        1 -> 2
++        else -> 0
++    }
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/RecurringExpenseViewModel.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/RecurringExpenseViewModel.kt
+index 405e334..da0ee01 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/RecurringExpenseViewModel.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/RecurringExpenseViewModel.kt
+@@ -47,9 +47,18 @@ class RecurringExpenseViewModel(
+     var currencyPrefix by mutableStateOf("")
+         private set
+     private var weeklyExpense by mutableFloatStateOf(0f)
+-    private var monthlyExpense by mutableFloatStateOf(0f)
++
++    /** Total monthly spend of all active subscriptions, used by the home summary card. */
++    var monthlyExpense by mutableFloatStateOf(0f)
++        private set
+     private var yearlyExpense by mutableFloatStateOf(0f)
+ 
++    /** Whether any (non-archived) subscription exists, regardless of the active filter. */
++    val hasExpenses: Boolean
++        get() = recurringExpenseData.isNotEmpty()
++
++    val averageExpensesPeriod = userPreferencesRepository.averageExpensesPeriod
++
+     var searchQuery by mutableStateOf("")
+         private set
+ 
+@@ -123,6 +132,12 @@ class RecurringExpenseViewModel(
+         }
+     }
+ 
++    fun onAverageExpensesPeriodSelected(period: Int) {
++        viewModelScope.launch {
++            userPreferencesRepository.averageExpensesPeriod.save(period)
++        }
++    }
++
+     private suspend fun onDatabaseUpdated(recurringExpenses: List<RecurringExpenseData>) {
+         recurringExpenseData.clear()
+         val defaultCurrency = getDefaultCurrencyCode()
+diff --git a/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummaryMathTest.kt b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummaryMathTest.kt
+new file mode 100644
+index 0000000..fad97f2
+--- /dev/null
++++ b/shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummaryMathTest.kt
+@@ -0,0 +1,20 @@
++package de.dbauer.expensetracker.shared.ui.home
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class HomeSpendingSummaryMathTest {
++    @Test
++    fun convertsMonthlyTotalToWeekAndYear() {
++        assertEquals(12f * 12f / 52f, averageExpenseForPeriod(12f, 0), 0.0001f)
++        assertEquals(12f, averageExpenseForPeriod(12f, 1), 0.0001f)
++        assertEquals(144f, averageExpenseForPeriod(12f, 2), 0.0001f)
++    }
++
++    @Test
++    fun cyclesWeekToMonthToYearLikeTilla() {
++        assertEquals(1, nextAverageExpensePeriod(0))
++        assertEquals(2, nextAverageExpensePeriod(1))
++        assertEquals(0, nextAverageExpensePeriod(2))
++    }
++}
