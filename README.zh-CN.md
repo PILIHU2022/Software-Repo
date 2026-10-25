@@ -34,7 +34,7 @@ issue，而不是继续发布过期代码。
 | 应用 | 上游（分支） | 上游提交 | 补丁数 | 构建版本 |
 | --- | --- | --- | --- | --- |
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `82ef9c9` | 18 | `0.21.4-patchwork` (6805) |
-| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1303） |
+| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1303，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 3 | `0.1.3-patchwork`（11201，arm64-v8a） |
 
 **ScreenTime** —— 每日使用记录持久化到本地 SQLite 数据库，新增基于该历史的分析页
