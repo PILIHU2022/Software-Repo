@@ -1,18 +1,21 @@
 name: Watchdog
 
-# Keeps the upstream watcher alive.
+# Keeps one `Upstream watch` window per 12 hours.
 #
-# `Upstream watch` is deliberately one long-lived job (~5h45m): GitHub delays
-# frequent `schedule` entries on this repository by hours, so a short polling
-# workflow would leave multi-hour blind spots. The price is that a long job can
-# be reclaimed by the hosted-runner infrastructure mid-flight. That is exactly
-# what happened on 2026-10-28 (run #11): the job was killed after 4h50m with
-# "The hosted runner lost communication with the server" and, because the watch
-# only restarts on its own 6-hourly cron, the watch chain stayed dead for hours.
+# `Upstream watch` opens a one-hour polling window every 12 hours. Two things
+# can leave a hole: a delayed `schedule` (GitHub treats crons as best-effort and
+# a 2-4 hour slip was measured on this repository) and a job reclaimed by the
+# hosted-runner infrastructure mid-flight (run #11, 2026-10-28, lost
+# communication with the server after 4h50m). This workflow is the cheap hourly
+# safety net:
 #
-# This workflow is the cheap safety net: once an hour it checks whether a watch
-# run is still queued or running and, when none is, dispatches a fresh one. It
-# builds and publishes nothing; `build.yml` remains the only builder.
+#   - a watch run is queued or running         -> nothing to do
+#   - the last window started < 12h ago and    -> nothing to do
+#     ran for a full window
+#   - otherwise (schedule slipped, or the      -> dispatch a fresh window
+#     previous window died early)
+#
+# It builds and publishes nothing; `build.yml` remains the only builder.
 
 on:
   schedule:
@@ -33,7 +36,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Restart the watcher when none is running
+      - name: Restart the watcher when a window is missing
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -46,19 +49,34 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28"
           )
           retry=(--retry 3 --retry-all-errors --retry-delay 5)
+          window_hours="${WATCH_WINDOW_HOURS:-12}"
 
           runs="$(curl -fsS "${retry[@]}" "${auth[@]}" "$api/runs?per_page=30")"
           # queued / in_progress / waiting / requested all count as alive.
           alive="$(jq -r '[.workflow_runs[] | select(.status != "completed")] | length' <<<"$runs")"
-          last="$(jq -r '.workflow_runs[0] | "#\(.run_number) \(.status) \(.conclusion // "-") created \(.created_at)"' <<<"$runs")"
+          last="$(jq -r '.workflow_runs[0] // empty | "#\(.run_number) \(.status) \(.conclusion // "-") created \(.created_at)"' <<<"$runs")"
+          echo "Newest watch run: ${last:-none}"
 
-          echo "Newest watch run: $last"
           if (( alive > 0 )); then
             echo "::notice::Upstream watch is alive ($alive active run(s)); nothing to do."
             exit 0
           fi
 
-          echo "No queued or running watch run; dispatching a fresh one."
+          if [[ -n "$last" ]]; then
+            created="$(jq -r '.workflow_runs[0].created_at' <<<"$runs")"
+            updated="$(jq -r '.workflow_runs[0].updated_at // .workflow_runs[0].created_at' <<<"$runs")"
+            age=$(( $(date -u +%s) - $(date -u -d "$created" +%s) ))
+            lasted=$(( $(date -u -d "$updated" +%s) - $(date -u -d "$created" +%s) ))
+            echo "Previous window: started ${age}s ago and lasted ${lasted}s."
+            # A healthy window runs ~58 minutes; under 45 means it was cut short.
+            # The 10-minute slack absorbs schedule jitter around the 12h mark.
+            if (( age < window_hours * 3600 - 600 && lasted >= 2700 )); then
+              echo "::notice::Next window is due in $(( window_hours * 3600 - age ))s; nothing to do."
+              exit 0
+            fi
+          fi
+
+          echo "No usable watch window in the last ${window_hours}h; dispatching a fresh one."
           if curl -fsS "${retry[@]}" -X POST "${auth[@]}" \
               -H "Content-Type: application/json" \
               -d '{"ref":"main"}' \

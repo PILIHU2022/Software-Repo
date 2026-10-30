@@ -128,12 +128,13 @@ changes the patch queues under `apps/*/patches/` is an ordinary `apps/**` push: 
 `versionCode` as described below.
 
 `upstream-watch.yml` complements that schedule: GitHub delays `*/15` on this
-repository by hours, so the watcher keeps one long-lived job (5h45m) that polls
-each upstream branch every 15 minutes and dispatches `build.yml` as soon as an
-upstream SHA changes. `watchdog.yml` guards the watcher itself: hourly it checks
-whether a watch run is still queued or running and dispatches a fresh one when
-there is none, so a hosted runner reclaimed mid-job (seen once on 2026-10-28)
-costs minutes instead of the rest of the six-hour window.
+repository by hours, so the watcher opens a one-hour polling window every 12
+hours (`7 */12 * * *`) that checks every upstream branch every 15 minutes and
+dispatches `build.yml` as soon as an upstream SHA changes. A window never
+outlives 60 minutes. `watchdog.yml` guards the windows: hourly it checks that
+one is queued or running and, when the previous window started more than 12
+hours ago or died early (a hosted runner can be reclaimed mid-job, as on
+2026-10-28), dispatches a fresh one.
 
 Builds are per app: a push rebuilds only the apps whose `apps/<app>/**` paths
 changed (a `scripts/**` or workflow change rebuilds all three; an unknown/forced
