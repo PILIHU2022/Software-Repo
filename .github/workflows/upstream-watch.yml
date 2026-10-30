@@ -8,6 +8,11 @@ name: Upstream watch
 #
 # It does not build anything itself; build.yml stays the single place that
 # patches and publishes.
+#
+# A 5h45m job can be reclaimed by the hosted-runner infrastructure mid-flight
+# ("The hosted runner lost communication with the server", run #11 on
+# 2026-10-28). watchdog.yml is the hourly safety net that dispatches a fresh
+# watch run when none is queued or running; this cron stays the slow path.
 
 on:
   schedule:

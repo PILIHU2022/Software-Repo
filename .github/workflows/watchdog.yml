@@ -1,0 +1,70 @@
+name: Watchdog
+
+# Keeps the upstream watcher alive.
+#
+# `Upstream watch` is deliberately one long-lived job (~5h45m): GitHub delays
+# frequent `schedule` entries on this repository by hours, so a short polling
+# workflow would leave multi-hour blind spots. The price is that a long job can
+# be reclaimed by the hosted-runner infrastructure mid-flight. That is exactly
+# what happened on 2026-10-28 (run #11): the job was killed after 4h50m with
+# "The hosted runner lost communication with the server" and, because the watch
+# only restarts on its own 6-hourly cron, the watch chain stayed dead for hours.
+#
+# This workflow is the cheap safety net: once an hour it checks whether a watch
+# run is still queued or running and, when none is, dispatches a fresh one. It
+# builds and publishes nothing; `build.yml` remains the only builder.
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: upstream-watchdog
+  cancel-in-progress: false
+
+jobs:
+  ensure-watch:
+    name: Ensure the watcher is running
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Restart the watcher when none is running
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$REPO/actions/workflows/upstream-watch.yml"
+          auth=(
+            -H "Authorization: Bearer $GH_TOKEN"
+            -H "Accept: application/vnd.github+json"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+          )
+          retry=(--retry 3 --retry-all-errors --retry-delay 5)
+
+          runs="$(curl -fsS "${retry[@]}" "${auth[@]}" "$api/runs?per_page=30")"
+          # queued / in_progress / waiting / requested all count as alive.
+          alive="$(jq -r '[.workflow_runs[] | select(.status != "completed")] | length' <<<"$runs")"
+          last="$(jq -r '.workflow_runs[0] | "#\(.run_number) \(.status) \(.conclusion // "-") created \(.created_at)"' <<<"$runs")"
+
+          echo "Newest watch run: $last"
+          if (( alive > 0 )); then
+            echo "::notice::Upstream watch is alive ($alive active run(s)); nothing to do."
+            exit 0
+          fi
+
+          echo "No queued or running watch run; dispatching a fresh one."
+          if curl -fsS "${retry[@]}" -X POST "${auth[@]}" \
+              -H "Content-Type: application/json" \
+              -d '{"ref":"main"}' \
+              "$api/dispatches"; then
+            echo "::notice::Started a fresh Upstream watch run."
+          else
+            echo "::error::Could not dispatch Upstream watch (does the job still have actions: write?)"
+            exit 1
+          fi

@@ -127,6 +127,14 @@ changes the patch queues under `apps/*/patches/` is an ordinary `apps/**` push: 
 (no need to wait for the schedule) and the patch-queue commit bumps
 `versionCode` as described below.
 
+`upstream-watch.yml` complements that schedule: GitHub delays `*/15` on this
+repository by hours, so the watcher keeps one long-lived job (5h45m) that polls
+each upstream branch every 15 minutes and dispatches `build.yml` as soon as an
+upstream SHA changes. `watchdog.yml` guards the watcher itself: hourly it checks
+whether a watch run is still queued or running and dispatches a fresh one when
+there is none, so a hosted runner reclaimed mid-job (seen once on 2026-10-28)
+costs minutes instead of the rest of the six-hour window.
+
 Builds are per app: a push rebuilds only the apps whose `apps/<app>/**` paths
 changed (a `scripts/**` or workflow change rebuilds all three; an unknown/forced
 push falls back to all three). Scheduled runs rebuild only the apps whose
@@ -221,7 +229,7 @@ with the arm64 build.
 │   └── .build-state.json
 ├── signing/patchwork-test.jks # deliberately public test key
 ├── docs/design/               # calendar spec, Expenses architecture
-└── .github/workflows/{build,deploy-pages}.yml
+└── .github/workflows/{build,deploy-pages,upstream-watch,watchdog}.yml
 ```
 
 ## Build locally

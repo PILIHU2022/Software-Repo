@@ -110,6 +110,12 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 改动 `apps/*/patches/` 的补丁提交本身就是一次 `apps/**` 推送：**会立即触发构建**
 （无需等定时运行），并按下文的版本号规则自动 +1。
 
+`upstream-watch.yml` 补足这个定时：GitHub 在本仓库上会把 `*/15` 的调度拖后数小时，
+因此 watcher 用一个 5h45m 的长任务每 15 分钟轮询一次上游分支，发现 SHA 变化就立刻
+派发 `build.yml`。`watchdog.yml` 守的是 watcher 本身：每小时检查是否还有排队或在
+跑的 watch 运行，没有就派发一个新的；这样托管 runner 在任务中途被回收（2026-10-28
+出现过一次）时，损失是几分钟，而不是剩下的整个 6 小时窗口。
+
 构建按 app 分开：推送只重建 `apps/<app>/**` 有改动的那个 app（`scripts/**` 或
 工作流改动会重建全部三个；无法确定 before 的强制推送回退为全部三个）。定时运行只
 重建上游 SHA 变化的 app。手动触发可用 `app` 输入只构建一个 app，或用 `app=all` +
@@ -196,7 +202,7 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 │   └── .build-state.json
 ├── signing/patchwork-test.jks # 故意公开的测试签名密钥
 ├── docs/design/               # 日历规格、Expenses 架构图谱
-└── .github/workflows/{build,deploy-pages}.yml
+└── .github/workflows/{build,deploy-pages,upstream-watch,watchdog}.yml
 ```
 
 ## 本地构建
