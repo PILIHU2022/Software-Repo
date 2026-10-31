@@ -1,0 +1,354 @@
+From 3798787cc78a2dc91261afab3bad95cd0b7a3743 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 31 Oct 2026 23:09:56 +0800
+Subject: [PATCH] feat(app): apply Syncthing-staged Rime profile from the app
+
+Android blocks other apps from writing the app-private Rime data dir, so
+Syncthing can only stage configs in Download/Rime-Sync/Rime-Arch. Add a
+bridge that copies that folder into data/rime, drops librime's build/
+cache, and restarts Fcitx so Rime redeploys:
+
+* RimeProfileSync compares contents first and does nothing when the staged
+  profile is unchanged, avoiding needless 2M-entry rebuilds.
+* RimeImportReceiver (exported, READ_INPUT_STATE) allows adb/scripts to
+  trigger the apply.
+* Advanced settings gets 'Apply Syncthing Rime profile' plus en/zh strings.
+* Release builds stay debuggable so run-as can inspect or recover the Rime
+  dir when a deployment goes wrong.
+---
+ app/build.gradle.kts                          |   4 +
+ app/src/main/AndroidManifest.xml              |  14 ++
+ .../android/receiver/RimeImportReceiver.kt    |  51 +++++++
+ .../behavior/AdvancedSettingsFragment.kt      |  22 +++
+ .../fcitx5/android/utils/RimeProfileSync.kt   | 131 ++++++++++++++++++
+ app/src/main/res/values-zh-rCN/strings.xml    |   5 +
+ app/src/main/res/values-zh-rTW/strings.xml    |   5 +
+ app/src/main/res/values/strings.xml           |   5 +
+ 8 files changed, 237 insertions(+)
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 53f1eb8c..d63b6d2f 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -40,6 +40,10 @@ android {
+ 
+     buildTypes {
+         release {
++            // Patchwork builds keep the release signature but stay debuggable so
++            // `adb shell run-as org.fcitx.fcitx5.android` can inspect the Rime
++            // data dir and recover a bad deployment without reinstalling.
++            isDebuggable = true
+             resValue("mipmap", "app_icon", "@mipmap/ic_launcher")
+             resValue("mipmap", "app_icon_round", "@mipmap/ic_launcher_round")
+             resValue("string", "app_name", "@string/app_name_release")
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index d6934085..95b59579 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -157,6 +157,20 @@
+             android:parentActivityName=".ui.files.FileManagerActivity"
+             android:windowSoftInputMode="adjustResize" />
+ 
++        <!--
++          Applies the Rime profile that Syncthing delivered to
++          Download/Rime-Sync/Rime-Arch.  Gated by READ_INPUT_STATE, which adb
++          shell holds, so ordinary apps cannot trigger it.
++        -->
++        <receiver
++            android:name=".receiver.RimeImportReceiver"
++            android:exported="true"
++            android:permission="android.permission.READ_INPUT_STATE">
++            <intent-filter>
++                <action android:name="${applicationId}.action.RIME_IMPORT" />
++            </intent-filter>
++        </receiver>
++
+         <service
+             android:name=".input.FcitxInputMethodService"
+             android:directBootAware="true"
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt b/app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt
+new file mode 100644
+index 00000000..ee478630
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt
+@@ -0,0 +1,51 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.receiver
++
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import kotlinx.coroutines.launch
++import org.fcitx.fcitx5.android.FcitxApplication
++import org.fcitx.fcitx5.android.utils.RimeProfileSync
++import timber.log.Timber
++
++/**
++ * Applies the Rime profile staged by Syncthing in shared storage.
++ *
++ * Protected by `android.permission.READ_INPUT_STATE` (held by shell/adb), so it
++ * can be triggered from a PC or a script:
++ *
++ * ```
++ * adb shell am broadcast \
++ *   -a org.fcitx.fcitx5.android.action.RIME_IMPORT \
++ *   -n org.fcitx.fcitx5.android/.receiver.RimeImportReceiver
++ * ```
++ *
++ * Fcitx restarts at the end, which makes Rime rebuild from the new files.
++ */
++class RimeImportReceiver : BroadcastReceiver() {
++
++    override fun onReceive(context: Context, intent: Intent) {
++        if (intent.action != ACTION) return
++        val app = FcitxApplication.getInstance()
++        val pendingResult = goAsync()
++        Timber.i("RimeImportReceiver: apply staged profile")
++        app.coroutineScope.launch {
++            try {
++                val copied = RimeProfileSync.apply()
++                Timber.i("RimeImportReceiver: done, wrote $copied file(s)")
++            } catch (e: Exception) {
++                Timber.e(e, "RimeImportReceiver: failed")
++            } finally {
++                pendingResult.finish()
++            }
++        }
++    }
++
++    companion object {
++        const val ACTION = "org.fcitx.fcitx5.android.action.RIME_IMPORT"
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
+index 04103e83..e4fef847 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
+@@ -31,8 +31,10 @@ import org.fcitx.fcitx5.android.utils.buildPrimaryStorageIntent
+ import org.fcitx.fcitx5.android.utils.formatDateTime
+ import org.fcitx.fcitx5.android.utils.importErrorDialog
+ import org.fcitx.fcitx5.android.utils.iso8601UTCDateTime
++import org.fcitx.fcitx5.android.utils.RimeProfileSync
+ import org.fcitx.fcitx5.android.utils.queryFileName
+ import org.fcitx.fcitx5.android.utils.toast
++import timber.log.Timber
+ 
+ class AdvancedSettingsFragment : ManagedPreferenceFragment(AppPrefs.getInstance().advanced) {
+ 
+@@ -131,6 +133,26 @@ class AdvancedSettingsFragment : ManagedPreferenceFragment(AppPrefs.getInstance(
+                 }
+             }) else null
+         )
++        screen.addPreference(
++            R.string.apply_rime_sync_profile,
++            R.string.apply_rime_sync_profile_summary,
++            onClick = {
++                if (!RimeProfileSync.hasStaging()) {
++                    ctx.toast(ctx.getString(R.string.apply_rime_sync_profile_missing, RimeProfileSync.STAGING_RELATIVE_PATH))
++                    return@addPreference
++                }
++                ctx.toast(R.string.apply_rime_sync_profile_started)
++                lifecycleScope.withLoadingDialog(ctx) {
++                    try {
++                        RimeProfileSync.apply()
++                        ctx.toast(R.string.apply_rime_sync_profile_done)
++                    } catch (e: Exception) {
++                        Timber.e(e, "apply Rime profile failed")
++                        ctx.toast(e)
++                    }
++                }
++            }
++        )
+         screen.addPreference(R.string.export_user_data) {
+             lifecycleScope.withLoadingDialog(ctx) {
+                 viewModel.fcitx.runOnReady {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt b/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt
+new file mode 100644
+index 00000000..b74185b8
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt
+@@ -0,0 +1,131 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.utils
++
++import android.os.Environment
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import org.fcitx.fcitx5.android.daemon.FcitxDaemon
++import timber.log.Timber
++import java.io.File
++
++/**
++ * Bridge between a Syncthing folder in shared storage and the app-private Rime
++ * user data directory.
++ *
++ * Android does not let Syncthing (a different app) write into
++ * `/sdcard/Android/data/org.fcitx.fcitx5.android/files/data/rime`, so Rime
++ * configuration can only be delivered to `Download/` and then copied in by the
++ * app itself. [apply] performs that copy, drops librime's `build/` staging
++ * directory so the schema is regenerated, and restarts Fcitx so that the
++ * deployment runs.
++ */
++object RimeProfileSync {
++
++    /** Folder shared with the PC through Syncthing (relative to shared storage). */
++    const val STAGING_RELATIVE_PATH = "Download/Rime-Sync/Rime-Arch"
++
++    /**
++     * Top-level entries that must never be copied into the Rime user dir:
++     * - `build` is librime's machine-specific compilation cache
++     * - `sync`, `.git`, `tools`, `others` are not Rime deployment input
++     * - Syncthing bookkeeping
++     */
++    private val SKIP_TOP_LEVEL = setOf(
++        "build", "sync", ".git", "tools", "others",
++        ".stfolder", ".stversions", ".stignore"
++    )
++
++    /** Files larger than this are compared by size only (cheap, no full read). */
++    private const val CONTENT_COMPARE_MAX_SIZE = 8_000_000L
++
++    fun stagingDir(): File =
++        File(Environment.getExternalStorageDirectory(), STAGING_RELATIVE_PATH)
++
++    fun rimeDir(): File = RimeSyncUtils.rimeUserDataDir()
++
++    fun hasStaging(): Boolean = stagingDir().isDirectory
++
++    /**
++     * Copy new/changed files from the staging folder into the Rime user data
++     * dir and, only when something actually changed, remove `build/` and
++     * restart Fcitx so that Rime redeploys on next use.
++     *
++     * Must be called from the main thread: Fcitx is stopped and restarted here,
++     * while the file comparison and copy run on [Dispatchers.IO].
++     *
++     * @return number of files that were actually written (0 = nothing to do)
++     */
++    suspend fun apply(): Int {
++        val src = stagingDir()
++        check(src.isDirectory) { "Staging folder not found: ${src.absolutePath}" }
++        val dst = rimeDir().apply { mkdirs() }
++        val changes = withContext(Dispatchers.IO) { countChanges(src, dst) }
++        if (changes == 0) {
++            Timber.i("RimeProfileSync: already up to date")
++            return 0
++        }
++        Timber.i("RimeProfileSync: $changes changed file(s), ${src.absolutePath} -> ${dst.absolutePath}")
++        FcitxDaemon.stopFcitx()
++        var copied = 0
++        try {
++            copied = withContext(Dispatchers.IO) {
++                RimeSyncUtils.cleanupStaleTempDatabase()
++                var n = 0
++                src.listFiles()?.forEach { entry ->
++                    if (entry.name in SKIP_TOP_LEVEL) return@forEach
++                    n += copyEntry(entry, File(dst, entry.name))
++                }
++                File(dst, "build").deleteRecursively()
++                File(dst, ".synced-from-shared").writeText(System.currentTimeMillis().toString())
++                n
++            }
++            Timber.i("RimeProfileSync: wrote $copied file(s), removed build/")
++        } finally {
++            FcitxDaemon.restartFcitx()
++        }
++        return copied
++    }
++
++    private fun countChanges(src: File, dst: File): Int {
++        if (src.name in SKIP_TOP_LEVEL) return 0
++        if (isSkippedFile(src.name)) return 0
++        if (src.isDirectory) {
++            var n = 0
++            src.listFiles()?.forEach { n += countChanges(it, File(dst, it.name)) }
++            return n
++        }
++        if (!src.isFile) return 0
++        return if (sameContent(src, dst)) 0 else 1
++    }
++
++    private fun copyEntry(src: File, dst: File): Int {
++        if (isSkippedFile(src.name)) return 0
++        if (src.isDirectory) {
++            if (!dst.isDirectory && !dst.mkdirs()) {
++                Timber.w("RimeProfileSync: cannot create ${dst.absolutePath}")
++                return 0
++            }
++            var n = 0
++            src.listFiles()?.forEach { n += copyEntry(it, File(dst, it.name)) }
++            return n
++        }
++        if (!src.isFile || sameContent(src, dst)) return 0
++        src.copyTo(dst, overwrite = true)
++        return 1
++    }
++
++    /** Keep the phone's own installation.yaml / user.yaml and never copy LevelDB user dictionaries. */
++    private fun isSkippedFile(name: String): Boolean =
++        name.contains(".userdb") ||
++            name == "installation.yaml" || name == "installation.yaml.bak" ||
++            name == "user.yaml" || name == "user.yaml.bak"
++
++    private fun sameContent(a: File, b: File): Boolean {
++        if (!b.isFile || a.length() != b.length()) return false
++        if (a.length() > CONTENT_COMPARE_MAX_SIZE) return true
++        return runCatching { a.readBytes().contentEquals(b.readBytes()) }.getOrDefault(false)
++    }
++}
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 40ef2c9f..5aa18ddd 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -285,6 +285,11 @@
+     <string name="restart_fcitx_instance_confirm">Fcitx 实例将被销毁并重新初始化。继续吗？</string>
+     <string name="ignore_system_window_insets">忽略系统窗口边衬区 (WindowInsets)</string>
+     <string name="browse_user_data_dir">浏览用户数据目录</string>
++    <string name="apply_rime_sync_profile">从 Syncthing 应用 Rime 配置</string>
++    <string name="apply_rime_sync_profile_summary">把 Download/Rime-Sync/Rime-Arch 复制到应用的 Rime 目录并重新部署</string>
++    <string name="apply_rime_sync_profile_started">正在从 Syncthing 应用 Rime 配置…</string>
++    <string name="apply_rime_sync_profile_missing">未找到暂存目录：%1$s</string>
++    <string name="apply_rime_sync_profile_done">已应用 Rime 配置，下次使用时会重新部署</string>
+     <string name="haptic_on_repeat">重复按键时的振动反馈</string>
+     <string name="redo">重做</string>
+     <string name="status_area">状态区域</string>
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index fa9bc4e7..a7a8c71d 100644
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -285,6 +285,11 @@
+     <string name="restart_fcitx_instance_confirm">Fcitx 實例將被銷燬並重新初始化。繼續嗎？</string>
+     <string name="ignore_system_window_insets">忽略系統窗口邊襯區 (WindowInsets)</string>
+     <string name="browse_user_data_dir">瀏覽用户資料目錄</string>
++    <string name="apply_rime_sync_profile">從 Syncthing 套用 Rime 設定</string>
++    <string name="apply_rime_sync_profile_summary">將 Download/Rime-Sync/Rime-Arch 複製到應用的 Rime 目錄並重新部署</string>
++    <string name="apply_rime_sync_profile_started">正在從 Syncthing 套用 Rime 設定…</string>
++    <string name="apply_rime_sync_profile_missing">找不到暫存目錄：%1$s</string>
++    <string name="apply_rime_sync_profile_done">已套用 Rime 設定，下次使用時會重新部署</string>
+     <string name="haptic_on_repeat">重複按鍵時的觸覺回饋</string>
+     <string name="redo">重做</string>
+     <string name="status_area">狀態區</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index fe1fd3a0..6bcf783a 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -285,6 +285,11 @@
+     <string name="restart_fcitx_instance_confirm">Fcitx instance will be destroyed and reinitialized. Proceed?</string>
+     <string name="ignore_system_window_insets">Ignore system WindowInsets</string>
+     <string name="browse_user_data_dir">Browse user data directory</string>
++    <string name="apply_rime_sync_profile">Apply Syncthing Rime profile</string>
++    <string name="apply_rime_sync_profile_summary">Copy Download/Rime-Sync/Rime-Arch into the app\'s Rime directory and redeploy</string>
++    <string name="apply_rime_sync_profile_started">Applying Rime profile from Syncthing…</string>
++    <string name="apply_rime_sync_profile_missing">Staging folder not found: %1$s</string>
++    <string name="apply_rime_sync_profile_done">Rime profile applied; Rime will redeploy on next use</string>
+     <string name="haptic_on_repeat">Haptic feedback on key repeat</string>
+     <string name="redo">Redo</string>
+     <string name="status_area">Status area</string>

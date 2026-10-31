@@ -53,12 +53,18 @@ tab：月历卡片使用 7 列 1:1 日格和按 locale 推断的每周首日；�
 以及可自定义的卡片布局。规格见 [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md)。
 
 **Fcitx5 for Android** —— Fcitx5 输入法框架及其引擎的 Android 移植，从上游
-`master` 加三个补丁构建：新增 `MANAGE_EXTERNAL_STORAGE` 权限，让 librime 能写入
+`master` 加四个补丁构建：新增 `MANAGE_EXTERNAL_STORAGE` 权限，让 librime 能写入
 共享存储里的 `sync_dir`（例如 `Download/Rime-Sync`）；内置 Rime/Fcitx5 配置文件
 管理器与 UTF-8 编辑器，并在启动时清理残留的 `.temp.userdb`；文件管理器的返回
-箭头改为水平方向。第三个补丁让 `build-logic` 读取下游的 `PATCHWORK_REVISION`
-环境变量；该变量未设置时行为与上游完全一致，官方/F-Droid 构建不受影响。只发布
-`arm64-v8a`（上游按 ABI 拆包、没有 universal APK），APK 约 52 MB。
+箭头改为水平方向；以及一个 Syncthing 桥接。Android 不允许其他应用写 Rime 的
+应用私有目录，因此应用会在需要时把 `Download/Rime-Sync/Rime-Arch` 复制进去、
+删除 `build/` 并重启 Fcitx 触发重新部署；入口是「高级」→「从 Syncthing 应用
+Rime 配置」，也可用
+`adb shell am broadcast -a org.fcitx.fcitx5.android.action.RIME_IMPORT
+-n org.fcitx.fcitx5.android/.receiver.RimeImportReceiver`（没有变化时不重建）。
+另一个补丁让 `build-logic` 读取下游的 `PATCHWORK_REVISION` 环境变量；该变量未
+设置时行为与上游完全一致，官方/F-Droid 构建不受影响。只发布 `arm64-v8a`
+（上游按 ABI 拆包、没有 universal APK），APK 约 52 MB。
 
 ## F-Droid 仓库
 

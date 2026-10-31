@@ -61,14 +61,21 @@ settings hub with seven preset themes (including Catppuccin) and a configurable
 card layout. See [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md).
 
 **Fcitx5 for Android** — the Fcitx5 input method framework and engines on
-Android, built from upstream `master` plus three patches: an
+Android, built from upstream `master` plus four patches: an
 `MANAGE_EXTERNAL_STORAGE` permission so librime can write a shared-storage
 `sync_dir` (for example `Download/Rime-Sync`), a built-in Rime/Fcitx5
 configuration file manager and UTF-8 editor with stale `.temp.userdb` cleanup at
-startup, and a horizontal back arrow in the file manager. The third patch lets
-`build-logic` honour a downstream `PATCHWORK_REVISION`; it is inert when the
-variable is unset, so upstream builds are unaffected. Only `arm64-v8a` is
-published (upstream produces per-ABI APKs and no universal APK), and the APK is
+startup, a horizontal back arrow in the file manager, and a Syncthing bridge.
+Android forbids other apps from writing the app-private Rime directory, so the
+bridge copies `Download/Rime-Sync/Rime-Arch` into it on demand, removes
+`build/` and restarts Fcitx so Rime redeploys; trigger it from Advanced →
+“Apply Syncthing Rime profile” or with
+`adb shell am broadcast -a org.fcitx.fcitx5.android.action.RIME_IMPORT
+-n org.fcitx.fcitx5.android/.receiver.RimeImportReceiver` (no-op when nothing
+changed). One patch lets `build-logic` honour a downstream
+`PATCHWORK_REVISION`; it is inert when the variable is unset, so upstream builds
+are unaffected. Only `arm64-v8a` is published (upstream produces per-ABI APKs
+and no universal APK), and the APK is
 about 52 MB.
 
 ## F-Droid repository
