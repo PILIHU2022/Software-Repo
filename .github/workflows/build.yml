@@ -36,6 +36,7 @@ jobs:
   check:
     name: Check upstream
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.check.outputs.matrix }}
       any_changed: ${{ steps.check.outputs.any_changed }}
@@ -403,14 +404,30 @@ jobs:
           MATRIX: ${{ needs.check.outputs.matrix }}
         run: |
           set -euo pipefail
-          # Only record the upstream SHA for apps whose APK really exists.
-          # A failed matrix leg must keep its previous state so the next run
-          # retries it instead of treating it as built.
+          # Only record an upstream SHA for apps whose APK really exists and
+          # whose build was not a fallback. A failed matrix leg keeps its
+          # previous state so the next run retries it; a fallback build is
+          # published but must not mark the head as successfully built, or the
+          # next scheduled run would skip the app while the queue is still
+          # broken.
           state='{}'
           while IFS=$'\t' read -r app sha; do
             [[ -n "$app" ]] || continue
+            info="dist/patchwork-$app/build-info.txt"
             if [[ -n "$(find "dist/patchwork-$app" -type f -name '*.apk' -print -quit 2>/dev/null)" ]]; then
-              state="$(jq -c --arg app "$app" --arg sha "$sha" '. + {($app): $sha}' <<<"$state")"
+              fallback="$(sed -n 's/^upstream_fallback=//p' "$info" 2>/dev/null | head -n 1)"
+              built_sha="$(sed -n 's/^upstream_commit=//p' "$info" 2>/dev/null | head -n 1)"
+              if [[ "$fallback" == "1" ]]; then
+                echo "::warning title=Fallback build::$app was built from ${built_sha:-an older upstream commit} because the patch queue does not apply to $sha; keeping the previous build state so the next run retries $sha"
+                continue
+              fi
+              # Record the commit the APK was actually built from, not only the
+              # one the check job resolved: upstream can move between jobs.
+              record_sha="${built_sha:-$sha}"
+              if [[ -n "$built_sha" && "$built_sha" != "$sha" ]]; then
+                echo "::warning title=Upstream moved::$app was built from $built_sha while the check job resolved $sha; recording the built commit"
+              fi
+              state="$(jq -c --arg app "$app" --arg sha "$record_sha" '. + {($app): $sha}' <<<"$state")"
             else
               echo "::warning::No APK for '$app' (build failed or artifact missing); keeping previous build state"
             fi
@@ -573,6 +590,12 @@ jobs:
               body = body.slice(0, 60000) + '\n\n(truncated)';
             }
 
+            // A broken queue is retried by the 15-minute schedule, so a
+            // comment per attempt turned this issue into 40+ copies of the same
+            // failure and buried the first, useful one. Keep one comment per
+            // window; the run itself still exists for drill-down.
+            const THROTTLE_MS = 6 * 60 * 60 * 1000;
+
             const { data: issues } = await github.rest.issues.listForRepo({
               owner,
               repo,
@@ -581,6 +604,23 @@ jobs:
             });
             const existing = issues.find((issue) => issue.title === title);
             if (existing) {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner,
+                repo,
+                issue_number: existing.number,
+                per_page: 100,
+              });
+              const lastAt = comments.reduce(
+                (max, comment) => Math.max(max, Date.parse(comment.created_at) || 0),
+                0,
+              );
+              const ageMs = Date.now() - lastAt;
+              if (lastAt > 0 && ageMs < THROTTLE_MS) {
+                console.log(
+                  `Throttled: last failure comment was ${Math.round(ageMs / 60000)} minutes ago`,
+                );
+                return;
+              }
               await github.rest.issues.createComment({
                 owner,
                 repo,
@@ -595,3 +635,54 @@ jobs:
                 body,
               });
             }
+
+  notify-recovered:
+    name: Close failure issue on recovery
+    needs:
+      - check
+      - build
+      - publish
+    # Only a run that actually built something is a recovery. Skipped runs
+    # (upstream unchanged) must not close an issue about a real failure.
+    if: >-
+      success() &&
+      needs.check.outputs.any_changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Close the failure issue
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'Patchwork build failed';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title);
+            if (!existing) {
+              console.log('No open failure issue; nothing to close');
+              return;
+            }
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: existing.number,
+              body: `Recovered: this run built and published successfully — ${runUrl}`,
+            });
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: existing.number,
+              state: 'closed',
+              state_reason: 'completed',
+            });
+            console.log(`Closed issue #${existing.number}`);

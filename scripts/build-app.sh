@@ -17,6 +17,10 @@
 #   PATCHWORK_STORE_PASSWORD  keystore password (default: patchwork123)
 #   PATCHWORK_KEY_ALIAS       key alias (default: patchwork)
 #   PATCHWORK_KEY_PASSWORD    key password (default: patchwork123)
+#   PATCHWORK_STATE_FILE      last-successful-upstream state file, used to
+#                             retry once on the previous commit when the patch
+#                             queue no longer applies to the upstream head
+#                             (default: fdroid/.build-state.json)
 #   ANDROID_HOME, ANDROID_USER_HOME, GRADLE_USER_HOME
 #                             default to ../.toolchain/* when unset
 set -euo pipefail
@@ -35,6 +39,11 @@ fcitx5). Fetches the upstream branch into .cache/mirror/<app>.git, creates a
 fresh checkout in .cache/work/<app>, applies apps/<app>/patches/*.patch with
 `git am -3`, sets versionCode/versionName (file rewrite, or environment
 variables for VERSION_STYLE=build-logic), and builds a signed release APK.
+
+A conflict that is only an append/append clash in a resource strings file is
+union-merged automatically (and validated); any other conflict fails hard. If
+the queue cannot be applied at all, the script retries once on the upstream
+commit recorded in fdroid/.build-state.json and marks that build as a fallback.
 
 Options:
   --out DIR    copy the APK and build-info.txt here (default: dist/)
@@ -135,16 +144,50 @@ MIRROR="$MIRROR_DIR/$APP.git"
 WORK="$WORK_ROOT/$APP"
 mkdir -p "$MIRROR_DIR" "$WORK_ROOT"
 
+# Upstream is the one network dependency of this script. A dropped connection
+# used to surface as "patch does not apply cleanly" and sent the failure issue
+# after the wrong problem, so fetch failures get their own retries and their
+# own error message.
+retry_network() {
+    local attempt=1 max="${PATCHWORK_NET_RETRIES:-3}" delay=5
+    until "$@"; do
+        if (( attempt >= max )); then
+            echo "ERROR: network step failed after ${attempt} attempt(s): $*" >&2
+            return 1
+        fi
+        echo "    network attempt ${attempt}/${max} failed; retrying in ${delay}s" >&2
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+}
+
+sync_mirror() {
+    if [[ -d "$MIRROR" ]]; then
+        git -C "$MIRROR" remote update --prune
+    else
+        git clone --mirror --quiet "$UPSTREAM_URL" "$MIRROR"
+    fi
+}
+
 if [[ -d "$MIRROR" ]]; then
     echo "==> Updating mirror $MIRROR"
-    git -C "$MIRROR" remote update --prune
 else
     echo "==> Cloning mirror $UPSTREAM_URL"
-    git clone --mirror --quiet "$UPSTREAM_URL" "$MIRROR"
+fi
+if ! retry_network sync_mirror; then
+    # A half-written mirror would make every later attempt fail with a
+    # confusing error, so remove it and let the next run start clean.
+    rm -rf "$MIRROR"
+    die "could not fetch $UPSTREAM_URL"
 fi
 
-UPSTREAM_SHA="$(git -C "$MIRROR" rev-parse --verify "refs/heads/$UPSTREAM_BRANCH^{commit}")"
-echo "    upstream commit: $UPSTREAM_SHA ($UPSTREAM_BRANCH)"
+UPSTREAM_HEAD="$(git -C "$MIRROR" rev-parse --verify "refs/heads/$UPSTREAM_BRANCH^{commit}")"
+# Effective upstream commit. It starts at the branch head and only changes when
+# the last-resort fallback below replays the queue on an older commit.
+UPSTREAM_SHA="$UPSTREAM_HEAD"
+FALLBACK_USED=0
+echo "    upstream commit: $UPSTREAM_HEAD ($UPSTREAM_BRANCH)"
 
 # Always start from a fresh checkout. A dirty tree is never reused.
 rm -rf "$WORK"
@@ -154,27 +197,266 @@ git -C "$WORK" checkout --quiet -B build "$UPSTREAM_SHA"
 mapfile -t PATCHES < <(find "$ROOT/apps/$APP/patches" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
 [[ ${#PATCHES[@]} -gt 0 ]] || die "no patches found in apps/$APP/patches"
 
+# --- Patch queue with append-only resource recovery ------------------------
+#
+# Upstream translation updates append strings at the end of the same
+# strings.xml a patch appends its own strings to. Both sides only add lines,
+# yet `git am -3` reports a content conflict; a whole scheduled run used to go
+# red for that. Resolve exactly this shape automatically, then validate the
+# result. Every other conflict (a rewritten value, a Kotlin clash, a duplicate
+# string name after merging) stays a hard failure: silently unioning competing
+# edits would produce a build nobody reviewed.
+
+RESOURCE_STRINGS_RE='(^|/)(composeResources|res)/values[^/]*/strings\.xml$'
+
+is_resource_strings_file() { [[ "$1" =~ $RESOURCE_STRINGS_RE ]]; }
+
+stage_blob() { git -C "$WORK" rev-parse --verify --quiet ":$1:$2"; }
+
+# A pure insertion has no removed lines. Check both sides against the merge
+# base so replacements and reorderings never reach the union merge.
+is_pure_insertion() {
+    local base="$1" other="$2" numstat added removed
+    numstat="$(git -C "$WORK" diff --numstat "$base" "$other" 2>/dev/null)" || return 1
+    [[ "$numstat" =~ ^([0-9]+)[[:space:]]+([0-9]+) ]] || return 1
+    added="${BASH_REMATCH[1]}"
+    removed="${BASH_REMATCH[2]}"
+    (( added > 0 && removed == 0 ))
+}
+
+try_auto_merge_append_conflicts() {
+    local path blob_base blob_ours blob_theirs tmp i
+    local -a conflicted=() source_paths=() merged_files=()
+
+    mapfile -t conflicted < <(git -C "$WORK" diff --name-only --diff-filter=U)
+    if (( ${#conflicted[@]} == 0 )); then
+        echo "    git am failed without a content conflict; not auto-merging" >&2
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "    python3 is required to validate a union merge; refusing to auto-merge" >&2
+        return 1
+    fi
+
+    for path in "${conflicted[@]}"; do
+        if ! is_resource_strings_file "$path"; then
+            echo "    conflict in '$path' is outside resource strings; refusing to auto-merge" >&2
+            return 1
+        fi
+        blob_base="$(stage_blob 1 "$path" || true)"
+        blob_ours="$(stage_blob 2 "$path" || true)"
+        blob_theirs="$(stage_blob 3 "$path" || true)"
+        if [[ -z "$blob_base" || -z "$blob_ours" || -z "$blob_theirs" ]]; then
+            echo "    '$path' has no three-way base (add/add conflict); refusing to auto-merge" >&2
+            return 1
+        fi
+        if ! is_pure_insertion "$blob_base" "$blob_ours"; then
+            echo "    upstream changed existing lines in '$path' (not append-only); refusing to auto-merge" >&2
+            return 1
+        fi
+        if ! is_pure_insertion "$blob_base" "$blob_theirs"; then
+            echo "    the patch rewrites existing lines in '$path' (not append-only); refusing to auto-merge" >&2
+            return 1
+        fi
+    done
+
+    # Build and validate every merged file before touching the worktree: if one
+    # file fails validation, git am's original conflict state stays intact.
+    tmp="$(mktemp -d)"
+    i=0
+    for path in "${conflicted[@]}"; do
+        i=$((i + 1))
+        git -C "$WORK" show ":1:$path" >"$tmp/$i.base"
+        git -C "$WORK" show ":2:$path" >"$tmp/$i.ours"
+        git -C "$WORK" show ":3:$path" >"$tmp/$i.theirs"
+        # --union keeps both append blocks. It exits 0 once every conflict is
+        # resolved that way, but the validation below is what authorizes it.
+        git merge-file -p --union "$tmp/$i.ours" "$tmp/$i.base" "$tmp/$i.theirs" \
+            >"$tmp/$i.merged" 2>"$tmp/$i.err" || true
+        if [[ ! -s "$tmp/$i.merged" ]] \
+            || grep -qE '^(<<<<<<<|=======|>>>>>>>)' "$tmp/$i.merged"; then
+            echo "    union merge produced no usable XML for '$path'" >&2
+            sed 's/^/    /' "$tmp/$i.err" >&2 || true
+            rm -rf "$tmp"
+            return 1
+        fi
+        if ! python3 "$ROOT/scripts/validate-strings-merge.py" \
+            "$tmp/$i.merged" "$tmp/$i.ours" "$tmp/$i.theirs"; then
+            echo "    union merge validation failed for '$path'" >&2
+            rm -rf "$tmp"
+            return 1
+        fi
+        source_paths+=("$path")
+        merged_files+=("$tmp/$i.merged")
+    done
+
+    for i in "${!source_paths[@]}"; do
+        path="${source_paths[$i]}"
+        # Overwrite in place so the conflict file keeps its mode and line
+        # endings, then stage it for `git am --continue`.
+        cat "${merged_files[$i]}" >"$WORK/$path"
+        git -C "$WORK" add -- "$path"
+        echo "    auto-merged append-only conflict: $path"
+    done
+    rm -rf "$tmp"
+    return 0
+}
+
+describe_patch_failure() {
+    local patch="$1" sha="$2" subject path current_patch_diff
+    local -a conflicted=()
+    subject="$(git -C "$WORK" am --show-current-patch=raw 2>/dev/null \
+        | sed -n 's/^Subject: //p' | head -n 1 || true)"
+    mapfile -t conflicted < <(git -C "$WORK" diff --name-only --diff-filter=U)
+    # Only the conflicted file sections matter: a 1000-file patch must not push
+    # the actual conflict out of the issue's log tail.
+    current_patch_diff="$(git -C "$WORK" am --show-current-patch=diff 2>/dev/null || true)"
+    {
+        echo ""
+        echo "ERROR: patch '$(basename "$patch")' does not apply cleanly"
+        echo "       to upstream $sha."
+        if [[ -n "$subject" ]]; then
+            echo ""
+            echo "Current patch: $subject"
+        fi
+        echo "Patch file:    $(basename "$patch")"
+        echo ""
+        echo "Conflicted files:"
+        if (( ${#conflicted[@]} > 0 )); then
+            printf '  %s\n' "${conflicted[@]}"
+        else
+            echo "  (none reported by git am)"
+        fi
+        echo ""
+        echo "Conflict summary (git am --show-current-patch=diff, conflicted files only):"
+        if (( ${#conflicted[@]} > 0 )); then
+            for path in "${conflicted[@]}"; do
+                printf '%s\n' "$current_patch_diff" | awk -v p="$path" '
+                    /^diff --git / { in_file = index($0, " b/" p) > 0 }
+                    in_file { print }
+                ' | head -n 40 | sed 's/^/  /' || true
+            done
+        else
+            printf '%s\n' "$current_patch_diff" | grep -E '^(@@ |diff --git )' \
+                | head -n 20 | sed 's/^/  /' || true
+        fi
+        echo ""
+        echo "Worktree kept for inspection: $WORK"
+        echo "Resolve the conflict there and regenerate the patch queue"
+        echo "(see scripts/sync-patches.sh), then rerun this script."
+    } >&2
+}
+
+apply_patch_queue() {
+    local sha="$1" patch
+    for patch in "${PATCHES[@]}"; do
+        if git -C "$WORK" am -3 "$patch"; then
+            continue
+        fi
+        if try_auto_merge_append_conflicts; then
+            if ! GIT_EDITOR=true git -C "$WORK" am --continue; then
+                echo "ERROR: auto-merged append-only conflict could not be committed" >&2
+                describe_patch_failure "$patch" "$sha"
+                return 1
+            fi
+            echo "==> Continued '$(basename "$patch")' after append-only auto-merge"
+            continue
+        fi
+        describe_patch_failure "$patch" "$sha"
+        return 1
+    done
+    return 0
+}
+
+recorded_upstream_sha() {
+    local state_file="${PATCHWORK_STATE_FILE:-$ROOT/fdroid/.build-state.json}" sha=""
+    [[ -f "$state_file" ]] || return 0
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "WARNING: jq not found; cannot read $state_file for a fallback" >&2
+        return 0
+    fi
+    sha="$(jq -r --arg app "$APP" '.[$app] // empty' "$state_file" 2>/dev/null || true)"
+    printf '%s\n' "$sha"
+}
+
+reset_worktree_to() {
+    local sha="$1"
+    # git am leaves rebase-apply behind after a conflict; abort it so the next
+    # attempt starts from the commit and not from a half-applied queue.
+    git -C "$WORK" am --abort >/dev/null 2>&1 || true
+    git -C "$WORK" checkout --quiet --force -B build "$sha" || return 1
+    git -C "$WORK" clean -qfdx
+}
+
+ensure_commit_available() {
+    local sha="$1" tmp_ref="refs/patchwork/fallback-$$"
+    git -C "$WORK" cat-file -e "${sha}^{commit}" 2>/dev/null && return 0
+    # A mirror can keep an object that is no longer reachable from a ref (a
+    # force-pushed branch); such a commit is not cloned and `git fetch <url>
+    # <sha>` refuses it as "not our ref". Expose it through a temporary ref in
+    # our own mirror and fetch that ref instead.
+    git -C "$MIRROR" cat-file -e "${sha}^{commit}" 2>/dev/null || return 1
+    git -C "$MIRROR" update-ref "$tmp_ref" "$sha" || return 1
+    if ! git -C "$WORK" fetch --quiet "$MIRROR" "+${tmp_ref}:${tmp_ref}" 2>/dev/null; then
+        git -C "$MIRROR" update-ref -d "$tmp_ref" || true
+        return 1
+    fi
+    git -C "$MIRROR" update-ref -d "$tmp_ref" || true
+    git -C "$WORK" update-ref -d "$tmp_ref" || true
+    git -C "$WORK" cat-file -e "${sha}^{commit}" 2>/dev/null
+}
+
 echo "==> Applying ${#PATCHES[@]} patch(es)"
-for patch in "${PATCHES[@]}"; do
-    if ! git -C "$WORK" am -3 "$patch"; then
+if ! apply_patch_queue "$UPSTREAM_SHA"; then
+    FALLBACK_SHA="$(recorded_upstream_sha)"
+    if [[ ! "$FALLBACK_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        if [[ -n "$FALLBACK_SHA" ]]; then
+            echo "WARNING: recorded upstream '$FALLBACK_SHA' for '$APP' is not a full SHA; no fallback attempted" >&2
+        else
+            echo "WARNING: no previous successful upstream commit for '$APP'; no fallback attempted" >&2
+        fi
+        exit 1
+    fi
+    if [[ "$FALLBACK_SHA" == "$UPSTREAM_HEAD" ]]; then
+        echo "WARNING: recorded upstream commit equals the head ($UPSTREAM_HEAD); no fallback attempted" >&2
+        exit 1
+    fi
+    if ! ensure_commit_available "$FALLBACK_SHA"; then
+        echo "WARNING: recorded upstream commit $FALLBACK_SHA is not available in $MIRROR; no fallback attempted" >&2
+        exit 1
+    fi
+    echo ""
+    echo "!! FALLBACK: patch queue does not apply to upstream $UPSTREAM_HEAD ($UPSTREAM_BRANCH)"
+    echo "!! FALLBACK: retrying once on the last successfully built commit $FALLBACK_SHA"
+    echo "!! FALLBACK: source: ${PATCHWORK_STATE_FILE:-fdroid/.build-state.json}"
+    FALLBACK_USED=1
+    UPSTREAM_SHA="$FALLBACK_SHA"
+    reset_worktree_to "$UPSTREAM_SHA" \
+        || die "could not check out fallback commit $FALLBACK_SHA"
+    if ! apply_patch_queue "$UPSTREAM_SHA"; then
         {
             echo ""
-            echo "ERROR: patch '$(basename "$patch")' does not apply cleanly"
-            echo "       to upstream $UPSTREAM_SHA."
-            echo ""
-            echo "Conflicted files:"
-            git -C "$WORK" diff --name-only --diff-filter=U | sed 's/^/  /' || true
-            echo ""
-            echo "Worktree kept for inspection: $WORK"
-            echo "Resolve the conflict there and regenerate the patch queue"
-            echo "(see scripts/sync-patches.sh), then rerun this script."
+            echo "ERROR: the fallback commit $FALLBACK_SHA also rejects the patch queue."
+            echo "       Automatic recovery is exhausted; re-anchor the queue against"
+            echo "       $UPSTREAM_HEAD (see scripts/sync-patches.sh)."
         } >&2
         exit 1
     fi
-done
+    echo "!! FALLBACK: patches applied on $UPSTREAM_SHA; upstream $UPSTREAM_HEAD is NOT included"
+fi
 
 VERSION_PATH="$WORK/$VERSION_FILE"
 [[ -f "$VERSION_PATH" ]] || die "version file not found in upstream: $VERSION_FILE"
+
+# A fallback build must never look like a normal build of the upstream head:
+# embed the commit it was actually built from in versionName and build-info.
+fallback_version_name() {
+    if [[ "$FALLBACK_USED" -eq 1 ]]; then
+        printf '%s-fallback-%s\n' "$1" "${UPSTREAM_SHA:0:7}"
+    else
+        printf '%s\n' "$1"
+    fi
+}
 
 if [[ "${VERSION_STYLE:-gradle}" == "build-logic" ]]; then
     # fcitx5-android computes versionCode/versionName inside build-logic
@@ -201,7 +483,7 @@ if [[ "${VERSION_STYLE:-gradle}" == "build-logic" ]]; then
     UPSTREAM_CODE=$((10#$base_code * 10 + ABI_ID))
     UPSTREAM_NAME="$base_name"
     NEW_CODE=$((10#$UPSTREAM_CODE * 100 + 10#$PATCHWORK_REVISION))
-    NEW_NAME="${UPSTREAM_NAME}-patchwork"
+    NEW_NAME="$(fallback_version_name "${UPSTREAM_NAME}-patchwork")"
 
     export PATCHWORK_REVISION
     export BUILD_VERSION_NAME="$NEW_NAME"
@@ -232,6 +514,7 @@ else
     else
         NEW_NAME="$UPSTREAM_NAME-patchwork"
     fi
+    NEW_NAME="$(fallback_version_name "$NEW_NAME")"
 
     echo "==> Rewriting $VERSION_FILE"
     echo "    versionCode: $UPSTREAM_CODE -> $NEW_CODE"
@@ -263,7 +546,12 @@ fi
 print_result() {
     echo "PATCHWORK_RESULT_app=$APP"
     echo "PATCHWORK_RESULT_project=$PROJECT_NAME"
+    # upstream_commit is the commit the APK was actually built from; on a
+    # fallback build it is older than upstream_head, and upstream_fallback=1
+    # tells the publisher not to record head as successfully built.
+    echo "PATCHWORK_RESULT_upstream_head=$UPSTREAM_HEAD"
     echo "PATCHWORK_RESULT_upstream_commit=$UPSTREAM_SHA"
+    echo "PATCHWORK_RESULT_upstream_fallback=$FALLBACK_USED"
     echo "PATCHWORK_RESULT_patch_count=${#PATCHES[@]}"
     echo "PATCHWORK_RESULT_version_code=$NEW_CODE"
     echo "PATCHWORK_RESULT_version_name=$NEW_NAME"
@@ -396,7 +684,9 @@ app=$APP
 project=$PROJECT_NAME
 package=$ACTUAL_PACKAGE
 upstream_url=$UPSTREAM_URL
+upstream_head=$UPSTREAM_HEAD
 upstream_commit=$UPSTREAM_SHA
+upstream_fallback=$FALLBACK_USED
 patch_count=${#PATCHES[@]}
 version_code=$ACTUAL_CODE
 version_name=$ACTUAL_NAME
