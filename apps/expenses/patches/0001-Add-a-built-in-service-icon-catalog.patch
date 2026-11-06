@@ -1326,13 +1326,13 @@ index 0000000..909db55
 +        android:pathData="M5.033 14.649H.743a.74.74 0 0 1-.686-.458.74.74 0 0 1 .16-.808L3.19 10.41H1.06A1.06 1.06 0 0 1 0 9.35h3.957c.301 0 .57.18.686.458a.74.74 0 0 1-.161.808L1.51 13.59h2.464c.585 0 1.06.475 1.06 1.06zM24 11.338c0-1.14-.927-2.066-2.066-2.066-.61 0-1.158.265-1.537.686a2.061 2.061 0 0 0-1.536-.686c-1.14 0-2.066.926-2.066 2.066v3.311a1.06 1.06 0 0 0 1.06-1.06v-2.251a1.004 1.004 0 0 1 2.013 0v2.251c0 .586.474 1.06 1.06 1.06v-3.311a1.004 1.004 0 0 1 2.012 0v2.251c0 .586.475 1.06 1.06 1.06zM16.265 12a2.728 2.728 0 1 1-5.457 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0zm-4.82 0a2.728 2.728 0 1 1-5.458 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0z" />
 +</vector>
 diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-index 7339310..8cbfb26 100644
+index 36e27a9..a663036 100644
 --- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
 +++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-@@ -114,4 +114,32 @@
-     <string name="widget_configuration_title">配置小组件</string>
-     <string name="widget_transparent_background">透明背景</string>
-     <string name="whats_new_title">有哪些更新内容？</string>
+@@ -147,4 +147,32 @@
+     <string name="edit_expense_end_date">结束日期（可选）</string>
+     <string name="edit_expense_end_date_placeholder">选择一个日期</string>
+     <string name="whats_new_continue">将来会进行怎样的更改</string>
 +
 +    <!-- Tilla style home & service icons -->
 +    <string name="home_summary_total">总支出</string>
