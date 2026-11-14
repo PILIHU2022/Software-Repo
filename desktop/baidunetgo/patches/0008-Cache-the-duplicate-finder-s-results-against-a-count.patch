@@ -1,0 +1,1447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 13:11:46 +0800
+Subject: [PATCH] Cache the duplicate finder's results against a counted
+ netdisk generation, so the page opens on the last scan at once, and give its
+ rows a context menu that previews a picture among its group's copies #minor
+
+---
+ AGENTS.md                    |   6 +
+ CHANGELOG.md                 |   5 +
+ CLAUDE.md                    |   6 +
+ README.md                    |   5 +-
+ app/app.go                   |  17 +-
+ app/dedup.go                 | 417 ++++++++++++++++++++++++++++++++++-
+ app/dedup_test.go            | 403 ++++++++++++++++++++++++++++++++-
+ app/newfolder.go             |   1 +
+ app/offline.go               |   3 +
+ app/ops.go                   |   8 +-
+ app/preview.go               |  65 +++++-
+ app/recycle.go               |   2 +
+ app/rename.go                |   2 +
+ app/session.go               |   3 +
+ app/transfers.go             |   4 +
+ internal/dedup/dedup.go      |  31 ++-
+ internal/dedup/dedup_test.go |  44 ++++
+ 17 files changed, 995 insertions(+), 27 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 45db6ee..3cdcb2b 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -65,6 +65,12 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Duplicate files (`internal/dedup`).** The dedup page reads no file content: `dedup.Scan` walks the folders under a root four at a time (capped at 50,000 files and 5,000 folders, cancelable, reporting progress), and `dedup.Groups` groups what it found by size and MD5, the hash the list API already returns (scrambled there, decrypted in `internal/baidu/list.go` with `baidupcs.DecryptMD5`). Entries with no MD5 are counted and skipped as `缺少哈希，已跳过`; 0-byte files and single files are no group. Groups come by the space freeing all but one copy would free. `app/dedup.go` runs the scan on a goroutine and writes back through `a.update`, throttling progress to about every 180 ms; it keeps the earliest modified copy of each group by default (its path breaking a tie), and `Client.Delete` moves the chosen copies to the recycle bin. Before deleting, it reads the parents' listings again and checks each file still has the scanned fs_id, size and MD5, and that every group keeps a copy; a stale result deletes nothing. The web `filemetas` endpoint is not used to fill in missing hashes.
+ 
++Its results are kept between runs in `dedup.json` under the user data dir (`mygo.PathUserData`; tests point `dedupStoreDir` at a temp folder, and the fake netdisk writes nothing), 0600, written atomically (tmp+rename) on a goroutine. The file holds a layout `version`, the account's `uid`, the netdisk `gen` the results describe, the root, `scanned_at`, the statistics and the duplicate groups only — never every scanned file — and reading it back rebuilds the groups (`dedup.Without` regroups them after a delete, so a group of one copy is no group and the order stays by reclaim). `enterDedup` reads and parses it on a goroutine (a few thousand groups), then either fills `dedupState` (`started`, `loaded`, no scan; the header says 上次扫描于 … · 文件未变动，直接显示上次结果) or scans the cached root, else "/". It is valid only while `version` and `uid` match, `gen` equals `App.netdiskGen`, and it is under `dedupCacheAge` (7 days: changes made from another device are not counted here). A scan records the `gen` it started at and writes the cache only if the netdisk did not change meanwhile; else the header says 扫描期间有文件变动，建议重新扫描 and nothing is cached.
++
++`App.netdiskGen` is the persisted change counter that `gen` is compared with: it is restored for the signed-in account at sign-in from `dedup-gen.json` (a tiny file beside the cache) and counted up by `a.netdiskChanged()` on every successful change the app makes to the netdisk — `a.remove` (and the undo's `Restore` through `a.run`), every `a.run` success (move/copy with the replaced copies deleted, restore, share saved, an upload's replaced files, an offline task added), `a.makeFolder`, `a.renameTo`, `a.recycleAct` (restore and purge), `a.emptyRecycle`, an upload finishing in `a.finished`, an offline task the page's poll sees finish, and `deleteDedup` (which then rewrites the cache at the new `gen`, so coming back needs no scan). Adding a new way to change the netdisk means counting it there too: a missed count shows results of before the change.
++
++Entering the page reads the cache again only when it is entered (`dedupEnter` notices the page's frame gap) and the results are of another `gen`, so a background change, an upload finishing while the page is open, does not throw the user's choice away.
++
+ **No-disk previews.** `internal/remote` reads files into memory via Range requests (`ReadAll` with size limits, or a seekable `File` with a chunk cache for streaming audio) and re-requests the link on 403. PDFs render through `internal/pdf`: PDFium compiled to WebAssembly, run in wazero, pool started lazily by `pdf.Warm`. The PDF viewer lays its pages out itself in a `ScrollBoth` (`layoutPDF`), zooms like the image viewer (pinch, Cmd with the wheel, Cmd +/-/0, the buttons) keeping the point under the pointer on its page, and draws each page whole at 2 px per DIP up to `pdfPixels`; zoomed in further, the part in view (plus `pdfAround`) is drawn over it with `RenderPart`, snapped to the whole page's pixels so the two line up. Pages far from view drop their pictures. Video, and audio formats MyGo's `audio` package can't decode, go to mpv via `internal/player` with `--user-agent` and `--http-header-fields-append=Cookie: …`.
+ 
+ **Transfers (`internal/transfer`).** `Manager` is a queue run by `Parallel`. Downloads fetch 4 MB blocks over `Threads` connections into `<file>.bngdl`, with a `.bngdl.json` sidecar of finished blocks for resume. Task state persists to `transfers.json` in the user data dir. `OnChange`/`OnFinish` are called outside the manager's lock and read tasks back through `Tasks()`. Don't call them while holding `m.mu`: that deadlocked once.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0044437..7eb7eb6 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,9 +6,14 @@
+ 
+ ### 新增
+ 
++- 查重结果行新增右键菜单：打开预览（同一重复组的图片可在预览里用左右键翻页）、在文件夹中显示、复制路径。
+ - 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。删除前会重新读取所在目录，核对 fs_id、大小和 MD5，并确保每组仍留有一份，过期或被替换的文件不会误删。
+ - 文件浏览器新增剪切 / 复制 / 粘贴（Cmd+X / Cmd+C / Cmd+V）：文件剪贴板只在应用内，跨文件夹移动或复制沿用“复制到…”的同名冲突处理（跳过 / 替换 / 保留两者）；剪切成功后才清空剪贴板，失败、取消或全部跳过时保留可重试，复制则可连续粘贴；剪切到原文件夹、把文件夹粘进自身或子目录会被拒绝，注销时清空。另有 Cmd+A 全选、Cmd+Shift+C 复制网盘路径、Cmd+Shift+V 始终打开系统剪贴板里的分享链接（Cmd+V 在文件剪贴板为空时才这么做）、F5 刷新；右键菜单与状态栏显示剪贴板状态，被剪切的行标出“待移动”，README 增补了快捷键说明。
+ 
++### 改进
++
++- 查重结果会缓存到用户数据目录（`dedup.json`，默认 7 天内有效）：网盘文件没有变动时，再次进入查重页立即显示上次结果，不再整盘重扫；删除、移动 / 复制、重命名、新建文件夹、还原或清空回收站、上传完成、离线下载完成等改动会记一次变更，使缓存失效并在进入页面时自动重扫；扫描期间有改动则不写缓存，并在页头提示重新扫描。
++
+ ### 修复
+ 
+ - 不再在窗口获得焦点或登录时自动读取剪贴板，避免剪贴板所有者无响应时 GTK 的同步读取卡住主线程；分享链接改由文件工具栏的链接按钮或 Cmd-V 显式读取。
+diff --git a/CLAUDE.md b/CLAUDE.md
+index e992fac..0a05b2e 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -65,6 +65,12 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Duplicate files (`internal/dedup`).** The dedup page reads no file content: `dedup.Scan` walks the folders under a root four at a time (capped at 50,000 files and 5,000 folders, cancelable, reporting progress), and `dedup.Groups` groups what it found by size and MD5, the hash the list API already returns (scrambled there, decrypted in `internal/baidu/list.go` with `baidupcs.DecryptMD5`). Entries with no MD5 are counted and skipped as `缺少哈希，已跳过`; 0-byte files and single files are no group. Groups come by the space freeing all but one copy would free. `app/dedup.go` runs the scan on a goroutine and writes back through `a.update`, throttling progress to about every 180 ms; it keeps the earliest modified copy of each group by default (its path breaking a tie), and `Client.Delete` moves the chosen copies to the recycle bin. Before deleting, it reads the parents' listings again and checks each file still has the scanned fs_id, size and MD5, and that every group keeps a copy; a stale result deletes nothing. The web `filemetas` endpoint is not used to fill in missing hashes.
+ 
++Its results are kept between runs in `dedup.json` under the user data dir (`mygo.PathUserData`; tests point `dedupStoreDir` at a temp folder, and the fake netdisk writes nothing), 0600, written atomically (tmp+rename) on a goroutine. The file holds a layout `version`, the account's `uid`, the netdisk `gen` the results describe, the root, `scanned_at`, the statistics and the duplicate groups only — never every scanned file — and reading it back rebuilds the groups (`dedup.Without` regroups them after a delete, so a group of one copy is no group and the order stays by reclaim). `enterDedup` reads and parses it on a goroutine (a few thousand groups), then either fills `dedupState` (`started`, `loaded`, no scan; the header says 上次扫描于 … · 文件未变动，直接显示上次结果) or scans the cached root, else "/". It is valid only while `version` and `uid` match, `gen` equals `App.netdiskGen`, and it is under `dedupCacheAge` (7 days: changes made from another device are not counted here). A scan records the `gen` it started at and writes the cache only if the netdisk did not change meanwhile; else the header says 扫描期间有文件变动，建议重新扫描 and nothing is cached.
++
++`App.netdiskGen` is the persisted change counter that `gen` is compared with: it is restored for the signed-in account at sign-in from `dedup-gen.json` (a tiny file beside the cache) and counted up by `a.netdiskChanged()` on every successful change the app makes to the netdisk — `a.remove` (and the undo's `Restore` through `a.run`), every `a.run` success (move/copy with the replaced copies deleted, restore, share saved, an upload's replaced files, an offline task added), `a.makeFolder`, `a.renameTo`, `a.recycleAct` (restore and purge), `a.emptyRecycle`, an upload finishing in `a.finished`, an offline task the page's poll sees finish, and `deleteDedup` (which then rewrites the cache at the new `gen`, so coming back needs no scan). Adding a new way to change the netdisk means counting it there too: a missed count shows results of before the change.
++
++Entering the page reads the cache again only when it is entered (`dedupEnter` notices the page's frame gap) and the results are of another `gen`, so a background change, an upload finishing while the page is open, does not throw the user's choice away.
++
+ **No-disk previews.** `internal/remote` reads files into memory via Range requests (`ReadAll` with size limits, or a seekable `File` with a chunk cache for streaming audio) and re-requests the link on 403. PDFs render through `internal/pdf`: PDFium compiled to WebAssembly, run in wazero, pool started lazily by `pdf.Warm`. The PDF viewer lays its pages out itself in a `ScrollBoth` (`layoutPDF`), zooms like the image viewer (pinch, Cmd with the wheel, Cmd +/-/0, the buttons) keeping the point under the pointer on its page, and draws each page whole at 2 px per DIP up to `pdfPixels`; zoomed in further, the part in view (plus `pdfAround`) is drawn over it with `RenderPart`, snapped to the whole page's pixels so the two line up. Pages far from view drop their pictures. Video, and audio formats MyGo's `audio` package can't decode, go to mpv via `internal/player` with `--user-agent` and `--http-header-fields-append=Cookie: …`.
+ 
+ **Transfers (`internal/transfer`).** `Manager` is a queue run by `Parallel`. Downloads fetch 4 MB blocks over `Threads` connections into `<file>.bngdl`, with a `.bngdl.json` sidecar of finished blocks for resume. Task state persists to `transfers.json` in the user data dir. `OnChange`/`OnFinish` are called outside the manager's lock and read tasks back through `Tasks()`. Don't call them while holding `m.mu`: that deadlocked once.
+diff --git a/README.md b/README.md
+index 5abeb7c..6143681 100644
+--- a/README.md
++++ b/README.md
+@@ -21,6 +21,8 @@
+   - 视频（及其它音频）：交给 **mpv**，经本地回环服务按块读取网盘直链
+ - **文件操作**：新建文件夹、重命名、移动 / 复制（文件夹选择器）、删除（无需确认，提示条里可撤销）、回收站
+ - **查重**：按网盘列表里的 MD5 与文件大小，在整个网盘或选定的文件夹里递归找出重复文件；按可释放空间分组，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；删除前会再次核对文件是否仍是扫描时的那一份
++  - 结果会缓存（默认 7 天内有效）：文件没变动时再次进入立即显示上次结果，不必重扫；在应用里删除、移动 / 复制、重命名、新建文件夹、还原或清空回收站、上传完成、离线下载完成等改动会自动让缓存失效，进入页面时重扫，“重新扫描”按钮随时可以强制全盘重扫
++  - 结果行右键可以打开预览（同组里的图片在预览里用 ←/→ 翻页）、在文件夹中显示、复制路径
+ - **传输**：多连接分块下载、断点续传、过期链接自动刷新；上传支持秒传与分片；拖文件进窗口即上传
+ - **自动调优**：按实测依次选出下载线路、每个文件的连接数、块大小、同时传输的文件数和上传连接数，每种会员等级每周测一次；连接数也可以手动指定
+ - **跟系统配合**：只运行一个实例，Dock 图标显示传输数和进度，传输时不让电脑休眠，完成后发通知（点开定位到文件），断网或睡眠时传输排队，恢复后接着传；网盘请求和扫码登录跟随系统代理与 PAC
+@@ -53,6 +55,7 @@ macOS 上是 ⌘（Command），其它平台上是 Ctrl；下表写作 Cmd。
+ | `Cmd+V` | 粘贴文件剪贴板；它为空时改为打开系统剪贴板里的分享链接 |
+ | `Cmd+Shift+V` | 始终打开系统剪贴板里的分享链接 |
+ | `Cmd+Shift+C` | 复制选中文件的网盘路径，多个文件一行一个 |
++| 右键 | 文件行的右键菜单；查重结果行上可打开预览、在文件夹中显示、复制路径 |
+ 
+ 剪切 / 复制 / 粘贴的规则：
+ 
+@@ -114,7 +117,7 @@ echo '{"id":1,"method":"windows"}' | socat - UNIX-CONNECT:/tmp/baidunetgo.sock
+ | `internal/baidu` | 网盘客户端：登录（含二维码）、列表、直链、文件操作、分享、离线 |
+ | `internal/auth` | 加密保存登录状态，密钥放在系统钥匙串 |
+ | `internal/migrate`、`internal/pcsimport` | 沿用百度网盘 Linux 客户端、BaiduPCS-Go 的登录 |
+-| `internal/dedup` | 查重：按大小与网盘 MD5 分组，并发遍历目录 |
++| `internal/dedup` | 查重：按大小与网盘 MD5 分组，并发遍历目录，从已有分组剔除已删除的文件 |
+ | `internal/remote` | 基于 HTTP Range 的内存读取，预览与边播 |
+ | `internal/stream` | 给 mpv 用的本地回环服务，把请求拆成有界的分块 |
+ | `internal/pdf` | PDFium（WebAssembly）渲染 |
+diff --git a/app/app.go b/app/app.go
+index d31e863..9242559 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -74,10 +74,18 @@ type App struct {
+ 	sharesDirty  bool
+ 	offline      offlineState
+ 	dedup        dedupState
+-	copied       string // the toast after copying
+-	query        string
+-	copyText     string // to put on the clipboard in the next frame
+-	copyPNG      []byte // the same, for a picture
++	// netdiskGen counts the successful changes the user made to the
++	// netdisk, which the dedup page's cached results are checked against
++	// (dedup.go). It is kept with that cache, so a restart knows whether
++	// the results still describe the netdisk; netdiskGenUID is the account
++	// it counts for.
++	netdiskGen    uint64
++	netdiskGenUID uint64
++	frame         uint64 // counts views, to notice a page coming back to
++	copied        string // the toast after copying
++	query         string
++	copyText      string // to put on the clipboard in the next frame
++	copyPNG       []byte // the same, for a picture
+ 	// clipRead reads the clipboard on an explicit command (Cmd-V or the
+ 	// toolbar's link button). Tests swap it to count the reads.
+ 	clipRead func(*ui.Context) string
+@@ -212,6 +220,7 @@ func (a *App) runQueued(c *ui.Context) {
+ 
+ // View builds the window's interface.
+ func (a *App) View(c *ui.Context) {
++	a.frame++
+ 	if a.win == nil {
+ 		a.runQueued(c)
+ 	}
+diff --git a/app/dedup.go b/app/dedup.go
+index bc1a690..c8b4f84 100644
+--- a/app/dedup.go
++++ b/app/dedup.go
+@@ -2,12 +2,16 @@ package app
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"errors"
++	"os"
+ 	"path"
++	"path/filepath"
+ 	"slices"
+ 	"strings"
+ 	"time"
+ 
++	"github.com/egoist/mygo"
+ 	"github.com/egoist/mygo/plugins/loading"
+ 	"github.com/egoist/mygo/ui"
+ 
+@@ -33,7 +37,6 @@ type dedupRow struct {
+ type dedupState struct {
+ 	root   string // the folder scanned, and to scan again
+ 	groups []dedup.Group
+-	files  []baidu.File // everything found, to group again after a delete
+ 	rows   []dedupRow
+ 
+ 	scannedDirs, scannedFiles int
+@@ -46,11 +49,22 @@ type dedupState struct {
+ 	started  bool // the first scan was asked for
+ 	canceled bool
+ 	loaded   bool
++	loading  bool   // reading the results of the last scan
+ 	err      string // why the scan failed
+ 	curDir   string // the folder being read
+ 	scanID   uint64
++	loadID   uint64 // counts reads of the cache, to drop an older one
+ 	cancel   context.CancelFunc
+ 
++	// The results in hand: when they were scanned, whether they came from
++	// the cache, whether the netdisk changed while the scan ran, and the
++	// generation of the netdisk they describe.
++	scannedAt  time.Time
++	cached     bool
++	stale      bool
++	resultsGen uint64
++	shown      uint64 // the frame that showed the page last, to notice its entry
++
+ 	chosen   map[string]bool // files to move to the recycle bin, by path
+ 	selCount int
+ 	selBytes int64
+@@ -77,16 +91,20 @@ func (a *App) startDedupScan(dir string) {
+ 	dir = path.Clean("/" + strings.TrimPrefix(dir, "/"))
+ 	d.root, d.scanning, d.started = dir, true, true
+ 	d.canceled, d.loaded, d.err, d.actErr = false, false, "", ""
++	d.loading = false
++	d.loadID++ // a read of the cache under way is no longer wanted
+ 	d.confirm, d.picking = false, false
+-	d.groups, d.rows, d.files = nil, nil, nil
++	d.groups, d.rows = nil, nil
+ 	d.skipped, d.failed, d.totalReclaim = 0, 0, 0
+ 	d.scannedDirs, d.scannedFiles, d.truncated = 0, 0, false
++	d.cached, d.stale, d.scannedAt = false, false, time.Time{}
+ 	d.curDir = dir
+ 	d.chosen = map[string]bool{}
+ 	d.selCount, d.selBytes = 0, 0
+ 	d.scrollTop = true
+ 	d.scanID++
+ 	id := d.scanID
++	gen := a.netdiskGen // the netdisk these results will be of
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	d.cancel = cancel
+ 	client := s.client
+@@ -131,11 +149,20 @@ func (a *App) startDedupScan(dir string) {
+ 			case err != nil:
+ 				d.err = err.Error()
+ 			default:
+-				d.loaded = true
+-				d.files = res.Files
++				d.loaded, d.cached = true, false
++				d.scannedAt = time.Now()
+ 				d.groups, d.skipped = dedup.Groups(res.Files)
++				d.resultsGen = a.netdiskGen
++				// A change under the scan may have moved or deleted what
++				// it read: the results are kept but not trusted, and the
++				// cache keeps nothing, as it would say they are the
++				// netdisk's.
++				d.stale = a.netdiskGen != gen
+ 				d.flatten()
+ 				d.chooseDefaults()
++				if !d.stale {
++					a.saveDedupCache()
++				}
+ 			}
+ 		})
+ 	}()
+@@ -149,6 +176,336 @@ func (a *App) cancelDedupScan() {
+ 	}
+ }
+ 
++// The scan's results are kept between runs, with a generation that counts
++// the changes the user made to the netdisk: the page shows them at once
++// while the netdisk still holds what they describe, and scans again when
++// anything changed. The generation lives beside the results, in a file of
++// its own, so that a change costs one small write and not the whole cache.
++const (
++	// dedupCacheVersion is the layout of both files; a file of another
++	// layout is no cache this app wrote, and the netdisk is scanned again.
++	dedupCacheVersion = 1
++	// dedupCacheMax is the largest cache file read: it holds the duplicate
++	// groups only, so anything bigger is no cache of ours.
++	dedupCacheMax = 64 << 20
++	// dedupCacheAge is how long results are trusted with the netdisk
++	// unchanged, so that changes made from another device or client, which
++	// are not counted here, cannot leave the page on old results forever.
++	dedupCacheAge = 7 * 24 * time.Hour
++)
++
++// dedupStoreDir is where the page keeps its cache and its generation;
++// tests point it at a temporary folder, which is the only thing written
++// from the fake netdisk, so that neither them nor it touch the user's data
++// directory.
++var dedupStoreDir string
++
++// dedupDir is where the page keeps what outlasts the app, "" for nowhere.
++func (a *App) dedupDir() string {
++	if dedupStoreDir != "" {
++		return dedupStoreDir
++	}
++	if a.fake {
++		return "" // the pretend netdisk keeps nothing on disk
++	}
++	dir, err := mygo.App.Path(mygo.PathUserData)
++	if err != nil {
++		return ""
++	}
++	return dir
++}
++
++func (a *App) dedupCachePath() string {
++	if dir := a.dedupDir(); dir != "" {
++		return filepath.Join(dir, "dedup.json")
++	}
++	return ""
++}
++
++func (a *App) dedupGenPath() string {
++	if dir := a.dedupDir(); dir != "" {
++		return filepath.Join(dir, "dedup-gen.json")
++	}
++	return ""
++}
++
++// dedupCache is what a scan found, as it is kept: the groups only, the
++// fields of each file the page and the delete's checks need, and the
++// folder and statistics it was found under. The groups are kept in the
++// order Groups makes them, so that showing them again reorders nothing.
++type dedupCache struct {
++	Version   int               `json:"version"`
++	UID       uint64            `json:"uid"` // the account the paths are of
++	Gen       uint64            `json:"gen"` // the netdisk it describes
++	Root      string            `json:"root"`
++	ScannedAt time.Time         `json:"scanned_at"`
++	Dirs      int               `json:"dirs"`
++	Files     int               `json:"files"`
++	Skipped   int               `json:"skipped,omitempty"`
++	Failed    int               `json:"failed,omitempty"`
++	Truncated bool              `json:"truncated,omitempty"`
++	Groups    []dedupCacheGroup `json:"groups"`
++}
++
++// dedupCacheGroup is a group of duplicates as the cache keeps it: what it
++// recycles, cut down to the file's fields.
++type dedupCacheGroup struct {
++	Size  int64            `json:"size"`
++	MD5   string           `json:"md5"`
++	Files []dedupCacheFile `json:"files"`
++}
++
++// dedupCacheFile is a file of a group as the cache keeps it. The page's
++// list and the delete's checks read nothing else.
++type dedupCacheFile struct {
++	FsID  int64  `json:"id"`
++	Path  string `json:"path"`
++	Name  string `json:"name"`
++	Size  int64  `json:"size"`
++	MD5   string `json:"md5"`
++	Mtime int64  `json:"mtime"`
++}
++
++// groups returns the cached groups as the page holds them, the most to
++// free first, each keeping its earliest modified copy first.
++func (c dedupCache) groups() []dedup.Group {
++	out := make([]dedup.Group, 0, len(c.Groups))
++	for _, cg := range c.Groups {
++		if cg.Size <= 0 || len(cg.Files) < 2 {
++			continue
++		}
++		g := dedup.Group{Key: dedup.Key{Size: cg.Size, MD5: cg.MD5}}
++		for _, cf := range cg.Files {
++			// A cache that disagrees with itself is no cache: only the
++			// files that are the group's are kept.
++			if cf.Path == "" || cf.Size != cg.Size || cf.MD5 != cg.MD5 {
++				continue
++			}
++			name := cf.Name
++			if name == "" {
++				name = path.Base(cf.Path)
++			}
++			g.Files = append(g.Files, baidu.File{
++				FsID: cf.FsID, Path: cf.Path, Name: name,
++				Size: cf.Size, MD5: cf.MD5, Mtime: cf.Mtime,
++			})
++		}
++		if len(g.Files) < 2 {
++			continue
++		}
++		g.Reclaim = g.Key.Size * int64(len(g.Files)-1)
++		out = append(out, g)
++	}
++	return out
++}
++
++// readDedupCache reads the results kept at p, reporting whether they are
++// there and of the layout this app writes. It runs off the UI thread, as
++// the file can hold thousands of groups.
++func readDedupCache(p string) (dedupCache, bool) {
++	if p == "" {
++		return dedupCache{}, false
++	}
++	data, err := os.ReadFile(p)
++	if err != nil || len(data) > dedupCacheMax {
++		return dedupCache{}, false
++	}
++	var c dedupCache
++	if json.Unmarshal(data, &c) != nil || c.Version != dedupCacheVersion {
++		return dedupCache{}, false
++	}
++	return c, true
++}
++
++// writeFileAtomic writes data to p so that a crash leaves either the old
++// file or the new one, never half of either.
++func writeFileAtomic(p string, data []byte) {
++	tmp := p + ".tmp"
++	if os.WriteFile(tmp, data, 0o600) != nil {
++		return
++	}
++	if os.Rename(tmp, p) != nil {
++		os.Remove(tmp)
++	}
++}
++
++// saveDedupCache keeps the results in hand with the netdisk's generation,
++// so that coming back to the page need not scan again. The file is
++// marshalled and written on a goroutine: it can hold thousands of groups.
++func (a *App) saveDedupCache() {
++	p := a.dedupCachePath()
++	if p == "" || a.sess == nil {
++		return
++	}
++	c := a.dedupCacheNow(a.sess.user.UID)
++	go func() {
++		data, err := json.Marshal(c)
++		if err != nil {
++			return
++		}
++		writeFileAtomic(p, data)
++	}()
++}
++
++// dedupCacheNow is the results in hand, as the cache keeps them. It copies
++// them, so that writing them on a goroutine reads nothing that the page
++// may change meanwhile.
++func (a *App) dedupCacheNow(uid uint64) dedupCache {
++	d := &a.dedup
++	c := dedupCache{
++		Version: dedupCacheVersion, UID: uid, Gen: a.netdiskGen,
++		Root: d.root, ScannedAt: d.scannedAt,
++		Dirs: d.scannedDirs, Files: d.scannedFiles,
++		Skipped: d.skipped, Failed: d.failed, Truncated: d.truncated,
++		Groups: make([]dedupCacheGroup, 0, len(d.groups)),
++	}
++	for _, g := range d.groups {
++		cg := dedupCacheGroup{Size: g.Key.Size, MD5: g.Key.MD5, Files: make([]dedupCacheFile, 0, len(g.Files))}
++		for _, f := range g.Files {
++			cg.Files = append(cg.Files, dedupCacheFile{
++				FsID: f.FsID, Path: f.Path, Name: f.Name,
++				Size: f.Size, MD5: f.MD5, Mtime: f.Mtime,
++			})
++		}
++		c.Groups = append(c.Groups, cg)
++	}
++	return c
++}
++
++// dedupGen is the netdisk's generation as it is kept: a change counts up,
++// so that a restart still knows the cache predates it.
++type dedupGen struct {
++	Version int    `json:"version"`
++	UID     uint64 `json:"uid"`
++	Gen     uint64 `json:"gen"`
++}
++
++// loadNetdiskGen restores the generation counted for the account uid.
++func (a *App) loadNetdiskGen(uid uint64) {
++	a.netdiskGen, a.netdiskGenUID = 0, uid
++	p := a.dedupGenPath()
++	if p == "" {
++		return
++	}
++	data, err := os.ReadFile(p)
++	if err != nil {
++		return
++	}
++	var g dedupGen
++	if json.Unmarshal(data, &g) == nil && g.Version == dedupCacheVersion && g.UID == uid {
++		a.netdiskGen = g.Gen
++	}
++}
++
++// netdiskChanged records that the user changed the netdisk (deleted,
++// moved, copied, renamed, made a folder, restored or emptied the recycle
++// bin, uploaded, or had an offline download finish), so the results of the
++// last scan no longer describe it. The count is written at once: a restart
++// must not trust the cache again. It runs on the UI thread.
++func (a *App) netdiskChanged() {
++	a.netdiskGen++
++	p := a.dedupGenPath()
++	if p == "" {
++		return
++	}
++	data, err := json.Marshal(dedupGen{Version: dedupCacheVersion, UID: a.netdiskGenUID, Gen: a.netdiskGen})
++	if err != nil {
++		return
++	}
++	writeFileAtomic(p, data)
++}
++
++// dedupCacheFresh reports whether the cached results still describe the
++// netdisk: the cache is this app's layout, of the account signed in, of the
++// generation the netdisk is at, and not old enough for another client's
++// changes to be expected.
++func (a *App) dedupCacheFresh(c dedupCache, uid uint64) bool {
++	if a.sess == nil || c.UID != uid || c.Gen != a.netdiskGen || c.Version != dedupCacheVersion {
++		return false
++	}
++	if c.ScannedAt.IsZero() {
++		return false
++	}
++	return time.Since(c.ScannedAt) <= dedupCacheAge
++}
++
++// enterDedup fills the page on its way in: the last scan's results when the
++// netdisk has not changed since, else a scan of the folder scanned last
++// time, "/" the first time. The cache is read and parsed on a goroutine,
++// as it can hold thousands of groups, and the page shows its skeleton until
++// it comes in.
++func (a *App) enterDedup() {
++	s := a.sess
++	d := &a.dedup
++	if s == nil || d.scanning || d.busy || d.loading {
++		return
++	}
++	d.loading = true
++	d.loadID++
++	id, root, uid := d.loadID, d.root, s.user.UID
++	cachePath := a.dedupCachePath()
++	go func() {
++		c, ok := readDedupCache(cachePath)
++		a.update(func() {
++			if a.sess != s || d.loadID != id {
++				return
++			}
++			d.loading = false
++			if ok && a.dedupCacheFresh(c, uid) {
++				a.applyDedupCache(c)
++				return
++			}
++			// No results the netdisk still has: scan the folder this page
++			// scanned, else the one the cache scanned, else all of it.
++			if root == "" && ok {
++				root = c.Root
++			}
++			if root == "" {
++				root = "/"
++			}
++			a.startDedupScan(root)
++		})
++	}()
++}
++
++// applyDedupCache shows the results a scan left, as they were.
++func (a *App) applyDedupCache(c dedupCache) {
++	d := &a.dedup
++	d.root = c.Root
++	if d.root == "" {
++		d.root = "/"
++	}
++	d.scannedDirs, d.scannedFiles = c.Dirs, c.Files
++	d.skipped, d.failed, d.truncated = c.Skipped, c.Failed, c.Truncated
++	d.groups = c.groups()
++	d.flatten()
++	d.chooseDefaults()
++	d.loaded, d.loading, d.scanning = true, false, false
++	d.started, d.canceled, d.err = true, false, ""
++	d.cached, d.stale = true, false
++	d.scannedAt = c.ScannedAt
++	d.resultsGen = a.netdiskGen
++	d.curDir = ""
++	d.scrollTop = true
++}
++
++// dedupEnter reads the page again when it comes back to and the netdisk
++// changed while it was away. A page built every frame keeps what it has, so
++// that a change under the user's eyes, an upload finishing while they read
++// the results, does not throw their choice away.
++func (a *App) dedupEnter() {
++	d := &a.dedup
++	entering := d.shown == 0 || d.shown != a.frame-1
++	d.shown = a.frame
++	if !entering || d.loading || d.scanning || d.busy {
++		return
++	}
++	if d.started && (!d.loaded || d.resultsGen == a.netdiskGen) {
++		return
++	}
++	a.enterDedup()
++}
++
+ // flatten turns the groups into the list's lines.
+ func (d *dedupState) flatten() {
+ 	d.rows = d.rows[:0]
+@@ -317,12 +674,20 @@ func (a *App) deleteDedup() {
+ 			for _, f := range safe {
+ 				dirs[path.Dir(f.Path)] = true
+ 			}
+-			d.files = slices.DeleteFunc(d.files, func(f baidu.File) bool { return gone[f.Path] })
+-			d.groups, d.skipped = dedup.Groups(d.files)
++			// Only duplicates are in the groups, so the results after a
++			// delete are regrouped from them: the copies deleted are the
++			// only files that left, and a group of what is left is what
++			// Groups would find in it again.
++			d.groups = dedup.Without(d.groups, gone)
+ 			d.flatten()
+ 			d.chooseDefaults()
+ 			d.scrollTop = true
+ 			a.recycleDirty = true
++			// What is left is the netdisk's: the page shows it at once
++			// when it comes back to, without scanning again.
++			a.netdiskChanged()
++			d.resultsGen = a.netdiskGen
++			a.saveDedupCache()
+ 			for dir := range dirs {
+ 				a.reload(dir)
+ 			}
+@@ -406,9 +771,7 @@ func dedupStillThere(ctx context.Context, c *baidu.Client, groups []dedup.Group,
+ // dedupPage is the page of duplicate files.
+ func (a *App) dedupPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	d := &a.dedup
+-	if !d.started {
+-		a.startDedupScan("/")
+-	}
++	a.dedupEnter()
+ 	ui.Column(c).Grow(1).Children(func() {
+ 		a.dedupHeader(c, t, p)
+ 		switch {
+@@ -500,7 +863,9 @@ func (a *App) dedupHeader(c *ui.Context, t *ui.Theme, p *palette) {
+ 			if d.loaded {
+ 				label = "重新扫描"
+ 			}
+-			if pill(c, t, p, "refresh-cw", label, true).Disabled(d.busy).Clicked() {
++			// Reading the cache comes first: scanning meanwhile would throw
++			// away results the netdisk still has.
++			if pill(c, t, p, "refresh-cw", label, true).Disabled(d.busy || d.loading).Clicked() {
+ 				a.startDedupScan(d.root)
+ 			}
+ 		})
+@@ -522,6 +887,15 @@ func (a *App) dedupHeader(c *ui.Context, t *ui.Theme, p *palette) {
+ 			parts = append(parts, "已达上限，结果已截断")
+ 		}
+ 		figure(c, strings.Join(parts, " · ")).FontSize(11).TextColor(t.TextMuted).SingleLine()
++		switch {
++		case d.stale:
++			ui.Text(c, "扫描期间有文件变动，结果可能已过期，建议重新扫描").
++				FontSize(11).TextColor(t.Warning).SingleLine()
++		case d.cached && !d.scannedAt.IsZero():
++			now := c.Now()
++			ui.Text(c, "上次扫描于 "+stampTime(d.scannedAt.Unix(), now)+"（"+humanTime(d.scannedAt.Unix(), now)+"）· 文件未变动，直接显示上次结果").
++				FontSize(11).TextColor(t.TextMuted).SingleLine()
++		}
+ 		if d.loaded && len(d.groups) > 0 {
+ 			ui.Text(c, "每组默认保留修改时间最早的一份，勾选其余副本一起移入回收站").
+ 				FontSize(11).TextColor(p.Faint).SingleLine()
+@@ -622,9 +996,32 @@ func (a *App) dedupResults(c *ui.Context, t *ui.Theme, p *palette) {
+ 			}
+ 			d.recount()
+ 		}
++		a.dedupFileMenu(row, g, r.file)
+ 	}).Grow(1).Padding(4, 10, 12)
+ }
+ 
++// dedupFileMenu gives a result's row its context menu, on the file itself:
++// choosing one copy or the group's whole is the list's and the bar's
++// business, so nothing here would delete what was not asked for.
++func (a *App) dedupFileMenu(row ui.Element, g dedup.Group, fi int) {
++	f := g.Files[fi]
++	row.ContextMenu(func(m *ui.Menu) {
++		if !f.IsDir && m.Item("打开预览").Chosen() {
++			// The group's pictures are the ones the arrows step through:
++			// the page usually has no folder read, so its listing would
++			// show this file alone.
++			a.openPreviewAmong(f, g.Files)
++		}
++		if m.Item("在文件夹中显示").Chosen() {
++			a.router.Push(filesRoute(path.Dir(f.Path)))
++		}
++		m.Separator()
++		if m.Item("复制路径").Chosen() {
++			a.copy(f.Path, "已复制路径")
++		}
++	})
++}
++
+ // dedupGroupRow heads a group with its count and what it could free, and a
+ // way to keep just one of its copies.
+ func (a *App) dedupGroupRow(c *ui.Context, t *ui.Theme, p *palette, g dedup.Group, gi int) {
+diff --git a/app/dedup_test.go b/app/dedup_test.go
+index 511a44c..2f6b3cc 100644
+--- a/app/dedup_test.go
++++ b/app/dedup_test.go
+@@ -1,10 +1,21 @@
+ package app
+ 
+ import (
++	"context"
++	"encoding/json"
++	"os"
++	"path"
++	"path/filepath"
++	"strings"
+ 	"testing"
+ 	"time"
+ 
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/baidu"
++	"github.com/pengstem/baidunetgo/internal/dedup"
+ 	"github.com/pengstem/baidunetgo/internal/fakepan"
++	"github.com/pengstem/baidunetgo/internal/transfer"
+ )
+ 
+ // TestDedup finds the fake netdisk's duplicate files, keeps one copy of
+@@ -224,7 +235,397 @@ func TestDedupSignOutClears(t *testing.T) {
+ 	a.signOut()
+ 	tt.Advance(300 * time.Millisecond)
+ 	d := &a.dedup
+-	if d.started || d.scanning || d.loaded || d.groups != nil || d.files != nil || d.chosen != nil {
++	if d.started || d.scanning || d.loaded || d.groups != nil || d.chosen != nil {
+ 		t.Errorf("signing out left the dedup page with %+v", d)
+ 	}
+ }
++
++// dedupCacheIn keeps the dedup page's cache in a temporary folder for the
++// test, so that it never reads or writes the user's data directory.
++func dedupCacheIn(t *testing.T) string {
++	t.Helper()
++	dir := t.TempDir()
++	old := dedupStoreDir
++	dedupStoreDir = dir
++	t.Cleanup(func() { dedupStoreDir = old })
++	return dir
++}
++
++// waitDedupCache waits until the dedup page has written its cache at p.
++func waitDedupCache(t *testing.T, tt *ui.Tester, p string) dedupCache {
++	t.Helper()
++	deadline := time.Now().Add(5 * time.Second)
++	for {
++		if c, ok := readDedupCache(p); ok {
++			return c
++		}
++		if time.Now().After(deadline) {
++			t.Fatalf("no dedup cache at %s", p)
++		}
++		time.Sleep(10 * time.Millisecond)
++		tt.Advance(50 * time.Millisecond)
++	}
++}
++
++// signedInAt signs another app in to the same fake netdisk, as a second run
++// of the app over the same account would.
++func signedInAt(t *testing.T, srv *fakepan.Server) (*App, *ui.Tester) {
++	t.Helper()
++	a := New()
++	a.fake = true
++	go a.signInWith(baidu.OpenAt(baidu.Credentials{BDUSS: "fake", UID: 1}, srv.URL), false)
++	tt := ui.NewTester(a.View, 1180, 760)
++	tt.SetLocale("zh-Hans")
++	waitFor(t, tt, "照片")
++	return a, tt
++}
++
++// TestDedupCacheRestores checks that a scan's results are kept, and that
++// entering the page again with the netdisk unchanged shows them at once
++// instead of scanning again.
++func TestDedupCacheRestores(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	dir := dedupCacheIn(t)
++	a, tt, srv := signedIn(t)
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the dedup scan", func() bool { return a.dedup.loaded })
++	groups, files := len(a.dedup.groups), a.dedup.scannedFiles
++	if groups == 0 || files == 0 {
++		t.Fatalf("scan found %d groups of %d files", groups, files)
++	}
++
++	c := waitDedupCache(t, tt, filepath.Join(dir, "dedup.json"))
++	if c.UID != 1 || c.Gen != a.netdiskGen || c.Root != "/" {
++		t.Errorf("cache uid %d, gen %d, root %q; want 1, %d, /", c.UID, c.Gen, c.Root, a.netdiskGen)
++	}
++	if len(c.Groups) != groups || c.Files != files || c.Dirs != a.dedup.scannedDirs {
++		t.Errorf("cache %d groups of %d files in %d folders; want %d, %d, %d",
++			len(c.Groups), c.Files, c.Dirs, groups, files, a.dedup.scannedDirs)
++	}
++	if got := c.groups(); len(got) != groups || got[0].Reclaim != a.dedup.groups[0].Reclaim {
++		t.Errorf("cache reads back as %d groups, first reclaim %d", len(got), firstReclaim(got))
++	}
++
++	// A second run over the same netdisk: the page opens on the kept
++	// results, without a scan.
++	a2, tt2 := signedInAt(t, srv)
++	a2.router.Replace("/dedup")
++	waitUntil(t, tt2, "the cached results", func() bool { return a2.dedup.loaded || a2.dedup.scanning })
++	if a2.dedup.scanID != 0 || a2.dedup.scanning {
++		t.Errorf("the page scanned again: %d scans, scanning %v", a2.dedup.scanID, a2.dedup.scanning)
++	}
++	if !a2.dedup.cached || !a2.dedup.loaded {
++		t.Errorf("results not from the cache: cached %v, loaded %v", a2.dedup.cached, a2.dedup.loaded)
++	}
++	if len(a2.dedup.groups) != groups || a2.dedup.scannedFiles != files {
++		t.Errorf("restored %d groups of %d files, want %d, %d",
++			len(a2.dedup.groups), a2.dedup.scannedFiles, groups, files)
++	}
++	if !tt2.HasText("文件未变动") || !tt2.HasText("重新扫描") {
++		t.Errorf("the page does not say the results are the last scan's: %q", tt2.Texts())
++	}
++	save(t, tt2, "dedup-cached")
++}
++
++func firstReclaim(groups []dedup.Group) int64 {
++	if len(groups) == 0 {
++		return 0
++	}
++	return groups[0].Reclaim
++}
++
++// TestDedupCacheAfterDelete checks that deleting from the results keeps
++// them the netdisk's, so that coming back to the page shows them without a
++// scan, and that the cache written then does too.
++func TestDedupCacheAfterDelete(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	dir := dedupCacheIn(t)
++	a, tt, srv := signedIn(t)
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the dedup scan", func() bool { return a.dedup.loaded })
++	waitDedupCache(t, tt, filepath.Join(dir, "dedup.json"))
++
++	d := &a.dedup
++	d.clearSelection()
++	extra := d.groups[0].Files[1]
++	d.chosen[extra.Path] = true
++	d.recount()
++	gen := a.netdiskGen
++	a.deleteDedup()
++	waitUntil(t, tt, "the delete", func() bool {
++		return !d.busy && !srv.Exists(extra.Path) && a.netdiskGen == gen+1 && d.resultsGen == a.netdiskGen
++	})
++	groups := len(d.groups)
++	for i, g := range d.groups {
++		if len(g.Files) < 2 {
++			t.Errorf("group %d has %d copies left", i, len(g.Files))
++		}
++		if i > 0 && d.groups[i-1].Reclaim < g.Reclaim {
++			t.Errorf("group %d frees %d, after %d", i, g.Reclaim, d.groups[i-1].Reclaim)
++		}
++	}
++	c := waitDedupCache(t, tt, filepath.Join(dir, "dedup.json"))
++	if c.Gen != a.netdiskGen || len(c.Groups) != groups {
++		t.Fatalf("cache gen %d with %d groups; want %d, %d", c.Gen, len(c.Groups), a.netdiskGen, groups)
++	}
++
++	// Coming back to the page finds it unchanged, and the cache does too.
++	scans := d.scanID
++	a.router.Replace("/files")
++	tt.Advance(200 * time.Millisecond)
++	a.router.Replace("/dedup")
++	tt.Advance(300 * time.Millisecond)
++	if d.scanID != scans || !d.loaded {
++		t.Errorf("the page scanned again after a delete it kept up with: %d scans", d.scanID)
++	}
++	if len(d.groups) != groups {
++		t.Errorf("the page shows %d groups, want %d", len(d.groups), groups)
++	}
++	a2, tt2 := signedInAt(t, srv)
++	a2.router.Replace("/dedup")
++	waitUntil(t, tt2, "the cached results", func() bool { return a2.dedup.loaded || a2.dedup.scanning })
++	if a2.dedup.scanning || a2.dedup.scanID != 0 {
++		t.Errorf("the next run scanned again")
++	}
++	if len(a2.dedup.groups) != groups {
++		t.Errorf("next run has %d groups, want %d", len(a2.dedup.groups), groups)
++	}
++	if c := a2.dedupCacheNow(1); len(c.Groups) != groups {
++		t.Errorf("the next run holds %d groups", len(c.Groups))
++	}
++	if a2.dedup.groups[0].Files[0].Path == extra.Path {
++		t.Errorf("the deleted copy is still in the results")
++	}
++}
++
++// TestDedupCacheInvalidatedByChange checks that a change to the netdisk
++// counted by the app makes entering the page scan again.
++func TestDedupCacheInvalidatedByChange(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	dir := dedupCacheIn(t)
++	a, tt, srv := signedIn(t)
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the dedup scan", func() bool { return a.dedup.loaded })
++	waitDedupCache(t, tt, filepath.Join(dir, "dedup.json"))
++	gen, scans := a.netdiskGen, a.dedup.scanID
++
++	// A deletion, as the files page does it.
++	a.router.Replace("/files")
++	tt.Advance(200 * time.Millisecond)
++	a.remove("/文档", []baidu.File{{Path: "/文档/读我.txt"}})
++	waitUntil(t, tt, "the delete", func() bool { return !srv.Exists("/文档/读我.txt") && a.netdiskGen == gen+1 })
++	if c := a.dedupCacheNow(1); c.Gen != a.netdiskGen {
++		t.Fatalf("the cache would be written at gen %d, not %d", c.Gen, a.netdiskGen)
++	}
++
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the new scan", func() bool { return a.dedup.scanID > scans })
++	waitUntil(t, tt, "the new results", func() bool { return a.dedup.loaded })
++	if a.dedup.cached {
++		t.Error("the page shows the results of before the change")
++	}
++	for _, g := range a.dedup.groups {
++		for _, f := range g.Files {
++			if f.Path == "/文档/读我.txt" {
++				t.Error("the deleted file is in the new results")
++			}
++		}
++	}
++}
++
++// TestDedupCountsChanges checks that the changes the page cannot see made
++// by itself count up the netdisk's generation: a rename, a folder made, an
++// upload finished, and a dialog's operation.
++func TestDedupCountsChanges(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	gen := a.netdiskGen
++
++	l := a.listings["/"]
++	dir := l.files[0]
++	if !a.renameTo(l, dir.FsID, "改名后的文件夹") {
++		t.Fatal("the rename was refused")
++	}
++	waitUntil(t, tt, "the rename", func() bool { return a.netdiskGen == gen+1 })
++	if !srv.Exists("/改名后的文件夹") {
++		t.Error("the rename did not happen")
++	}
++
++	a.creating = &creating{dir: "/", first: "存档", draft: "存档", fresh: true}
++	a.makeFolder(l, true)
++	waitUntil(t, tt, "the folder", func() bool { return a.netdiskGen == gen+2 })
++	if !srv.Exists("/存档") {
++		t.Error("the folder was not made")
++	}
++
++	a.finished(transfer.Task{Kind: transfer.Upload, State: transfer.Done, Remote: "/照片/新.png"})
++	if a.netdiskGen != gen+3 {
++		t.Errorf("a finished upload counted %d changes, want %d", a.netdiskGen-gen, 3)
++	}
++
++	a.run(func(ctx context.Context, c *baidu.Client) error { return nil }, nil, "", nil)
++	waitUntil(t, tt, "the dialog's operation", func() bool { return a.netdiskGen == gen+4 })
++
++	// A download changes nothing on the netdisk.
++	a.finished(transfer.Task{Kind: transfer.Download, State: transfer.Done, Local: "/tmp/x"})
++	if a.netdiskGen != gen+4 {
++		t.Errorf("a finished download counted a change")
++	}
++}
++
++// TestDedupCacheRejected checks that no cache this app did not write, or
++// one that is too old, or one of another account, keeps the page from
++// scanning: each falls back to a scan, none of them panics.
++func TestDedupCacheRejected(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	group := func() []dedupCacheGroup {
++		return []dedupCacheGroup{{
++			Size: 5, MD5: "other",
++			Files: []dedupCacheFile{
++				{Path: "/没有这个文件.txt", Name: "没有这个文件.txt", Size: 5, MD5: "other"},
++				{Path: "/也没有这个.txt", Name: "也没有这个.txt", Size: 5, MD5: "other"},
++			},
++		}}
++	}
++	fresh := func(mut func(*dedupCache)) []byte {
++		c := dedupCache{Version: dedupCacheVersion, UID: 1, Root: "/", ScannedAt: time.Now(), Dirs: 3, Files: 9, Groups: group()}
++		mut(&c)
++		data, err := json.Marshal(c)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return data
++	}
++	for _, tc := range []struct {
++		name string
++		data []byte
++	}{
++		{"version", fresh(func(c *dedupCache) { c.Version = dedupCacheVersion + 1 })},
++		{"account", fresh(func(c *dedupCache) { c.UID = 99 })},
++		{"old", fresh(func(c *dedupCache) { c.ScannedAt = time.Now().Add(-dedupCacheAge - time.Hour) })},
++		{"corrupt", []byte(`{"version":1,"groups":[`)},
++		{"nothing", nil},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			dir := dedupCacheIn(t)
++			if tc.data != nil {
++				if err := os.WriteFile(filepath.Join(dir, "dedup.json"), tc.data, 0o600); err != nil {
++					t.Fatal(err)
++				}
++			}
++			a, tt, _ := signedIn(t)
++			a.router.Replace("/dedup")
++			waitUntil(t, tt, "the scan", func() bool { return a.dedup.scanID > 0 })
++			waitUntil(t, tt, "the results", func() bool { return a.dedup.loaded })
++			if a.dedup.cached || a.dedup.scanID != 1 {
++				t.Errorf("took the cache: cached %v, %d scans", a.dedup.cached, a.dedup.scanID)
++			}
++			for _, g := range a.dedup.groups {
++				for _, f := range g.Files {
++					if f.Path == "/没有这个文件.txt" {
++						t.Error("shows the cache's made-up group")
++					}
++				}
++			}
++		})
++	}
++}
++
++// TestDedupRowMenu checks the context menu of a result: opening the
++// preview of a picture with the group's other pictures for the arrows,
++// showing the file in its folder, and copying its path.
++func TestDedupRowMenu(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	a, tt, _ := signedIn(t)
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the dedup scan", func() bool { return a.dedup.loaded })
++	tt.Advance(300 * time.Millisecond)
++
++	var group dedup.Group
++	for _, g := range a.dedup.groups {
++		if len(g.Files) > 1 && kindOf(&g.Files[0]) == kindImage && kindOf(&g.Files[1]) == kindImage {
++			group = g
++			break
++		}
++	}
++	if len(group.Files) < 2 {
++		t.Fatal("the fake netdisk has no duplicate pictures")
++	}
++	f := group.Files[0]
++	// The page never reads the pictures' folder, so the preview has only
++	// the group to step through.
++	if a.listings[path.Dir(f.Path)] != nil {
++		t.Fatalf("the folder %q was read", path.Dir(f.Path))
++	}
++	chosen := len(a.dedup.chosen)
++	scans := a.dedup.scanID
++
++	rightClickRow(t, tt, f.Name)
++	tt.Advance(100 * time.Millisecond)
++	save(t, tt, "dedup-row-menu")
++	menu := strings.Join(tt.Menu(), "/")
++	for _, want := range []string{"打开预览", "在文件夹中显示", "复制路径"} {
++		if !strings.Contains(menu, want) {
++			t.Fatalf("menu %q lacks %q", menu, want)
++		}
++	}
++	if err := tt.ChooseMenuItem("打开预览"); err != nil {
++		t.Fatalf("%v; menu %q", err, tt.Menu())
++	}
++	tt.Advance(100 * time.Millisecond)
++	if a.pv == nil || a.pv.file.Path != f.Path {
++		t.Fatalf("preview of %+v", a.pv)
++	}
++	if len(a.pv.group) != len(group.Files) {
++		t.Fatalf("the preview steps through %d pictures, want the group's %d", len(a.pv.group), len(group.Files))
++	}
++	a.step(1)
++	if a.pv == nil || a.pv.file.Path == f.Path || a.pv.file.Path != group.Files[1].Path {
++		t.Errorf("the next picture is %+v", a.pv.file)
++	}
++	a.closePreview()
++	// The page kept everything it had: no scan, no choice lost.
++	if a.dedup.scanID != scans || len(a.dedup.chosen) != chosen || !a.dedup.loaded {
++		t.Errorf("the preview changed the page: %d scans, %d chosen", a.dedup.scanID, len(a.dedup.chosen))
++	}
++
++	// The path is copied.
++	tt.Advance(300 * time.Millisecond)
++	rightClickRow(t, tt, f.Name)
++	tt.Advance(100 * time.Millisecond)
++	if err := tt.ChooseMenuItem("复制路径"); err != nil {
++		t.Fatalf("%v; menu %q", err, tt.Menu())
++	}
++	tt.Advance(100 * time.Millisecond)
++	if got := tt.Clipboard(); got != f.Path {
++		t.Errorf("copied %q, want %q", got, f.Path)
++	}
++	if !tt.HasText("已复制路径") {
++		t.Errorf("no word of the copy: %q", tt.Texts())
++	}
++
++	// The file is shown in its folder.
++	rightClickRow(t, tt, f.Name)
++	tt.Advance(100 * time.Millisecond)
++	if err := tt.ChooseMenuItem("在文件夹中显示"); err != nil {
++		t.Fatalf("%v; menu %q", err, tt.Menu())
++	}
++	waitFor(t, tt, path.Base(f.Path))
++	if got := a.currentDir(); got != path.Dir(f.Path) {
++		t.Errorf("showing the file went to %q, want %q", got, path.Dir(f.Path))
++	}
++}
+diff --git a/app/newfolder.go b/app/newfolder.go
+index 227b1bc..9229701 100644
+--- a/app/newfolder.go
++++ b/app/newfolder.go
+@@ -186,6 +186,7 @@ func (a *App) makeFolder(l *listing, enter bool) {
+ 				m.busy, m.held, m.fresh = false, false, true
+ 				return
+ 			}
++			a.netdiskChanged()
+ 			m.made, m.loads = name, l.loads
+ 			a.reload(dir)
+ 		})
+diff --git a/app/offline.go b/app/offline.go
+index 1f614a9..6652d80 100644
+--- a/app/offline.go
++++ b/app/offline.go
+@@ -42,6 +42,9 @@ func (a *App) loadOffline() {
+ 			slices.SortFunc(items, func(x, y baidu.Offline) int { return int(y.Created - x.Created) })
+ 			for _, it := range items {
+ 				if it.Status == 0 && !slices.ContainsFunc(o.items, func(p baidu.Offline) bool { return p.ID == it.ID && p.Status == 0 }) && o.loaded {
++					// A task that just finished put its files on the
++					// netdisk.
++					a.netdiskChanged()
+ 					a.reload(it.SavePath)
+ 				}
+ 			}
+diff --git a/app/ops.go b/app/ops.go
+index 5ac5cff..7211729 100644
+--- a/app/ops.go
++++ b/app/ops.go
+@@ -58,7 +58,10 @@ func (a *App) ask(kind dialogKind, dir string, files []baidu.File) {
+ }
+ 
+ // run does an operation on the netdisk, then reloads the folders it
+-// changed and says how it went.
++// changed and says how it went. Every operation it runs changes what the
++// netdisk holds (a move, a copy, a restore, a share saved, the file an
++// upload replaces, an offline task): its success counts as one change to
++// the netdisk, which the dedup page's cached results are checked against.
+ func (a *App) run(op func(ctx context.Context, c *baidu.Client) error, dirs []string, done string, after func()) {
+ 	s := a.sess
+ 	if s == nil {
+@@ -77,6 +80,7 @@ func (a *App) run(op func(ctx context.Context, c *baidu.Client) error, dirs []st
+ 				return
+ 			}
+ 			a.dlg.open = false
++			a.netdiskChanged()
+ 			for _, d := range dirs {
+ 				a.reload(d)
+ 			}
+@@ -132,10 +136,12 @@ func (a *App) remove(dir string, files []baidu.File) {
+ 				a.toast(err.Error(), "error")
+ 				return
+ 			}
++			a.netdiskChanged()
+ 			a.pendingToasts = append(a.pendingToasts, ui.Toast{
+ 				Title: "已将" + countLabel(files) + "移到回收站", Type: "success", Action: "撤销", Timeout: undoToast,
+ 				OnAction: func() {
+ 					a.spare(ids)
++					// Restoring is another change, counted by a.run.
+ 					a.run(func(ctx context.Context, c *baidu.Client) error { return c.Restore(ctx, ids) }, []string{dir}, "已还原", nil)
+ 				},
+ 			})
+diff --git a/app/preview.go b/app/preview.go
+index ad063fa..4a35b8b 100644
+--- a/app/preview.go
++++ b/app/preview.go
+@@ -89,6 +89,15 @@ func (pv *previewState) close() {
+ // openPreview shows a file's content: in the overlay for what the app
+ // shows itself, in mpv for video and audio it does not play.
+ func (a *App) openPreview(f baidu.File) {
++	a.openPreviewAmong(f, nil)
++}
++
++// openPreviewAmong shows f's content as openPreview does, with siblings as
++// the pictures the arrows step through when f is a picture: a group of
++// duplicates the page found, whose folder the app may never have read.
++// Other kinds read no siblings, and a folder read is used when there are
++// none, as in the browser.
++func (a *App) openPreviewAmong(f baidu.File, siblings []baidu.File) {
+ 	k := kindOf(&f)
+ 	switch {
+ 	case k == kindVideo:
+@@ -103,13 +112,18 @@ func (a *App) openPreview(f baidu.File) {
+ 	}
+ 	pv := &previewState{file: f, kind: k, zoom: 1}
+ 	if k == kindImage {
+-		if l := a.listings[path.Dir(f.Path)]; l != nil {
+-			for _, g := range l.files {
+-				if kindOf(&g) == kindImage {
+-					pv.group = append(pv.group, g)
+-				}
++		if len(siblings) == 0 {
++			siblings = a.listingPictures(path.Dir(f.Path))
++		}
++		for _, g := range siblings {
++			if kindOf(&g) == kindImage {
++				pv.group = append(pv.group, g)
+ 			}
+ 		}
++		// The file shown is among them, so that the arrows count from it.
++		if len(pv.group) == 0 || !pv.groupHas(f) {
++			pv.group = append([]baidu.File{f}, pv.group...)
++		}
+ 		if f.Thumb != "" && a.thumbs != nil {
+ 			for _, small := range []bool{false, true} {
+ 				if e := a.thumbs.entries[thumbKeyOf(&f, small)]; e != nil && e.bmp != nil && pv.thumb == nil {
+@@ -122,6 +136,20 @@ func (a *App) openPreview(f baidu.File) {
+ 	a.loadPreview(pv)
+ }
+ 
++// listingPictures are the pictures of a folder the browser has read, the
++// ones the arrows step through beside the file opened from it.
++func (a *App) listingPictures(dir string) []baidu.File {
++	var out []baidu.File
++	if l := a.listings[dir]; l != nil {
++		for _, g := range l.files {
++			if kindOf(&g) == kindImage {
++				out = append(out, g)
++			}
++		}
++	}
++	return out
++}
++
+ func inAppAudio(name string) bool {
+ 	switch strings.ToLower(path.Ext(name)) {
+ 	case ".mp3", ".ogg", ".oga", ".wav":
+@@ -311,14 +339,16 @@ func (a *App) playInMPV(f baidu.File) {
+ 	a.toast("正在用 mpv 播放「"+f.Name+"」", "")
+ }
+ 
+-// step shows the picture before (-1) or after (+1) in its folder.
++// step shows the picture before (-1) or after (+1) in its group.
+ func (a *App) step(d int) {
+ 	pv := a.pv
+ 	if pv == nil || len(pv.group) < 2 {
+ 		return
+ 	}
+ 	i := (pv.groupIndex() + d + len(pv.group)) % len(pv.group)
+-	a.openPreview(pv.group[i])
++	// The group is kept as it is: a group of duplicates came from the page
++	// that found them, not from a folder the app has read.
++	a.openPreviewAmong(pv.group[i], pv.group)
+ }
+ 
+ // previewOverlay shows the file being previewed over the window.
+@@ -1026,12 +1056,29 @@ func clock(d time.Duration) string {
+ 	return itoa(s/60) + ":" + pad2(s%60)
+ }
+ 
+-// groupIndex returns where the picture shown is among its folder's.
++// groupIndex returns where the picture shown is among its group's: by
++// fs_id, which files read from a listing always have, else by path, as a
++// file made up without one is.
+ func (pv *previewState) groupIndex() int {
+ 	for i, g := range pv.group {
+-		if g.FsID == pv.file.FsID {
++		if pv.file.FsID != 0 && g.FsID == pv.file.FsID {
++			return i
++		}
++	}
++	for i, g := range pv.group {
++		if g.Path == pv.file.Path {
+ 			return i
+ 		}
+ 	}
+ 	return 0
+ }
++
++// groupHas reports whether f is among the pictures of pv.group.
++func (pv *previewState) groupHas(f baidu.File) bool {
++	for _, g := range pv.group {
++		if (f.FsID != 0 && g.FsID == f.FsID) || g.Path == f.Path {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/app/recycle.go b/app/recycle.go
+index 26d2822..483e923 100644
+--- a/app/recycle.go
++++ b/app/recycle.go
+@@ -130,6 +130,7 @@ func (a *App) recycleAct(it baidu.Recycled, purge bool) {
+ 				a.toast(err.Error(), "error")
+ 				return
+ 			}
++			a.netdiskChanged()
+ 			r.items = slices.DeleteFunc(r.items, func(x baidu.Recycled) bool { return x.FsID == it.FsID })
+ 			if purge {
+ 				a.toast("已彻底删除「"+it.Name+"」", "success")
+@@ -151,6 +152,7 @@ func (a *App) emptyRecycle() {
+ 				a.toast(err.Error(), "error")
+ 				return
+ 			}
++			a.netdiskChanged()
+ 			r.items = nil
+ 			a.toast("回收站已清空", "success")
+ 		})
+diff --git a/app/rename.go b/app/rename.go
+index a73ffe6..eba7597 100644
+--- a/app/rename.go
++++ b/app/rename.go
+@@ -206,6 +206,8 @@ func (a *App) renameTo(l *listing, id int64, name string) bool {
+ 		a.update(func() {
+ 			if err != nil {
+ 				a.toast("无法重命名「"+f.Name+"」："+err.Error(), "error")
++			} else {
++				a.netdiskChanged()
+ 			}
+ 			a.reload(dir)
+ 		})
+diff --git a/app/session.go b/app/session.go
+index 6f906ed..2241cc6 100644
+--- a/app/session.go
++++ b/app/session.go
+@@ -164,6 +164,9 @@ func (a *App) signedIn(c *baidu.Client, u *baidu.User, fresh bool) {
+ 		a.sess = &session{client: c, user: u}
+ 		a.login = loginState{}
+ 		a.phase = phaseReady
++		// The changes counted for this account, which the dedup page's
++		// cached results are checked against (dedup.go).
++		a.loadNetdiskGen(u.UID)
+ 		a.onSignedIn()
+ 	})
+ 	go a.loadProfile(c, u)
+diff --git a/app/transfers.go b/app/transfers.go
+index 48a831f..ccbc77d 100644
+--- a/app/transfers.go
++++ b/app/transfers.go
+@@ -131,6 +131,10 @@ func (a *App) finished(t transfer.Task) {
+ 		a.toast("「"+t.Name+"」传输失败："+t.Err, "error")
+ 		return
+ 	}
++	// An upload that finished put a new file on the netdisk.
++	if t.Kind == transfer.Upload {
++		a.netdiskChanged()
++	}
+ 	// A click shows the file (Notification), so each has its own ID.
+ 	verb, id := "下载", "file:"+t.Local
+ 	if t.Kind == transfer.Upload {
+diff --git a/internal/dedup/dedup.go b/internal/dedup/dedup.go
+index b719214..a969a04 100644
+--- a/internal/dedup/dedup.go
++++ b/internal/dedup/dedup.go
+@@ -70,6 +70,13 @@ func Groups(files []baidu.File) (groups []Group, skipped int) {
+ 		})
+ 		groups = append(groups, Group{Key: k, Files: fs, Reclaim: k.Size * int64(len(fs)-1)})
+ 	}
++	sortGroups(groups)
++	return groups, skipped
++}
++
++// sortGroups puts the groups in the order Groups returns them: the most to
++// free first.
++func sortGroups(groups []Group) {
+ 	sort.Slice(groups, func(i, j int) bool {
+ 		if groups[i].Reclaim != groups[j].Reclaim {
+ 			return groups[i].Reclaim > groups[j].Reclaim
+@@ -79,7 +86,29 @@ func Groups(files []baidu.File) (groups []Group, skipped int) {
+ 		}
+ 		return groups[i].Key.MD5 < groups[j].Key.MD5
+ 	})
+-	return groups, skipped
++}
++
++// Without returns the groups left when the files at the paths in gone are
++// gone: a group keeps its other copies as they came, and a group of fewer
++// than two copies is no group. The groups come as Groups returns them, the
++// most to free first, so that the results of a scan minus the copies it
++// deleted are exactly what Groups would find in what is left.
++func Without(groups []Group, gone map[string]bool) []Group {
++	out := make([]Group, 0, len(groups))
++	for _, g := range groups {
++		kept := make([]baidu.File, 0, len(g.Files))
++		for _, f := range g.Files {
++			if !gone[f.Path] {
++				kept = append(kept, f)
++			}
++		}
++		if len(kept) < 2 {
++			continue
++		}
++		out = append(out, Group{Key: g.Key, Files: kept, Reclaim: g.Key.Size * int64(len(kept)-1)})
++	}
++	sortGroups(out)
++	return out
+ }
+ 
+ // Default options of a scan.
+diff --git a/internal/dedup/dedup_test.go b/internal/dedup/dedup_test.go
+index 75ab02e..85578bf 100644
+--- a/internal/dedup/dedup_test.go
++++ b/internal/dedup/dedup_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"path"
++	"slices"
+ 	"sort"
+ 	"strings"
+ 	"sync"
+@@ -331,3 +332,46 @@ func TestRootCleaning(t *testing.T) {
+ 		t.Fatal("path.Clean changed")
+ 	}
+ }
++
++// TestWithout checks that the groups left after a delete are exactly what
++// Groups finds in the files left behind: the same groups, their copies in
++// the same order, the same reclaim, the most to free first.
++func TestWithout(t *testing.T) {
++	files := []baidu.File{
++		f("/a.txt", "same", 100, 200), f("/dir/b.txt", "same", 100, 100),
++		f("/big1.dat", "big", 1000, 1), f("/big2.dat", "big", 1000, 2), f("/big3.dat", "big", 1000, 3),
++		f("/mid1.dat", "mid", 50, 1), f("/mid2.dat", "mid", 50, 2),
++		f("/one.dat", "one", 7, 1),
++	}
++	groups, _ := Groups(files)
++	if len(groups) != 3 {
++		t.Fatalf("%d groups", len(groups))
++	}
++	for _, gone := range []map[string]bool{
++		{"/a.txt": true},
++		{"/big2.dat": true},
++		{"/big1.dat": true, "/big3.dat": true},
++		{"/mid2.dat": true, "/a.txt": true, "/big3.dat": true},
++		{},
++	} {
++		var left []baidu.File
++		for _, x := range files {
++			if !gone[x.Path] {
++				left = append(left, x)
++			}
++		}
++		want, _ := Groups(left)
++		got := Without(groups, gone)
++		if len(got) != len(want) {
++			t.Fatalf("gone %v: %d groups, want %d", gone, len(got), len(want))
++		}
++		for i := range want {
++			if got[i].Key != want[i].Key || got[i].Reclaim != want[i].Reclaim {
++				t.Errorf("gone %v: group %d %+v, want %+v", gone, i, got[i], want[i])
++			}
++			if !slices.Equal(ids(got[i].Files), ids(want[i].Files)) {
++				t.Errorf("gone %v: group %d files %v, want %v", gone, i, ids(got[i].Files), ids(want[i].Files))
++			}
++		}
++	}
++}

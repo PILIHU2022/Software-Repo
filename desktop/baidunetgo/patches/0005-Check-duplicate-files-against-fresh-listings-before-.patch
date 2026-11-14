@@ -1,0 +1,621 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 10:27:13 +0800
+Subject: [PATCH] Check duplicate files against fresh listings before deleting,
+ keep the finder with its account, and key its choice by path
+
+---
+ AGENTS.md               |   2 +-
+ CHANGELOG.md            |   6 +-
+ CLAUDE.md               |   2 +-
+ README.md               |   2 +-
+ app/dedup.go            | 184 ++++++++++++++++++++++++++++++----------
+ app/dedup_test.go       |  75 +++++++++++++++-
+ app/session.go          |   6 ++
+ app/shell.go            |   8 ++
+ internal/dedup/dedup.go |   8 +-
+ 9 files changed, 236 insertions(+), 57 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 43baec3..f8cbaea 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -61,7 +61,7 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Fake netdisk (`internal/fakepan`).** An `httptest` server that emulates every web endpoint the client uses, over an in-memory tree with generated images, a PDF and a WAV. App UI tests (`app/*_test.go`, helper `signedIn` in `app/app_test.go`) drive real views with `ui.Tester` against it. When adding a new API call, add its endpoint to fakepan too.
+ 
+-**Duplicate files (`internal/dedup`).** The dedup page reads no file content: `dedup.Scan` walks the folders under a root four at a time (capped at 50,000 files and 5,000 folders, cancelable, reporting progress), and `dedup.Groups` groups what it found by size and MD5, the hash the list API already returns (scrambled there, decrypted in `internal/baidu/list.go` with `baidupcs.DecryptMD5`). Entries with no MD5 are counted and skipped as `缺少哈希，已跳过`; 0-byte files and single files are no group. Groups come by the space freeing all but one copy would free. `app/dedup.go` runs the scan on a goroutine and writes back through `a.update`, throttling progress to about every 180 ms; it keeps the earliest modified copy of each group by default (its path breaking a tie), and `Client.Delete` moves the chosen copies to the recycle bin. The web `filemetas` endpoint is not used to fill in missing hashes.
++**Duplicate files (`internal/dedup`).** The dedup page reads no file content: `dedup.Scan` walks the folders under a root four at a time (capped at 50,000 files and 5,000 folders, cancelable, reporting progress), and `dedup.Groups` groups what it found by size and MD5, the hash the list API already returns (scrambled there, decrypted in `internal/baidu/list.go` with `baidupcs.DecryptMD5`). Entries with no MD5 are counted and skipped as `缺少哈希，已跳过`; 0-byte files and single files are no group. Groups come by the space freeing all but one copy would free. `app/dedup.go` runs the scan on a goroutine and writes back through `a.update`, throttling progress to about every 180 ms; it keeps the earliest modified copy of each group by default (its path breaking a tie), and `Client.Delete` moves the chosen copies to the recycle bin. Before deleting, it reads the parents' listings again and checks each file still has the scanned fs_id, size and MD5, and that every group keeps a copy; a stale result deletes nothing. The web `filemetas` endpoint is not used to fill in missing hashes.
+ 
+ **No-disk previews.** `internal/remote` reads files into memory via Range requests (`ReadAll` with size limits, or a seekable `File` with a chunk cache for streaming audio) and re-requests the link on 403. PDFs render through `internal/pdf`: PDFium compiled to WebAssembly, run in wazero, pool started lazily by `pdf.Warm`. The PDF viewer lays its pages out itself in a `ScrollBoth` (`layoutPDF`), zooms like the image viewer (pinch, Cmd with the wheel, Cmd +/-/0, the buttons) keeping the point under the pointer on its page, and draws each page whole at 2 px per DIP up to `pdfPixels`; zoomed in further, the part in view (plus `pdfAround`) is drawn over it with `RenderPart`, snapped to the whole page's pixels so the two line up. Pages far from view drop their pictures. Video, and audio formats MyGo's `audio` package can't decode, go to mpv via `internal/player` with `--user-agent` and `--http-header-fields-append=Cookie: …`.
+ 
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 70b2d8c..43b9f86 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,11 +2,11 @@
+ 
+ ## Unreleased
+ 
+-### 新增
++<!-- 写在这里的内容会成为下一个版本的更新说明；留空则按提交记录自动生成。 -->
+ 
+-- 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。
++### 新增
+ 
+-<!-- 写在这里的内容会成为下一个版本的更新说明；留空则按提交记录自动生成。 -->
++- 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。删除前会重新读取所在目录，核对 fs_id、大小和 MD5，并确保每组仍留有一份，过期或被替换的文件不会误删。
+ 
+ ### 修复
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index b67319a..a70784d 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -61,7 +61,7 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Fake netdisk (`internal/fakepan`).** An `httptest` server that emulates every web endpoint the client uses, over an in-memory tree with generated images, a PDF and a WAV. App UI tests (`app/*_test.go`, helper `signedIn` in `app/app_test.go`) drive real views with `ui.Tester` against it. When adding a new API call, add its endpoint to fakepan too.
+ 
+-**Duplicate files (`internal/dedup`).** The dedup page reads no file content: `dedup.Scan` walks the folders under a root four at a time (capped at 50,000 files and 5,000 folders, cancelable, reporting progress), and `dedup.Groups` groups what it found by size and MD5, the hash the list API already returns (scrambled there, decrypted in `internal/baidu/list.go` with `baidupcs.DecryptMD5`). Entries with no MD5 are counted and skipped as `缺少哈希，已跳过`; 0-byte files and single files are no group. Groups come by the space freeing all but one copy would free. `app/dedup.go` runs the scan on a goroutine and writes back through `a.update`, throttling progress to about every 180 ms; it keeps the earliest modified copy of each group by default (its path breaking a tie), and `Client.Delete` moves the chosen copies to the recycle bin. The web `filemetas` endpoint is not used to fill in missing hashes.
++**Duplicate files (`internal/dedup`).** The dedup page reads no file content: `dedup.Scan` walks the folders under a root four at a time (capped at 50,000 files and 5,000 folders, cancelable, reporting progress), and `dedup.Groups` groups what it found by size and MD5, the hash the list API already returns (scrambled there, decrypted in `internal/baidu/list.go` with `baidupcs.DecryptMD5`). Entries with no MD5 are counted and skipped as `缺少哈希，已跳过`; 0-byte files and single files are no group. Groups come by the space freeing all but one copy would free. `app/dedup.go` runs the scan on a goroutine and writes back through `a.update`, throttling progress to about every 180 ms; it keeps the earliest modified copy of each group by default (its path breaking a tie), and `Client.Delete` moves the chosen copies to the recycle bin. Before deleting, it reads the parents' listings again and checks each file still has the scanned fs_id, size and MD5, and that every group keeps a copy; a stale result deletes nothing. The web `filemetas` endpoint is not used to fill in missing hashes.
+ 
+ **No-disk previews.** `internal/remote` reads files into memory via Range requests (`ReadAll` with size limits, or a seekable `File` with a chunk cache for streaming audio) and re-requests the link on 403. PDFs render through `internal/pdf`: PDFium compiled to WebAssembly, run in wazero, pool started lazily by `pdf.Warm`. The PDF viewer lays its pages out itself in a `ScrollBoth` (`layoutPDF`), zooms like the image viewer (pinch, Cmd with the wheel, Cmd +/-/0, the buttons) keeping the point under the pointer on its page, and draws each page whole at 2 px per DIP up to `pdfPixels`; zoomed in further, the part in view (plus `pdfAround`) is drawn over it with `RenderPart`, snapped to the whole page's pixels so the two line up. Pages far from view drop their pictures. Video, and audio formats MyGo's `audio` package can't decode, go to mpv via `internal/player` with `--user-agent` and `--http-header-fields-append=Cookie: …`.
+ 
+diff --git a/README.md b/README.md
+index a2105d2..79667f9 100644
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,7 @@
+   - 音频：MP3 / OGG / WAV 边下边播
+   - 视频（及其它音频）：交给 **mpv**，经本地回环服务按块读取网盘直链
+ - **文件操作**：新建文件夹、重命名、移动 / 复制（文件夹选择器）、删除（无需确认，提示条里可撤销）、回收站
+-- **查重**：按网盘列表里的 MD5 与文件大小，在整个网盘或选定的文件夹里递归找出重复文件；按可释放空间分组，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站
++- **查重**：按网盘列表里的 MD5 与文件大小，在整个网盘或选定的文件夹里递归找出重复文件；按可释放空间分组，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；删除前会再次核对文件是否仍是扫描时的那一份
+ - **传输**：多连接分块下载、断点续传、过期链接自动刷新；上传支持秒传与分片；拖文件进窗口即上传
+ - **自动调优**：按实测依次选出下载线路、每个文件的连接数、块大小、同时传输的文件数和上传连接数，每种会员等级每周测一次；连接数也可以手动指定
+ - **跟系统配合**：只运行一个实例，Dock 图标显示传输数和进度，传输时不让电脑休眠，完成后发通知（点开定位到文件），断网或睡眠时传输排队，恢复后接着传；网盘请求和扫码登录跟随系统代理与 PAC
+diff --git a/app/dedup.go b/app/dedup.go
+index 9314e79..bc1a690 100644
+--- a/app/dedup.go
++++ b/app/dedup.go
+@@ -51,7 +51,7 @@ type dedupState struct {
+ 	scanID   uint64
+ 	cancel   context.CancelFunc
+ 
+-	chosen   map[int64]bool // files to move to the recycle bin
++	chosen   map[string]bool // files to move to the recycle bin, by path
+ 	selCount int
+ 	selBytes int64
+ 
+@@ -68,7 +68,7 @@ type dedupState struct {
+ func (a *App) startDedupScan(dir string) {
+ 	s := a.sess
+ 	d := &a.dedup
+-	if s == nil || d.scanning {
++	if s == nil || d.scanning || d.busy {
+ 		return
+ 	}
+ 	if dir == "" {
+@@ -82,8 +82,9 @@ func (a *App) startDedupScan(dir string) {
+ 	d.skipped, d.failed, d.totalReclaim = 0, 0, 0
+ 	d.scannedDirs, d.scannedFiles, d.truncated = 0, 0, false
+ 	d.curDir = dir
+-	d.chosen = map[int64]bool{}
++	d.chosen = map[string]bool{}
+ 	d.selCount, d.selBytes = 0, 0
++	d.scrollTop = true
+ 	d.scanID++
+ 	id := d.scanID
+ 	ctx, cancel := context.WithCancel(context.Background())
+@@ -98,7 +99,7 @@ func (a *App) startDedupScan(dir string) {
+ 			}
+ 			last = time.Now()
+ 			a.update(func() {
+-				if d.scanID != id {
++				if a.sess != s || d.scanID != id {
+ 					return
+ 				}
+ 				d.curDir = p.Dir
+@@ -113,17 +114,20 @@ func (a *App) startDedupScan(dir string) {
+ 			Report:      report,
+ 		})
+ 		a.update(func() {
+-			if d.scanID != id {
++			if a.sess != s || d.scanID != id {
+ 				return
+ 			}
++			canceled := ctx.Err() != nil
+ 			d.scanning, d.cancel = false, nil
+ 			d.curDir = ""
+ 			d.scannedDirs, d.scannedFiles = res.Dirs, len(res.Files)
+ 			d.failed, d.truncated = len(res.Failed), res.Truncated
+ 			switch {
+-			case errors.Is(err, context.Canceled):
++			case canceled || errors.Is(err, context.Canceled):
+ 				d.canceled = true
+ 				a.toast("已取消查重", "info")
++			case errors.Is(err, baidu.ErrNotLoggedIn):
++				a.signOut()
+ 			case err != nil:
+ 				d.err = err.Error()
+ 			default:
+@@ -159,11 +163,11 @@ func (d *dedupState) flatten() {
+ // chooseDefaults chooses every copy but each group's kept one: the
+ // earliest modified, its path breaking a tie.
+ func (d *dedupState) chooseDefaults() {
+-	d.chosen = map[int64]bool{}
++	d.chosen = map[string]bool{}
+ 	for _, g := range d.groups {
+ 		for i, f := range g.Files {
+ 			if i > 0 {
+-				d.chosen[f.FsID] = true
++				d.chosen[f.Path] = true
+ 			}
+ 		}
+ 	}
+@@ -176,7 +180,7 @@ func (d *dedupState) recount() {
+ 	for _, g := range d.groups {
+ 		d.totalReclaim += g.Reclaim
+ 		for _, f := range g.Files {
+-			if d.chosen[f.FsID] {
++			if d.chosen[f.Path] {
+ 				d.selCount++
+ 				d.selBytes += f.Size
+ 			}
+@@ -189,7 +193,7 @@ func (d *dedupState) selectedFiles() []baidu.File {
+ 	out := make([]baidu.File, 0, d.selCount)
+ 	for _, g := range d.groups {
+ 		for _, f := range g.Files {
+-			if d.chosen[f.FsID] {
++			if d.chosen[f.Path] {
+ 				out = append(out, f)
+ 			}
+ 		}
+@@ -203,7 +207,7 @@ func (d *dedupState) fullGroup() (dedup.Group, bool) {
+ 	for _, g := range d.groups {
+ 		all := len(g.Files) > 0
+ 		for _, f := range g.Files {
+-			if !d.chosen[f.FsID] {
++			if !d.chosen[f.Path] {
+ 				all = false
+ 				break
+ 			}
+@@ -217,11 +221,11 @@ func (d *dedupState) fullGroup() (dedup.Group, bool) {
+ 
+ // selectAll chooses every copy but the kept one of each group.
+ func (d *dedupState) selectAll() {
+-	d.chosen = map[int64]bool{}
++	d.chosen = map[string]bool{}
+ 	for _, g := range d.groups {
+ 		for i, f := range g.Files {
+ 			if i > 0 {
+-				d.chosen[f.FsID] = true
++				d.chosen[f.Path] = true
+ 			}
+ 		}
+ 	}
+@@ -230,7 +234,7 @@ func (d *dedupState) selectAll() {
+ 
+ // clearSelection chooses none.
+ func (d *dedupState) clearSelection() {
+-	d.chosen = map[int64]bool{}
++	d.chosen = map[string]bool{}
+ 	d.recount()
+ }
+ 
+@@ -240,22 +244,25 @@ func (d *dedupState) keepOne(gi int) {
+ 		return
+ 	}
+ 	for _, f := range d.groups[gi].Files {
+-		delete(d.chosen, f.FsID)
++		delete(d.chosen, f.Path)
+ 	}
+ 	for i, f := range d.groups[gi].Files {
+ 		if i > 0 {
+-			d.chosen[f.FsID] = true
++			d.chosen[f.Path] = true
+ 		}
+ 	}
+ 	d.recount()
+ }
+ 
+ // deleteDedup moves the chosen files to the recycle bin, then groups what
+-// is left again.
++// is left again. Before deleting, it reads their folders again and checks
++// each file is still the one scanned (same fs_id, size and MD5), and that
++// every group keeps a copy: a scan that sat in the page for a while must
++// not delete a file that took the place of the one it found.
+ func (a *App) deleteDedup() {
+ 	s := a.sess
+ 	d := &a.dedup
+-	if s == nil || d.busy {
++	if s == nil || d.busy || d.scanning {
+ 		return
+ 	}
+ 	files := d.selectedFiles()
+@@ -266,29 +273,51 @@ func (a *App) deleteDedup() {
+ 		a.toast("「"+g.Files[0].Name+"」这一组已全选，每组至少保留一份", "error")
+ 		return
+ 	}
+-	list := paths(files)
+-	dirs := map[string]bool{}
+-	for _, f := range files {
+-		dirs[path.Dir(f.Path)] = true
++	groups := make([]dedup.Group, len(d.groups))
++	for i, g := range d.groups {
++		g.Files = slices.Clone(g.Files)
++		groups[i] = g
++	}
++	chosen := make(map[string]bool, len(d.chosen))
++	for path, on := range d.chosen {
++		chosen[path] = on
+ 	}
++	id := d.scanID
+ 	d.busy, d.actErr = true, ""
+ 	go func() {
+-		err := s.client.Delete(context.Background(), list)
++		safe, changed := dedupStillThere(context.Background(), s.client, groups, chosen)
++		var err error
++		if len(safe) > 0 {
++			err = s.client.Delete(context.Background(), paths(safe))
++		}
+ 		a.update(func() {
++			if a.sess != s || d.scanID != id {
++				return
++			}
+ 			d.busy = false
+ 			if err != nil {
++				if errors.Is(err, baidu.ErrNotLoggedIn) {
++					a.signOut()
++					return
++				}
+ 				d.actErr = err.Error()
+ 				a.toast(err.Error(), "error")
+ 				return
+ 			}
+-			gone, names := map[int64]bool{}, map[string]bool{}
+-			for _, f := range files {
+-				gone[f.FsID] = true
+-				names[f.Path] = true
++			if len(safe) == 0 {
++				d.actErr = "文件已变化，请重新扫描"
++				a.toast("这些文件已变化，请重新扫描后再试", "error")
++				return
+ 			}
+-			d.files = slices.DeleteFunc(d.files, func(f baidu.File) bool {
+-				return (f.FsID != 0 && gone[f.FsID]) || names[f.Path]
+-			})
++			gone := map[string]bool{}
++			for _, f := range safe {
++				gone[f.Path] = true
++			}
++			dirs := map[string]bool{}
++			for _, f := range safe {
++				dirs[path.Dir(f.Path)] = true
++			}
++			d.files = slices.DeleteFunc(d.files, func(f baidu.File) bool { return gone[f.Path] })
+ 			d.groups, d.skipped = dedup.Groups(d.files)
+ 			d.flatten()
+ 			d.chooseDefaults()
+@@ -297,11 +326,83 @@ func (a *App) deleteDedup() {
+ 			for dir := range dirs {
+ 				a.reload(dir)
+ 			}
+-			a.toast("已将 "+itoa(len(files))+" 项移入回收站", "success")
++			msg := "已将 " + itoa(len(safe)) + " 项移入回收站"
++			if changed > 0 {
++				msg += "，" + itoa(changed) + " 项已变化或无法确认，已跳过"
++			}
++			a.toast(msg, "success")
+ 		})
+ 	}()
+ }
+ 
++// dedupStillThere reads the folders of the groups that have chosen files
++// and returns those the netdisk still holds with the same fs_id, size and
++// MD5. A group whose kept copy is gone or changed loses all its chosen
++// copies too, so no group is left without one; changed counts everything
++// left out.
++func dedupStillThere(ctx context.Context, c *baidu.Client, groups []dedup.Group, chosen map[string]bool) (safe []baidu.File, changed int) {
++	dirs := map[string]bool{}
++	for _, g := range groups {
++		any := false
++		for _, f := range g.Files {
++			if chosen[f.Path] {
++				any = true
++				break
++			}
++		}
++		if !any {
++			continue
++		}
++		for _, f := range g.Files {
++			dirs[path.Dir(f.Path)] = true
++		}
++	}
++	have := map[string]baidu.File{}
++	for dir := range dirs {
++		files, err := c.List(ctx, dir, baidu.Order{By: "name"})
++		if err != nil {
++			continue
++		}
++		for _, f := range files {
++			have[f.Path] = f
++		}
++	}
++	same := func(f baidu.File) bool {
++		h, ok := have[f.Path]
++		return ok && h.Size == f.Size && h.MD5 == f.MD5 && (f.FsID == 0 || h.FsID == f.FsID)
++	}
++	for _, g := range groups {
++		any := false
++		for _, f := range g.Files {
++			if chosen[f.Path] {
++				any = true
++				break
++			}
++		}
++		if !any {
++			continue
++		}
++		keep := false
++		for _, f := range g.Files {
++			if !chosen[f.Path] && same(f) {
++				keep = true
++				break
++			}
++		}
++		for _, f := range g.Files {
++			if !chosen[f.Path] {
++				continue
++			}
++			if !keep || !same(f) {
++				changed++
++				continue
++			}
++			safe = append(safe, f)
++		}
++	}
++	return safe, changed
++}
++
+ // dedupPage is the page of duplicate files.
+ func (a *App) dedupPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	d := &a.dedup
+@@ -389,7 +490,7 @@ func (a *App) dedupHeader(c *ui.Context, t *ui.Theme, p *palette) {
+ 				}
+ 				return
+ 			}
+-			if pill(c, t, p, "folder-open", "选择文件夹", false).Clicked() {
++			if pill(c, t, p, "folder-open", "选择文件夹", false).Disabled(d.busy).Clicked() {
+ 				if d.picker.dir == "" {
+ 					d.picker.dir = d.root
+ 				}
+@@ -399,7 +500,7 @@ func (a *App) dedupHeader(c *ui.Context, t *ui.Theme, p *palette) {
+ 			if d.loaded {
+ 				label = "重新扫描"
+ 			}
+-			if pill(c, t, p, "refresh-cw", label, true).Clicked() {
++			if pill(c, t, p, "refresh-cw", label, true).Disabled(d.busy).Clicked() {
+ 				a.startDedupScan(d.root)
+ 			}
+ 		})
+@@ -466,9 +567,6 @@ func (a *App) dedupResults(c *ui.Context, t *ui.Theme, p *palette) {
+ 			return d.groups[r.group].Key
+ 		}
+ 		f := d.groups[r.group].Files[r.file]
+-		if f.FsID != 0 {
+-			return f.FsID
+-		}
+ 		return f.Path
+ 	}
+ 	d.list.Header = func(row int) bool { return d.rows[row].file < 0 }
+@@ -488,8 +586,8 @@ func (a *App) dedupResults(c *ui.Context, t *ui.Theme, p *palette) {
+ 			return
+ 		}
+ 		f := g.Files[r.file]
+-		on := d.chosen[f.FsID]
+-		row := ui.ButtonBase(c.Key(f.FsID)).Label(f.Name).
++		on := d.chosen[f.Path]
++		row := ui.ButtonBase(c.Key(f.Path)).Label(f.Name).
+ 			Height(44).PaddingX(10).Gap(10).AlignItems(ui.Center)
+ 		row = stripe(row, p, i)
+ 		row.Children(func() {
+@@ -516,11 +614,11 @@ func (a *App) dedupResults(c *ui.Context, t *ui.Theme, p *palette) {
+ 			figure(c, humanSize(f.Size)).FontSize(11).TextColor(t.TextMuted).Width(72).TextAlign(ui.End)
+ 			figure(c, humanTime(f.Mtime, now)).FontSize(11).TextColor(t.TextMuted).Width(96).TextAlign(ui.End)
+ 		})
+-		if row.Clicked() {
+-			if d.chosen[f.FsID] {
+-				delete(d.chosen, f.FsID)
++		if row.Clicked() && !d.busy {
++			if d.chosen[f.Path] {
++				delete(d.chosen, f.Path)
+ 			} else {
+-				d.chosen[f.FsID] = true
++				d.chosen[f.Path] = true
+ 			}
+ 			d.recount()
+ 		}
+@@ -538,7 +636,7 @@ func (a *App) dedupGroupRow(c *ui.Context, t *ui.Theme, p *palette, g dedup.Grou
+ 		ui.Spacer(c)
+ 		figure(c, "共 "+humanSize(g.Total())+" · 可释放 "+humanSize(g.Reclaim)).
+ 			FontSize(11).TextColor(t.TextMuted)
+-		if pill(c, t, p, "", "保留一份", false).Clicked() {
++		if pill(c, t, p, "", "保留一份", false).Disabled(a.dedup.busy).Clicked() {
+ 			a.dedup.keepOne(gi)
+ 		}
+ 	})
+diff --git a/app/dedup_test.go b/app/dedup_test.go
+index 310fe9e..511a44c 100644
+--- a/app/dedup_test.go
++++ b/app/dedup_test.go
+@@ -3,6 +3,8 @@ package app
+ import (
+ 	"testing"
+ 	"time"
++
++	"github.com/pengstem/baidunetgo/internal/fakepan"
+ )
+ 
+ // TestDedup finds the fake netdisk's duplicate files, keeps one copy of
+@@ -48,7 +50,7 @@ func TestDedup(t *testing.T) {
+ 		if g.Reclaim != g.Size()*int64(len(g.Files)-1) {
+ 			t.Errorf("group %d reclaims %d, not %d x %d", i, g.Reclaim, g.Size(), len(g.Files)-1)
+ 		}
+-		if d.chosen[g.Files[0].FsID] {
++		if d.chosen[g.Files[0].Path] {
+ 			t.Errorf("group %d keeps no copy", i)
+ 		}
+ 		for j, f := range g.Files {
+@@ -63,7 +65,7 @@ func TestDedup(t *testing.T) {
+ 				t.Errorf("group %d not by mtime: %d before %d", i, g.Files[j-1].Mtime, f.Mtime)
+ 			}
+ 			if j > 0 {
+-				if !d.chosen[f.FsID] {
++				if !d.chosen[f.Path] {
+ 					t.Errorf("group %d file %d not chosen by default", i, j)
+ 				}
+ 				wantSel++
+@@ -132,7 +134,7 @@ func TestDedup(t *testing.T) {
+ 	}
+ 	tt.ClickAt(row.X+row.W/2, row.Y+row.H/2)
+ 	tt.Advance(100 * time.Millisecond)
+-	if d.selCount != 1 || !d.chosen[extra.FsID] {
++	if d.selCount != 1 || !d.chosen[extra.Path] {
+ 		t.Fatalf("clicking %q chose %d files", extra.Name, d.selCount)
+ 	}
+ 	before := len(d.groups)
+@@ -152,7 +154,7 @@ func TestDedup(t *testing.T) {
+ 	if !srv.Exists(keep.Path) {
+ 		t.Errorf("the kept copy %q went too", keep.Path)
+ 	}
+-	if d.chosen[extra.FsID] {
++	if d.chosen[extra.Path] {
+ 		t.Errorf("the deleted copy %d is still chosen", extra.FsID)
+ 	}
+ 	tt.Advance(300 * time.Millisecond)
+@@ -161,3 +163,68 @@ func TestDedup(t *testing.T) {
+ 	}
+ 	save(t, tt, "dedup-after-delete")
+ }
++
++// TestDedupSkipsChangedFiles checks the scan's results against the folders
++// again before deleting: a copy that changed since it was found, or a group
++// whose kept copy is gone, is left alone.
++func TestDedupSkipsChangedFiles(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	a, tt, srv := signedIn(t)
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the dedup scan", func() bool { return a.dedup.loaded })
++
++	d := &a.dedup
++	if len(d.groups) == 0 {
++		t.Fatal("no duplicates found")
++	}
++	g := d.groups[0]
++	if len(g.Files) < 2 {
++		t.Fatalf("group has %d files", len(g.Files))
++	}
++	kept, extra := g.Files[0], g.Files[1]
++	d.clearSelection()
++	d.chosen[extra.Path] = true
++	d.recount()
++	tt.Advance(100 * time.Millisecond)
++
++	// The kept copy changed after the scan: the chosen copy is not deleted,
++	// as that would leave the group without the file it was scanned as.
++	srv.Add(fakepan.Node{Path: kept.Path, Data: []byte("changed after the scan"), Mtime: time.Now().Unix()})
++	if err := tt.Click("移入回收站"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if err := tt.Click("确认移入"); err != nil {
++		t.Fatal(err)
++	}
++	waitUntil(t, tt, "the checked delete", func() bool { return !d.busy })
++	if !srv.Exists(extra.Path) {
++		t.Errorf("deleted %q although its group's kept copy had changed", extra.Path)
++	}
++	if !tt.HasText("已变化") {
++		t.Errorf("no word of the change: %q", tt.Texts())
++	}
++}
++
++// TestDedupSignOutClears drops a scan and its results when the account
++// signs out, so another account never sees or deletes the first one's
++// files.
++func TestDedupSignOutClears(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	a, tt, _ := signedIn(t)
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the dedup scan", func() bool { return a.dedup.loaded })
++
++	a.signOut()
++	tt.Advance(300 * time.Millisecond)
++	d := &a.dedup
++	if d.started || d.scanning || d.loaded || d.groups != nil || d.files != nil || d.chosen != nil {
++		t.Errorf("signing out left the dedup page with %+v", d)
++	}
++}
+diff --git a/app/session.go b/app/session.go
+index a1770e6..cb433c3 100644
+--- a/app/session.go
++++ b/app/session.go
+@@ -265,6 +265,12 @@ func (a *App) onSignedOut() {
+ 	}
+ 	a.stopTransfers()
+ 	a.stopReloads()
++	// A scan belongs to the account that started it: drop it, so another
++	// account's sign-in never shows or deletes the first one's files.
++	if a.dedup.cancel != nil {
++		a.dedup.cancel()
++	}
++	a.dedup = dedupState{}
+ 	a.shares, a.offline, a.recycle = sharesState{}, offlineState{}, recycleState{}
+ 	a.listings = nil
+ }
+diff --git a/app/shell.go b/app/shell.go
+index 4a81c68..f17c581 100644
+--- a/app/shell.go
++++ b/app/shell.go
+@@ -321,6 +321,14 @@ func (a *App) subtitle() string {
+ 		if a.offline.loaded {
+ 			return itoa(len(a.offline.items)) + " 个任务 · 网盘替你在云端下载"
+ 		}
++	case "/dedup":
++		if a.dedup.scanning {
++			return "正在按网盘 MD5 查找重复文件"
++		}
++		if a.dedup.loaded {
++			return itoa(len(a.dedup.groups)) + " 组重复 · 可释放 " + humanSize(a.dedup.totalReclaim)
++		}
++		return "按网盘 MD5 找出内容相同的文件"
+ 	case "/recycle":
+ 		if a.recycle.loaded {
+ 			return itoa(len(a.recycle.items)) + " 项 · 到期自动清除"
+diff --git a/internal/dedup/dedup.go b/internal/dedup/dedup.go
+index 09a8d2e..b719214 100644
+--- a/internal/dedup/dedup.go
++++ b/internal/dedup/dedup.go
+@@ -32,10 +32,10 @@ func (g Group) Size() int64 { return g.Key.Size }
+ // Total is the size of every copy in the group.
+ func (g Group) Total() int64 { return g.Key.Size * int64(len(g.Files)) }
+ 
+-// Groups groups files by size and MD5. Files with no MD5 are counted in
+-// skipped, as are directories; 0-byte files are not duplicates of anything
+-// worth freeing and are left out. A group of fewer than two files is no
+-// group. Groups come by Reclaim, the most to free first. The earliest
++// Groups groups files by size and MD5. Directories and 0-byte files are
++// not duplicates of anything worth freeing and are left out; files with no
++// MD5, which cannot be compared, are counted in skipped. A group of fewer
++// than two files is no group. Groups come by Reclaim, the most to free first. The earliest
+ // modified file of a group comes first: it is the copy to keep.
+ func Groups(files []baidu.File) (groups []Group, skipped int) {
+ 	byKey := map[Key][]baidu.File{}

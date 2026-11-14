@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 11:38:37 +0800
+Subject: [PATCH] Keep file shortcut actions to one press and skip dissolving
+ rows in select-all, so a held paste cannot run twice or fall into the share
+ link
+
+---
+ AGENTS.md             |  4 +-
+ CLAUDE.md             |  4 +-
+ README.md             |  4 +-
+ app/fileclip.go       |  6 +--
+ app/ops.go            | 19 ++++++----
+ app/shortcuts_test.go | 87 +++++++++++++++++++++++++++++++++++++++++--
+ 6 files changed, 105 insertions(+), 19 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 2f8ec46..45db6ee 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -43,13 +43,13 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
+-**File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does.
++**File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does. A held key acts once: auto-repeats of these file keys are ignored, and while an operation is busy the browser takes no file key, so a paste cannot start twice.
+ 
+ **Netdisk client (`internal/baidu`).** `baidu.Open(creds)` builds a `baidupcs.BaiduPCS` from cookies and never touches BaiduPCS-Go's global config. It also turns TLS verification back on (the library disables it). Two code paths:
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+ 
+-**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button or Cmd-V in the browser; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
++**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button, Cmd-Shift-V, or Cmd-V while no files are cut or copied; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
+ 
+ `baidu.OpenAt(creds, base)` points the client at a fake server. `c.fake()` swaps in fake-friendly behavior in the few library-bound paths (download URL, upload). Errno -6/-4/111 maps to `ErrNotLoggedIn`, which signs the user out.
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index fcc4fa8..e992fac 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -43,13 +43,13 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
+-**File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does.
++**File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does. A held key acts once: auto-repeats of these file keys are ignored, and while an operation is busy the browser takes no file key, so a paste cannot start twice.
+ 
+ **Netdisk client (`internal/baidu`).** `baidu.Open(creds)` builds a `baidupcs.BaiduPCS` from cookies and never touches BaiduPCS-Go's global config. It also turns TLS verification back on (the library disables it). Two code paths:
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+ 
+-**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button or Cmd-V in the browser; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
++**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button, Cmd-Shift-V, or Cmd-V while no files are cut or copied; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
+ 
+ `baidu.OpenAt(creds, base)` points the client at a fake server. `c.fake()` swaps in fake-friendly behavior in the few library-bound paths (download URL, upload). Errno -6/-4/111 maps to `ErrNotLoggedIn`, which signs the user out.
+ 
+diff --git a/README.md b/README.md
+index 37f37a7..5abeb7c 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,7 @@
+ - **传输**：多连接分块下载、断点续传、过期链接自动刷新；上传支持秒传与分片；拖文件进窗口即上传
+ - **自动调优**：按实测依次选出下载线路、每个文件的连接数、块大小、同时传输的文件数和上传连接数，每种会员等级每周测一次；连接数也可以手动指定
+ - **跟系统配合**：只运行一个实例，Dock 图标显示传输数和进度，传输时不让电脑休眠，完成后发通知（点开定位到文件），断网或睡眠时传输排队，恢复后接着传；网盘请求和扫码登录跟随系统代理与 PAC
+-- **分享**：创建带提取码与有效期的链接、管理我的分享；工具栏的链接按钮或 Cmd-V 在你操作时读取剪贴板，粘贴整段分享文字一键转存
++- **分享**：创建带提取码与有效期的链接、管理我的分享；工具栏的链接按钮、Cmd+Shift+V（没有文件剪贴板时 Cmd+V 也可以）在你操作时读取剪贴板，粘贴整段分享文字一键转存
+ - **离线下载**：HTTP / 磁力链接交给网盘云端下载
+ - **动效**：跟随系统深浅色；文件夹打开时文件依次浮现，删除的文件碎成光点飘散，上传中的文件由光点聚拢成行，拖文件进来时窗口亮起一圈流动的光
+ 
+@@ -61,7 +61,7 @@ macOS 上是 ⌘（Command），其它平台上是 Ctrl；下表写作 Cmd。
+ - 剪切成功后才清空剪贴板；失败、取消冲突或全部跳过时保留，方便再试。复制则一直保留，可以连续粘贴。
+ - 剪切后回到文件所在的文件夹再粘贴会被拒绝，提示“文件已在当前文件夹”；把文件夹粘贴进它自己或它的子文件夹也会被拒绝。复制到同一文件夹是允许的，会生成“名称 (1)”这样的空闲名。
+ - 注销或切换账号会清空文件剪贴板，避免旧账号的路径带到新会话。
+-- 被剪切的行在文件名旁标出“待移动”，状态栏显示“已复制 / 已剪切 N 项”，右键菜单里也有剪切、复制、粘贴和复制路径。
++- 被剪切的行在文件名列右侧标出“待移动”，状态栏显示“已复制 / 已剪切 N 项”，右键菜单里也有剪切、复制、粘贴和复制路径。
+ 
+ ## 开发
+ 
+diff --git a/app/fileclip.go b/app/fileclip.go
+index 3949174..f618a65 100644
+--- a/app/fileclip.go
++++ b/app/fileclip.go
+@@ -45,7 +45,7 @@ func (a *App) putFiles(dir string, files []baidu.File, cut bool) {
+ 	if cut {
+ 		verb = "已剪切"
+ 	}
+-	a.toast(verb+" "+itoa(len(files))+" 项，可在其他文件夹粘贴", "success")
++	a.toast(verb+" "+itoa(len(files))+" 项，可在文件夹里粘贴", "success")
+ }
+ 
+ // clipLabel says what the file clipboard holds, as the status bar shows
+@@ -55,7 +55,7 @@ func (a *App) clipLabel() string {
+ 	if a.fileClip.cut {
+ 		verb = "已剪切"
+ 	}
+-	return verb + " " + itoa(len(a.fileClip.files)) + " 项，可在其他文件夹粘贴"
++	return verb + " " + itoa(len(a.fileClip.files)) + " 项，可在文件夹里粘贴"
+ }
+ 
+ // copyPaths puts the netdisk paths of files on the system clipboard, one a
+@@ -80,7 +80,7 @@ func (a *App) isCut(f *baidu.File) bool {
+ func (a *App) selectAllFiles(l *listing) {
+ 	l.sel.Clear()
+ 	for _, f := range l.files {
+-		if f.FsID >= 0 {
++		if f.FsID >= 0 && a.dying[f.FsID] == nil {
+ 			l.sel.Add(f.FsID)
+ 		}
+ 	}
+diff --git a/app/ops.go b/app/ops.go
+index 1f83397..5ac5cff 100644
+--- a/app/ops.go
++++ b/app/ops.go
+@@ -224,7 +224,9 @@ func (a *App) dialogButtons(c *ui.Context, t *ui.Theme, p *palette, label string
+ 
+ // fileActions handles the browser's keys on the files chosen.
+ func (a *App) fileActions(c *ui.Context, l *listing) {
+-	if a.dlg.open || a.pv != nil || a.renaming != nil || a.creating != nil {
++	// A paste, a move or a copy of the picker runs with its dialog closed
++	// but busy: another key must not start a second one beside it.
++	if a.dlg.open || a.dlg.busy || a.pv != nil || a.renaming != nil || a.creating != nil {
+ 		return
+ 	}
+ 	files := l.chosen()
+@@ -241,7 +243,10 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	// Cmd-V pastes the files cut or copied in the browser when the file
+ 	// clipboard holds any; only when it is empty does it open a share link
+ 	// the system clipboard holds, as it always did.
+-	if c.Shortcut(ui.Cmd, ui.KeyV) {
++	// Held keys repeat: a paste or a copy is one action a press, not one
++	// a repeat, and a cut's cleared clipboard must not turn the next
++	// repeat into opening a share link.
++	if c.Shortcut(ui.Cmd, ui.KeyV) && !c.ShortcutRepeated() {
+ 		if len(a.fileClip.files) > 0 {
+ 			a.pasteFiles(l)
+ 		} else {
+@@ -250,12 +255,12 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	}
+ 	// Cmd-Shift-V opens a share link the system clipboard holds even while
+ 	// files are cut or copied, which Cmd-V pastes instead.
+-	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyV) {
++	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyV) && !c.ShortcutRepeated() {
+ 		if !a.openClipboardShare(c, false) {
+ 			a.toast("剪贴板里没有分享链接", "")
+ 		}
+ 	}
+-	if c.Shortcut(ui.Cmd, ui.KeyA) {
++	if c.Shortcut(ui.Cmd, ui.KeyA) && !c.ShortcutRepeated() {
+ 		a.selectAllFiles(l)
+ 	}
+ 	if c.Shortcut(ui.Cmd, ui.Key1) {
+@@ -270,13 +275,13 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	// The file clipboard moves inside the app, not the system one: a
+ 	// netdisk path means nothing to another application. Cmd-Shift-C puts
+ 	// the paths themselves on the system clipboard.
+-	if c.Shortcut(ui.Cmd, ui.KeyC) {
++	if c.Shortcut(ui.Cmd, ui.KeyC) && !c.ShortcutRepeated() {
+ 		a.putFiles(l.dir, files, false)
+ 	}
+-	if c.Shortcut(ui.Cmd, ui.KeyX) {
++	if c.Shortcut(ui.Cmd, ui.KeyX) && !c.ShortcutRepeated() {
+ 		a.putFiles(l.dir, files, true)
+ 	}
+-	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyC) {
++	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyC) && !c.ShortcutRepeated() {
+ 		a.copyPaths(files)
+ 	}
+ 	// Space looks at the file chosen, as Quick Look does; Cmd-Down opens
+diff --git a/app/shortcuts_test.go b/app/shortcuts_test.go
+index b969c1c..bbd5bf2 100644
+--- a/app/shortcuts_test.go
++++ b/app/shortcuts_test.go
+@@ -55,7 +55,7 @@ func TestFileClipboardCopyPaste(t *testing.T) {
+ 	if a.fileClip.cut || len(a.fileClip.files) != 2 || a.fileClip.from != "/" {
+ 		t.Fatalf("clipboard %+v", a.fileClip)
+ 	}
+-	if !tt.HasText("已复制 2 项，可在其他文件夹粘贴") {
++	if !tt.HasText("已复制 2 项，可在文件夹里粘贴") {
+ 		t.Errorf("no copy toast or status; texts %q", tt.Texts())
+ 	}
+ 
+@@ -77,7 +77,7 @@ func TestFileClipboardCopyPaste(t *testing.T) {
+ 	if a.fileClip.cut || len(a.fileClip.files) != len(files) {
+ 		t.Errorf("clipboard after copying %+v", a.fileClip)
+ 	}
+-	if !tt.HasText("已复制 2 项，可在其他文件夹粘贴") {
++	if !tt.HasText("已复制 2 项，可在文件夹里粘贴") {
+ 		t.Errorf("the status bar lost the copy: %q", tt.Texts())
+ 	}
+ 	// The row menu offers pasting while the file clipboard holds any, and
+@@ -105,7 +105,7 @@ func TestFileClipboardCutPaste(t *testing.T) {
+ 	if !a.fileClip.cut || len(a.fileClip.files) != 1 {
+ 		t.Fatalf("clipboard %+v", a.fileClip)
+ 	}
+-	if !tt.HasText("已剪切 1 项，可在其他文件夹粘贴") {
++	if !tt.HasText("已剪切 1 项，可在文件夹里粘贴") {
+ 		t.Errorf("no cut toast or status; texts %q", tt.Texts())
+ 	}
+ 	// The file to move says so beside its name.
+@@ -327,3 +327,84 @@ func TestFileClipboardStaleCut(t *testing.T) {
+ 		t.Errorf("the older paste cleared the newer clip: %+v", a.fileClip)
+ 	}
+ }
++
++// TestFileClipboardPasteBusy: while a paste, move or copy is under way the
++// browser takes no further file key, so an auto-repeated Cmd-V cannot start
++// a second operation beside the first.
++func TestFileClipboardPasteBusy(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyC)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++
++	a.dlg.busy = true // the first paste is still working
++	tt.Key(ui.Cmd, ui.KeyV)
++	tt.Advance(300 * time.Millisecond)
++	if srv.Exists("/代码/README.md") {
++		t.Error("a second paste started while one was under way")
++	}
++	if a.dlg.open {
++		t.Errorf("a dialog opened while busy: %+v", a.dlg)
++	}
++	a.dlg.busy = false
++}
++
++// TestFileClipboardCancelKeeps: cancelling the question a same-name copy
++// raises leaves the copy in the clipboard, to paste elsewhere or again.
++func TestFileClipboardCancelKeeps(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	srv.Add(fakepan.Node{Path: "/代码/README.md", Data: []byte("旧的")})
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyC)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the question", func() bool { return a.dlg.open && a.dlg.kind == dlgConflict })
++	if err := tt.Click("取消"); err != nil {
++		t.Fatal(err)
++	}
++	settle(tt)
++	if a.dlg.open {
++		t.Error("the dialog stayed open")
++	}
++	if len(a.fileClip.files) != 1 || a.fileClip.cut {
++		t.Errorf("cancelling lost the copy: %+v", a.fileClip)
++	}
++	if srv.Exists("/代码/README (1).md") {
++		t.Error("cancelling still copied")
++	}
++}
++
++// TestFileClipboardSignOutClears: another account must not inherit the
++// paths of the first account's clipboard.
++func TestFileClipboardSignOutClears(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	tt.SetClipboard("链接: https://pan.baidu.com/s/1demo?pwd=abcd 提取码: abcd")
++	a.signOut()
++	tt.Advance(300 * time.Millisecond)
++	if len(a.fileClip.files) != 0 || a.fileClip.cut || a.fileClip.cutSet != nil {
++		t.Errorf("signing out kept the clipboard: %+v", a.fileClip)
++	}
++}
++
++// TestFileClipboardRepeatIgnored: an auto-repeated Cmd-V does not fall
++// back to the system clipboard's share link, as a cut that just cleared
++// the file clipboard would otherwise do on the next repeat.
++func TestFileClipboardRepeatIgnored(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.SetClipboard("链接: https://pan.baidu.com/s/1demo?pwd=abcd 提取码: abcd")
++	tt.KeyRepeat(ui.Cmd, ui.KeyV)
++	tt.Advance(300 * time.Millisecond)
++	if a.dlg.open {
++		t.Errorf("a repeated Cmd-V opened the share link: %+v", a.dlg)
++	}
++}

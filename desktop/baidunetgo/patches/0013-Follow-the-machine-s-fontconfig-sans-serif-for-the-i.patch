@@ -1,0 +1,811 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 15:24:19 +0800
+Subject: [PATCH] Follow the machine's fontconfig sans-serif for the interface
+ font and size, so desktops without XSettings stop falling back to MyGo's
+ built-in face, with a setting and env overrides to opt out.
+
+---
+ AGENTS.md                                    |   6 +-
+ CHANGELOG.md                                 |   1 +
+ CLAUDE.md                                    |   6 +-
+ README.md                                    |   7 +
+ app/app.go                                   |   2 +-
+ app/fontconfig_test.go                       | 192 +++++++++++++++++++
+ app/settings.go                              |  10 +
+ app/settings_page.go                         |  19 ++
+ app/theme.go                                 |  68 ++++++-
+ app/toolbar_test.go                          |   2 +-
+ internal/fontconfig/doc.go                   |  11 ++
+ internal/fontconfig/fontconfig_linux.go      |  99 ++++++++++
+ internal/fontconfig/fontconfig_linux_test.go | 159 +++++++++++++++
+ internal/fontconfig/fontconfig_other.go      |  15 ++
+ 14 files changed, 591 insertions(+), 6 deletions(-)
+ create mode 100644 app/fontconfig_test.go
+ create mode 100644 internal/fontconfig/doc.go
+ create mode 100644 internal/fontconfig/fontconfig_linux.go
+ create mode 100644 internal/fontconfig/fontconfig_linux_test.go
+ create mode 100644 internal/fontconfig/fontconfig_other.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 12b2c86..3870b72 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -34,6 +34,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ - `BAIDUNETGO_CAPTURE=out.png` (with `BAIDUNETGO_CAPTURE_AFTER=4s`): write a PNG of the window, then quit. This is how to look at the real window from a script.
+ - `BAIDUNETGO_SELFTEST=report.json` (`selftest.go`, `internal/selftest`): headless run of every feature against the saved session, else BaiduPCS-Go's login, inside a `/BaiduNetGo自检-…` folder it deletes afterwards. `BAIDUNETGO_PROBE=1` adds the download speed probe.
+ - `BAIDUNETGO_SNAPSHOTS=dir` with `go test ./app`: tests that call `save(t, tt, name)` write `ui.Tester.Image()` PNGs there, for visual checks without a window.
++- `BAIDUNETGO_FONT=family`: override the interface font family; empty leaves the setting alone, `-` forces MyGo's own system font.
++- `BAIDUNETGO_FONT_SIZE=dip`: override the interface font size in DIP (an integer).
+ 
+ ## Architecture
+ 
+@@ -41,6 +43,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Phases and routing.** `App.phase` is booting → login → ready. Once ready, `shell.go` draws the sidebar and title bar around a `ui.Router` with these routes: `/files/{path...}` (netdisk path, segments `url.PathEscape`d by `filesRoute`/`dirOfRoute`), `/search?q=`, `/transfers`, `/shares`, `/offline`, `/dedup`, `/recycle`, `/settings`. The title bar's controls switch on `a.section()`. Each directory gets its own `listing` (cached in `a.listings`, keyed by dir), so a page sliding out during a router transition keeps showing its own files.
+ 
++**Interface font (`internal/fontconfig`).** The interface follows this computer's fontconfig default sans-serif rather than a hard-coded face, which matters on desktops without XSettings where MyGo finds no GTK interface font. `fontconfig.Family`/`Size`/`Detected` run `fc-match -f "%{family[0]}\n%{size}\n" sans-serif` once with a 500 ms timeout and cache the answer (`sync.Once`), dropping empty and placeholder families; non-Linux builds return empty so MyGo keeps its own system font. `App.resolvedFont` turns the point size into DIP (`round(pt*4/3)`, clamped 11–17), and `App.applyTheme` sets the light/dark `ui.Theme`'s `Font`/`FontSize` from it each frame. `settings.FollowSystemFont` (nil, so true, by default) turns it off to the built-in 13 DIP and empty family; `BAIDUNETGO_FONT` and `BAIDUNETGO_FONT_SIZE` override both for tests and as an escape hatch. The settings page's 外观 section shows the detected face and a switch. A failed detection or no fontconfig is silent: the app keeps the built-in font.
++
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
+ **File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does. A held key acts once: auto-repeats of these file keys are ignored, and while an operation is busy the browser takes no file key, so a paste cannot start twice.
+@@ -86,7 +90,7 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - Virtualized `List` rows get no enter/exit transitions. Staggered entrances use `Keyframes` inside the row (`entering` in `browser.go`).
+ - The grid view is not `ui.GridView`: GridView builds each line as an element, so a tile that a resize moves to another line is built anew and jumps. `app/grid.go` positions tiles itself, all under one parent keyed by fsid (percent `Left`/`Width`, so the width never lags), and on a cell change `Jump`s the slot's offset to where it showed and `AnimateTo`s it back to 0. Element `Transition`s don't help here: MyGo skips layout transitions on frames where the window resized.
+ - The folder's actions live in a toolbar on the path bar (`app/browser.go`'s `filesToolbar`): a new folder (`folder-plus`), the sort menu, the view switch, the clipboard-link button, refresh, and the upload pill at the end; the folder's own name and search sit before them, and the button's box is where a folder made from it flies from (`listing.makerAt`). The maker (`app/newfolder.go`) is no longer a place for buttons: the grid's last tile is a whole "新建" tile that makes a folder on a click (a plus, or an upload while files are dragged over the window, `listing.over`), and the list's maker row is only the drop hint, in the accent color saying where dropped files will go, built only while files are dragged so it takes no room at the foot of a full folder. An empty folder says "这里还空着" and offers one upload of its own, labelled apart from the toolbar's. A new folder is named in a draft row at the top (`draftID`, put back each frame by `placeDraft`); a click away with its name untouched gives up. Cmd-Shift-N starts it from the toolbar's button box.
+-- Theme: the look is a native macOS app's, modeled on Pulse (egoist's MyGo app): the sidebar draws no background so the window's `VibrancySidebar` material shows (`main.go`: `TitleBarHiddenInset`, 52 px title bar), pages marked by white glyphs on colored tiles, the chosen one on a solid accent backdrop, a value at each row's end (`navValue`); the pane is white with a title over a subtitle (`pageTitle`), round gray tool buttons (`toolButton`), capsule segmented controls (`segmented`/`segmentedOf`), which fold into pop-up buttons (`choice`/`popUp`) when the title bar is narrower than `compactBar` (`a.compact`, from its last width; in a folder the tools fold instead whenever its whole path would not fit beside them open, `foldTools`, so the path never folds while they could give way, and the folder's title bar has no subtitle, the status bar counting its items), striped 28 px list rows (`stripe`), rounded gray `group` panels for settings and summaries, and the system typeface (no embedded fonts; `figure` sets tabular digits). Waits that fill a page or stand for a task use `plugins/loading` (a folder's `Ring`, the speed test's `Radar`; the boot screen shows no wait, only the bare window); small ones in buttons, rows and dialogs keep AppKit's `ui.Spinner`. `applyTheme` swaps in the app's light/dark `ui.Theme` each frame. Extra colors are in `palette`. Motion is one curve and three lengths (`motionHover` 120 ms, `motionFade` 160 ms, `motionPanel` 180 ms), plus `popIn` and `rowEnter`, all in `app/theme.go`; no springs or bounce.
++- Theme: the look is a native macOS app's, modeled on Pulse (egoist's MyGo app): the sidebar draws no background so the window's `VibrancySidebar` material shows (`main.go`: `TitleBarHiddenInset`, 52 px title bar), pages marked by white glyphs on colored tiles, the chosen one on a solid accent backdrop, a value at each row's end (`navValue`); the pane is white with a title over a subtitle (`pageTitle`), round gray tool buttons (`toolButton`), capsule segmented controls (`segmented`/`segmentedOf`), which fold into pop-up buttons (`choice`/`popUp`) when the title bar is narrower than `compactBar` (`a.compact`, from its last width; in a folder the tools fold instead whenever its whole path would not fit beside them open, `foldTools`, so the path never folds while they could give way, and the folder's title bar has no subtitle, the status bar counting its items), striped 28 px list rows (`stripe`), rounded gray `group` panels for settings and summaries, and the system typeface (no embedded fonts; `figure` sets tabular digits). Waits that fill a page or stand for a task use `plugins/loading` (a folder's `Ring`, the speed test's `Radar`; the boot screen shows no wait, only the bare window); small ones in buttons, rows and dialogs keep AppKit's `ui.Spinner`. `applyTheme` swaps in the app's light/dark `ui.Theme` each frame, its interface font coming from `internal/fontconfig` (see above). Extra colors are in `palette`. Motion is one curve and three lengths (`motionHover` 120 ms, `motionFade` 160 ms, `motionPanel` 180 ms), plus `popIn` and `rowEnter`, all in `app/theme.go`; no springs or bounce.
+ - Shaders (`ui/shader`, sources in `app/shaders/*.kage`, wiring in `app/effects.go`): each shader draw, effect layer or gradient with stops is a "general" GPU instance that the window does not batch, so dozens of them cost frames. Measure with `MYGO_FRAME_STATS=all` (it counts instances by class); draw many small things as plain fills, and keep a shader's per-pixel loop short (`specks.kage` searches only the cells whose specks can reach the pixel, from one hash each, and returns at once outside their reach). Shaders and `Element.Effect` run interpreted on the CPU in `ui.Tester`, so the app uses them only when `a.gpu` (`p.Accelerated()`), with plain fallbacks the tests see.
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index a8ac894..bbf731f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,7 @@
+ 
+ ### 新增
+ 
++- 界面字体族与字号新增「跟随本机 fontconfig」：默认读取 `fc-match sans-serif` 解析出的字体（字号按 1pt ≈ 4/3 DIP 换算并限幅 11–17），可在设置页「外观」里关闭改用内置字体；`BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖，没有 fontconfig 时静默回落。
+ - 查重结果行新增右键菜单：打开预览（同一重复组的图片可在预览里用左右键翻页）、在文件夹中显示、复制路径。
+ - 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。删除前会重新读取所在目录，核对 fs_id、大小和 MD5，并确保每组仍留有一份，过期或被替换的文件不会误删。
+ - 文件浏览器新增剪切 / 复制 / 粘贴（Cmd+X / Cmd+C / Cmd+V）：文件剪贴板只在应用内，跨文件夹移动或复制沿用“复制到…”的同名冲突处理（跳过 / 替换 / 保留两者）；剪切成功后才清空剪贴板，失败、取消或全部跳过时保留可重试，复制则可连续粘贴；剪切到原文件夹、把文件夹粘进自身或子目录会被拒绝，注销时清空。另有 Cmd+A 全选、Cmd+Shift+C 复制网盘路径、Cmd+Shift+V 始终打开系统剪贴板里的分享链接（Cmd+V 在文件剪贴板为空时才这么做）、F5 刷新；右键菜单与状态栏显示剪贴板状态，被剪切的行标出“待移动”，README 增补了快捷键说明。
+diff --git a/CLAUDE.md b/CLAUDE.md
+index fa8c729..99f9d94 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -34,6 +34,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ - `BAIDUNETGO_CAPTURE=out.png` (with `BAIDUNETGO_CAPTURE_AFTER=4s`): write a PNG of the window, then quit. This is how to look at the real window from a script.
+ - `BAIDUNETGO_SELFTEST=report.json` (`selftest.go`, `internal/selftest`): headless run of every feature against the saved session, else BaiduPCS-Go's login, inside a `/BaiduNetGo自检-…` folder it deletes afterwards. `BAIDUNETGO_PROBE=1` adds the download speed probe.
+ - `BAIDUNETGO_SNAPSHOTS=dir` with `go test ./app`: tests that call `save(t, tt, name)` write `ui.Tester.Image()` PNGs there, for visual checks without a window.
++- `BAIDUNETGO_FONT=family`: override the interface font family; empty leaves the setting alone, `-` forces MyGo's own system font.
++- `BAIDUNETGO_FONT_SIZE=dip`: override the interface font size in DIP (an integer).
+ 
+ ## Architecture
+ 
+@@ -41,6 +43,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Phases and routing.** `App.phase` is booting → login → ready. Once ready, `shell.go` draws the sidebar and title bar around a `ui.Router` with these routes: `/files/{path...}` (netdisk path, segments `url.PathEscape`d by `filesRoute`/`dirOfRoute`), `/search?q=`, `/transfers`, `/shares`, `/offline`, `/dedup`, `/recycle`, `/settings`. The title bar's controls switch on `a.section()`. Each directory gets its own `listing` (cached in `a.listings`, keyed by dir), so a page sliding out during a router transition keeps showing its own files.
+ 
++**Interface font (`internal/fontconfig`).** The interface follows this computer's fontconfig default sans-serif rather than a hard-coded face, which matters on desktops without XSettings where MyGo finds no GTK interface font. `fontconfig.Family`/`Size`/`Detected` run `fc-match -f "%{family[0]}\n%{size}\n" sans-serif` once with a 500 ms timeout and cache the answer (`sync.Once`), dropping empty and placeholder families; non-Linux builds return empty so MyGo keeps its own system font. `App.resolvedFont` turns the point size into DIP (`round(pt*4/3)`, clamped 11–17), and `App.applyTheme` sets the light/dark `ui.Theme`'s `Font`/`FontSize` from it each frame. `settings.FollowSystemFont` (nil, so true, by default) turns it off to the built-in 13 DIP and empty family; `BAIDUNETGO_FONT` and `BAIDUNETGO_FONT_SIZE` override both for tests and as an escape hatch. The settings page's 外观 section shows the detected face and a switch. A failed detection or no fontconfig is silent: the app keeps the built-in font.
++
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
+ **File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does. A held key acts once: auto-repeats of these file keys are ignored, and while an operation is busy the browser takes no file key, so a paste cannot start twice.
+@@ -87,7 +91,7 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - Things coming into a folder fly in (`app/landing.go`): rows glide to make room (`glideRow`, the listing holding the glide: `AnimateTo`/`Jump` on a list row take its name's clicks), then a card over the page (`flight`) goes from where the thing was put (drop point, button, draft row) to the row, which stays hidden until it lands. A `Transition` `Match` cannot do it: a list clips its rows to their slots, so a row coming from elsewhere shows only once it is there. A row the list chooses paints the accent under itself even while hidden, so the folder made is chosen once it lands (`chooseLanded`).
+ - Virtualized `List` rows get no enter/exit transitions. Staggered entrances use `Keyframes` inside the row (`entering` in `browser.go`).
+ - The grid view is not `ui.GridView`: GridView builds each line as an element, so a tile that a resize moves to another line is built anew and jumps. `app/grid.go` positions tiles itself, all under one parent keyed by fsid (percent `Left`/`Width`, so the width never lags), and on a cell change `Jump`s the slot's offset to where it showed and `AnimateTo`s it back to 0. Element `Transition`s don't help here: MyGo skips layout transitions on frames where the window resized.
+-- Theme: the look is a native macOS app's, modeled on Pulse (egoist's MyGo app): the sidebar draws no background so the window's `VibrancySidebar` material shows (`main.go`: `TitleBarHiddenInset`, 52 px title bar), pages marked by white glyphs on colored tiles, the chosen one on a solid accent backdrop, a value at each row's end (`navValue`); the pane is white with a title over a subtitle (`pageTitle`), round gray tool buttons (`toolButton`), capsule segmented controls (`segmented`/`segmentedOf`), which fold into pop-up buttons (`choice`/`popUp`) when the title bar is narrower than `compactBar` (`a.compact`, from its last width; in a folder the tools fold instead whenever its whole path would not fit beside them open, `foldTools`, so the path never folds while they could give way, and the folder's title bar has no subtitle, the status bar counting its items), striped 28 px list rows (`stripe`), rounded gray `group` panels for settings and summaries, and the system typeface (no embedded fonts; `figure` sets tabular digits). Waits that fill a page or stand for a task use `plugins/loading` (a folder's `Ring`, the speed test's `Radar`; the boot screen shows no wait, only the bare window); small ones in buttons, rows and dialogs keep AppKit's `ui.Spinner`. `applyTheme` swaps in the app's light/dark `ui.Theme` each frame. Extra colors are in `palette`. Motion is one curve and three lengths (`motionHover` 120 ms, `motionFade` 160 ms, `motionPanel` 180 ms), plus `motionLand` (420 ms after a 180 ms wait, for things flying into a folder), `popIn` and `rowEnter`, all in `app/theme.go`; no springs or bounce.
++- Theme: the look is a native macOS app's, modeled on Pulse (egoist's MyGo app): the sidebar draws no background so the window's `VibrancySidebar` material shows (`main.go`: `TitleBarHiddenInset`, 52 px title bar), pages marked by white glyphs on colored tiles, the chosen one on a solid accent backdrop, a value at each row's end (`navValue`); the pane is white with a title over a subtitle (`pageTitle`), round gray tool buttons (`toolButton`), capsule segmented controls (`segmented`/`segmentedOf`), which fold into pop-up buttons (`choice`/`popUp`) when the title bar is narrower than `compactBar` (`a.compact`, from its last width; in a folder the tools fold instead whenever its whole path would not fit beside them open, `foldTools`, so the path never folds while they could give way, and the folder's title bar has no subtitle, the status bar counting its items), striped 28 px list rows (`stripe`), rounded gray `group` panels for settings and summaries, and the system typeface (no embedded fonts; `figure` sets tabular digits). Waits that fill a page or stand for a task use `plugins/loading` (a folder's `Ring`, the speed test's `Radar`; the boot screen shows no wait, only the bare window); small ones in buttons, rows and dialogs keep AppKit's `ui.Spinner`. `applyTheme` swaps in the app's light/dark `ui.Theme` each frame, its interface font coming from `internal/fontconfig` (see above). Extra colors are in `palette`. Motion is one curve and three lengths (`motionHover` 120 ms, `motionFade` 160 ms, `motionPanel` 180 ms), plus `motionLand` (420 ms after a 180 ms wait, for things flying into a folder), `popIn` and `rowEnter`, all in `app/theme.go`; no springs or bounce.
+ - Shaders (`ui/shader`, sources in `app/shaders/*.kage`, wiring in `app/effects.go`): each shader draw, effect layer or gradient with stops is a "general" GPU instance that the window does not batch, so dozens of them cost frames. Measure with `MYGO_FRAME_STATS=all` (it counts instances by class); draw many small things as plain fills, and keep a shader's per-pixel loop short (`specks.kage` searches only the cells whose specks can reach the pixel, from one hash each, and returns at once outside their reach). Shaders and `Element.Effect` run interpreted on the CPU in `ui.Tester`, so the app uses them only when `a.gpu` (`p.Accelerated()`), with plain fallbacks the tests see.
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+diff --git a/README.md b/README.md
+index c6d1e08..b623055 100644
+--- a/README.md
++++ b/README.md
+@@ -29,6 +29,7 @@
+ - **分享**：创建带提取码与有效期的链接、管理我的分享；工具栏的链接按钮、Cmd+Shift+V（没有文件剪贴板时 Cmd+V 也可以）在你操作时读取剪贴板，粘贴整段分享文字一键转存
+ - **离线下载**：HTTP / 磁力链接交给网盘云端下载
+ - **动效**：跟随系统深浅色；文件夹打开时文件依次浮现，删除的文件碎成光点飘散，上传中的文件由光点聚拢成行，拖文件进来时窗口亮起一圈流动的光
++- **外观与字体**：界面字体族与字号默认跟随本机 fontconfig 的默认 sans-serif（`fc-match sans-serif`），按 pt 换算成 DIP 并限幅 11–17；可在设置「外观」里关闭改用内置字体，或用环境变量 `BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 覆盖
+ 
+ ![深色设置](docs/screenshots/settings-dark.png)
+ 
+@@ -90,8 +91,14 @@ go tool mygo build -sign "BaiduNetGo Dev"   # macOS：用固定的自签名证
+ | `BAIDUNETGO_CAPTURE=out.png` | 窗口打开几秒后截图并退出（`BAIDUNETGO_CAPTURE_AFTER=4s` 调等待时间） |
+ | `BAIDUNETGO_SELFTEST=report.json` | 用真实账号无界面地自检每项功能（在临时文件夹里进行，结束后删除）；加 `BAIDUNETGO_PROBE=1` 再测一次下载速度 |
+ | `BAIDUNETGO_SNAPSHOTS=dir` | 配合 `go test ./app`，把界面测试的画面存成 PNG |
++| `BAIDUNETGO_FONT=family` | 覆盖界面字体族名；空字符串不覆盖，`-` 强制使用 MyGo 的系统字体 |
++| `BAIDUNETGO_FONT_SIZE=dip` | 覆盖界面字号（DIP 整数） |
+ | `MYGO_AUTOMATION=/tmp/baidunetgo.sock` | 配合 `go run -tags e2e .`，开放仅当前用户可访问的窗口自动化 socket；正式版不包含此入口 |
+ 
++### 外观与字体
++
++界面字体族与字号默认跟随本机 fontconfig 对 `sans-serif` 的解析结果（Linux 上即 `fc-match -f '%{family[0]}\n%{size}\n' sans-serif`；其它平台保持 MyGo 的系统字体）。字号按 1pt ≈ 4/3 DIP 换算，并限幅在 11–17 DIP，例如本机 12pt 显示为 16 DIP。可在设置页的「外观」小节关闭「跟随系统字体」，改用内置的 13 DIP 与系统族名；环境变量 `BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖。没有 fontconfig 或检测失败时静默回落到内置字体，不报错。
++
+ 窗口自动化可读取控件、点击、输入、选择菜单并截图，协议见 [MyGo automation](https://github.com/egoist/mygo/blob/v0.7.2/docs/plugins/automation.md)。例如列出窗口：
+ 
+ ```bash
+diff --git a/app/app.go b/app/app.go
+index 449aa61..f1849d3 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -237,7 +237,7 @@ func (a *App) View(c *ui.Context) {
+ 	if a.moving() {
+ 		c.Invalidate()
+ 	}
+-	t, p := applyTheme(c)
++	t, p := a.applyTheme(c)
+ 	switch a.phase {
+ 	case phaseBooting:
+ 		// Reading the saved session takes a moment: show the bare window,
+diff --git a/app/fontconfig_test.go b/app/fontconfig_test.go
+new file mode 100644
+index 0000000..58a7af4
+--- /dev/null
++++ b/app/fontconfig_test.go
+@@ -0,0 +1,192 @@
++package app
++
++import (
++	"os"
++	"strconv"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++)
++
++// TestMain pins the built-in font for the rest of the app tests, which
++// were written and measured with 13 DIP: a machine whose fontconfig picks
++// another face then lays every page out as it did before. The font tests
++// unset these and stand in for fc-match themselves.
++func TestMain(m *testing.M) {
++	os.Setenv("BAIDUNETGO_FONT", "-")
++	os.Setenv("BAIDUNETGO_FONT_SIZE", "13")
++	os.Exit(m.Run())
++}
++
++// clearFontEnv drops the font overrides for one test and restores them
++// after it, so the built-in defaults in TestMain do not hide detection.
++func clearFontEnv(t *testing.T) {
++	t.Helper()
++	for _, k := range []string{"BAIDUNETGO_FONT", "BAIDUNETGO_FONT_SIZE"} {
++		v, ok := os.LookupEnv(k)
++		if ok {
++			t.Cleanup(func() { os.Setenv(k, v) })
++		} else {
++			t.Cleanup(func() { os.Unsetenv(k) })
++		}
++		os.Unsetenv(k)
++	}
++}
++
++// stubFont makes detection report fam at pt (or nothing) for one test.
++func stubFont(t *testing.T, fam string, pt float32, hasSize bool) {
++	t.Helper()
++	oldFamily, oldSize, oldDetected := fcFamily, fcSize, fcDetected
++	fcFamily = func() string { return fam }
++	fcSize = func() (float32, bool) { return pt, hasSize }
++	fcDetected = func() string {
++		if fam == "" {
++			return ""
++		}
++		if hasSize {
++			return fam + " " + strconv.FormatFloat(float64(pt), 'f', -1, 32) + "pt"
++		}
++		return fam
++	}
++	t.Cleanup(func() { fcFamily, fcSize, fcDetected = oldFamily, oldSize, oldDetected })
++}
++
++// TestFollowSystemFontOn checks that, by default, the theme takes the
++// detected family and the size converted from points to DIP.
++func TestFollowSystemFontOn(t *testing.T) {
++	clearFontEnv(t)
++	stubFont(t, "测试字体", 12, true)
++	a := New()
++	if fam, size := a.resolvedFont(); fam != "测试字体" || size != 16 {
++		t.Fatalf("resolved %q %v, want 测试字体 16", fam, size)
++	}
++	tt := ui.NewTester(a.View, 640, 420)
++	tt.Advance(50 * time.Millisecond)
++	if lightTheme.Font != "测试字体" || lightTheme.FontSize != 16 {
++		t.Errorf("theme font %q at %v, want 测试字体 at 16", lightTheme.Font, lightTheme.FontSize)
++	}
++}
++
++// TestFollowSystemFontOff checks that turning the setting off restores the
++// built-in 13 DIP and no family.
++func TestFollowSystemFontOff(t *testing.T) {
++	clearFontEnv(t)
++	stubFont(t, "测试字体", 12, true)
++	a := New()
++	off := false
++	a.settings.FollowSystemFont = &off
++	if fam, size := a.resolvedFont(); fam != "" || size != 13 {
++		t.Fatalf("resolved %q %v, want the built-in \"\" 13", fam, size)
++	}
++	tt := ui.NewTester(a.View, 640, 420)
++	tt.Advance(50 * time.Millisecond)
++	if lightTheme.Font != "" || lightTheme.FontSize != 13 {
++		t.Errorf("theme font %q at %v, want built-in \"\" at 13", lightTheme.Font, lightTheme.FontSize)
++	}
++}
++
++// TestFontSizeEnvOverride checks that BAIDUNETGO_FONT_SIZE wins over the
++// converted size.
++func TestFontSizeEnvOverride(t *testing.T) {
++	clearFontEnv(t)
++	stubFont(t, "测试字体", 12, true)
++	t.Setenv("BAIDUNETGO_FONT_SIZE", "15")
++	a := New()
++	if fam, size := a.resolvedFont(); fam != "测试字体" || size != 15 {
++		t.Fatalf("resolved %q %v, want 测试字体 15", fam, size)
++	}
++}
++
++// TestFontFamilyEnvOverride checks that BAIDUNETGO_FONT wins over the
++// detected family, and "-" forces the built-in one.
++func TestFontFamilyEnvOverride(t *testing.T) {
++	clearFontEnv(t)
++	stubFont(t, "测试字体", 12, true)
++	t.Setenv("BAIDUNETGO_FONT", "自定义字体")
++	a := New()
++	if fam, _ := a.resolvedFont(); fam != "自定义字体" {
++		t.Fatalf("resolved family %q, want 自定义字体", fam)
++	}
++	t.Setenv("BAIDUNETGO_FONT", "-")
++	if fam, size := a.resolvedFont(); fam != "" || size != 16 {
++		t.Errorf("forced system: %q %v, want \"\" 16", fam, size)
++	}
++}
++
++// TestFontSizeClamped checks the point-to-DIP conversion's bounds: tiny
++// sizes rise to 11 and huge ones fall to 17.
++func TestFontSizeClamped(t *testing.T) {
++	cases := map[float32]float32{6: 11, 9: 12, 12: 16, 14: 17, 24: 17}
++	for pt, want := range cases {
++		if got := themeFontSize(pt); got != want {
++			t.Errorf("themeFontSize(%v) = %v, want %v", pt, got, want)
++		}
++	}
++}
++
++// TestFontDetectionFailureFallback checks that a failed detection keeps
++// the built-in font and draws without panicking.
++func TestFontDetectionFailureFallback(t *testing.T) {
++	clearFontEnv(t)
++	stubFont(t, "", 0, false)
++	a := New()
++	if fam, size := a.resolvedFont(); fam != "" || size != 13 {
++		t.Fatalf("resolved %q %v after a failed detection, want \"\" 13", fam, size)
++	}
++	tt := ui.NewTester(a.View, 640, 420)
++	tt.Advance(50 * time.Millisecond)
++	if lightTheme.Font != "" || lightTheme.FontSize != 13 {
++		t.Errorf("theme %q at %v after a failed detection", lightTheme.Font, lightTheme.FontSize)
++	}
++}
++
++// TestFollowSystemFontSetting flips the switch on the settings page and
++// checks that the choice takes effect at once.
++func TestFollowSystemFontSetting(t *testing.T) {
++	clearFontEnv(t)
++	stubFont(t, "测试字体", 12, true)
++	a, tt, _ := signedIn(t)
++	a.router.Replace("/settings")
++	tt.Advance(300 * time.Millisecond)
++	sw, ok := tt.AccessByRole(ui.RoleSwitch, "跟随系统字体")
++	if !ok {
++		t.Fatalf("no 跟随系统字体 switch; texts %q", tt.Texts())
++	}
++	if a.settings.followSystemFont() != true {
++		t.Fatal("not following by default")
++	}
++	b := sw.Bounds
++	tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++	tt.Advance(300 * time.Millisecond)
++	if a.settings.FollowSystemFont == nil || *a.settings.FollowSystemFont {
++		t.Fatalf("setting after the click is %v, want false", a.settings.FollowSystemFont)
++	}
++	if fam, size := a.resolvedFont(); fam != "" || size != 13 {
++		t.Errorf("resolved %q %v after turning it off, want \"\" 13", fam, size)
++	}
++	// And back on.
++	sw, ok = tt.AccessByRole(ui.RoleSwitch, "跟随系统字体")
++	if !ok {
++		t.Fatal("the switch vanished")
++	}
++	b = sw.Bounds
++	tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++	tt.Advance(300 * time.Millisecond)
++	if !a.settings.followSystemFont() {
++		t.Error("turning it back on did not take")
++	}
++	if fam, size := a.resolvedFont(); fam != "测试字体" || size != 16 {
++		t.Errorf("resolved %q %v after turning it on, want 测试字体 16", fam, size)
++	}
++}
++
++// TestFontFollowSnapshot draws the settings page following the machine's
++// real fontconfig, for a look at the glyphs and line height.
++func TestFontFollowSnapshot(t *testing.T) {
++	clearFontEnv(t)
++	a, tt, _ := signedIn(t)
++	a.router.Replace("/settings")
++	tt.Advance(500 * time.Millisecond)
++	save(t, tt, "font-follow")
++}
+diff --git a/app/settings.go b/app/settings.go
+index 8f6b142..7a8dd55 100644
+--- a/app/settings.go
++++ b/app/settings.go
+@@ -32,6 +32,16 @@ type settings struct {
+ 	SkipImport bool `json:"skip_pcs_import,omitempty"`
+ 	// ShareDest is the folder shares were last saved into.
+ 	ShareDest string `json:"share_dest,omitempty"`
++	// FollowSystemFont makes the interface font follow this computer's
++	// fontconfig default sans-serif. nil means yes, so it is on by default
++	// and can be turned off; false keeps the built-in 13 DIP font.
++	FollowSystemFont *bool `json:"follow_system_font,omitempty"`
++}
++
++// followSystemFont reports whether the interface follows fontconfig's
++// font; unset, as a fresh install is, means it does.
++func (s settings) followSystemFont() bool {
++	return s.FollowSystemFont == nil || *s.FollowSystemFont
+ }
+ 
+ type tuneRecord struct {
+diff --git a/app/settings_page.go b/app/settings_page.go
+index 61cd5cf..4bce35d 100644
+--- a/app/settings_page.go
++++ b/app/settings_page.go
+@@ -50,6 +50,25 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 		ui.Column(c).FillWidth().MaxWidth(600).Margin(0, ui.Auto).Gap(24).Children(func() {
+ 			a.accountSection(c, t, p)
+ 			a.tuneSection(c, t, p)
++			section(c, t, p, "外观", func() {
++				follow := s.followSystemFont()
++				detail := ""
++				if follow {
++					detail = fcDetected()
++					if detail == "" {
++						detail = "未检测到 fontconfig，使用内置字体"
++					}
++				} else {
++					detail = "已关闭，使用内置字体 13"
++				}
++				settingRow(c, t, p, "跟随系统字体", "", detail, func() {
++					if ui.Switch(c, &follow).Label("跟随系统字体").Changed() {
++						v := follow
++						s.FollowSystemFont = &v
++						a.applySettings()
++					}
++				})
++			})
+ 			section(c, t, p, "预览", func() {
+ 				if s.PreviewMB == 0 {
+ 					s.PreviewMB = 50
+diff --git a/app/theme.go b/app/theme.go
+index cb02cf8..90c58e3 100644
+--- a/app/theme.go
++++ b/app/theme.go
+@@ -1,9 +1,14 @@
+ package app
+ 
+ import (
++	"math"
++	"os"
++	"strconv"
+ 	"time"
+ 
+ 	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/fontconfig"
+ )
+ 
+ // The look is that of a native macOS app, as Pulse's: the sidebar over
+@@ -113,17 +118,76 @@ func init() {
+ 	}
+ }
+ 
++// The built-in font, used when the user does not follow fontconfig: 13
++// DIP and MyGo's own system family.
++const (
++	builtinFontSize = 13
++	builtinFont     = ""
++)
++
++// Detection is behind variables so tests can stand in for fc-match
++// without one installed.
++var (
++	fcFamily   = fontconfig.Family
++	fcSize     = fontconfig.Size
++	fcDetected = fontconfig.Detected
++)
++
+ // applyTheme sets the app's theme for this frame, following the system's
+-// light or dark appearance, and returns it with the matching palette.
+-func applyTheme(c *ui.Context) (*ui.Theme, *palette) {
++// light or dark appearance and the user's font choice, and returns it with
++// the matching palette.
++func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
++	family, size := a.resolvedFont()
+ 	if c.Theme().Dark {
++		darkTheme.Font, darkTheme.FontSize = family, size
+ 		c.SetTheme(darkTheme)
+ 		return darkTheme, &darkPalette
+ 	}
++	lightTheme.Font, lightTheme.FontSize = family, size
+ 	c.SetTheme(lightTheme)
+ 	return lightTheme, &lightPalette
+ }
+ 
++// resolvedFont is the interface font for this frame: fontconfig's default
++// sans-serif while the user follows the system, else the built-in 13 DIP
++// with no family. BAIDUNETGO_FONT and BAIDUNETGO_FONT_SIZE win, for tests
++// and as an escape hatch; their empty values leave the setting alone.
++func (a *App) resolvedFont() (family string, size float32) {
++	family, size = builtinFont, builtinFontSize
++	if a.settings.followSystemFont() {
++		if f := fcFamily(); f != "" {
++			family = f
++		}
++		if pt, ok := fcSize(); ok && pt > 0 {
++			size = themeFontSize(pt)
++		}
++		if family == builtinFont {
++			// Nothing detected: keep the built-in size too.
++			size = builtinFontSize
++		}
++	}
++	if v, ok := os.LookupEnv("BAIDUNETGO_FONT"); ok && v != "" {
++		if v == "-" {
++			family = builtinFont
++		} else {
++			family = v
++		}
++	}
++	if v, ok := os.LookupEnv("BAIDUNETGO_FONT_SIZE"); ok && v != "" {
++		if n, err := strconv.Atoi(v); err == nil && n > 0 {
++			size = float32(n)
++		}
++	}
++	return family, size
++}
++
++// themeFontSize converts a point size to DIP (1pt ≈ 4/3 DIP at 96dpi),
++// then clamps it so a very small or huge fontconfig setting stays usable.
++func themeFontSize(pt float32) float32 {
++	dip := float32(math.Round(float64(pt) * 4 / 3))
++	return min(max(dip, 11), 17)
++}
++
+ // Motion shared across the app: one curve, no bounce, and three lengths
+ // by what moves.
+ var (
+diff --git a/app/toolbar_test.go b/app/toolbar_test.go
+index 0000485..857f29d 100644
+--- a/app/toolbar_test.go
++++ b/app/toolbar_test.go
+@@ -195,7 +195,7 @@ func TestMakerRowDropHint(t *testing.T) {
+ 	a := New()
+ 	l := &listing{dir: "/文档"}
+ 	tt := ui.NewTester(func(c *ui.Context) {
+-		to, _ := applyTheme(c)
++		to, _ := a.applyTheme(c)
+ 		a.makerRow(c, to, l)
+ 	}, 420, 120)
+ 	tt.SetLocale("zh-Hans")
+diff --git a/internal/fontconfig/doc.go b/internal/fontconfig/doc.go
+new file mode 100644
+index 0000000..7036e61
+--- /dev/null
++++ b/internal/fontconfig/doc.go
+@@ -0,0 +1,11 @@
++// Package fontconfig reads the desktop's default sans-serif font from
++// fontconfig, which on Linux is what the rest of the desktop draws with.
++// MyGo only asks GTK for its gtk-font-name and takes no size, so on a
++// desktop without XSettings (Hyprland, for one) it finds nothing and
++// falls back to a built-in face; this package gives the app the face
++// fontconfig itself resolves for sans-serif.
++//
++// Detection runs once and is cached. On a platform without fontconfig,
++// and when fc-match is missing, fails or prints nothing usable, the
++// functions return empty results and the caller keeps its own font.
++package fontconfig
+diff --git a/internal/fontconfig/fontconfig_linux.go b/internal/fontconfig/fontconfig_linux.go
+new file mode 100644
+index 0000000..37cec2e
+--- /dev/null
++++ b/internal/fontconfig/fontconfig_linux.go
+@@ -0,0 +1,99 @@
++//go:build linux
++
++package fontconfig
++
++import (
++	"context"
++	"os/exec"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++)
++
++// timeout bounds fc-match: it answers at once, so a longer wait only
++// delays a frame.
++const timeout = 500 * time.Millisecond
++
++// fcMatch is the program detection runs. Tests point it at a fake
++// script; the PATH is searched when it holds a bare name.
++var fcMatch = "fc-match"
++
++// result is what fc-match said once; a zero result means none.
++type result struct {
++	family  string
++	size    float32
++	hasSize bool
++}
++
++var (
++	once   sync.Once
++	cached result
++)
++
++// detect runs fc-match for the default sans-serif and parses its family
++// and size. It runs at most once per process, as detection is cached.
++func detect() result {
++	once.Do(func() {
++		ctx, cancel := context.WithTimeout(context.Background(), timeout)
++		defer cancel()
++		out, err := exec.CommandContext(ctx, fcMatch, "-f", "%{family[0]}\n%{size}\n", "sans-serif").Output()
++		if err != nil {
++			return
++		}
++		cached = parse(string(out))
++	})
++	return cached
++}
++
++// parse reads the family from the first line and the size from the
++// second, ignoring anything unusable.
++func parse(out string) result {
++	lines := strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n")
++	var r result
++	if len(lines) > 0 {
++		r.family = cleanFamily(lines[0])
++	}
++	if len(lines) > 1 {
++		if pt, err := strconv.ParseFloat(strings.TrimSpace(lines[1]), 32); err == nil && pt > 0 {
++			r.size, r.hasSize = float32(pt), true
++		}
++	}
++	if r.family == "" {
++		return result{}
++	}
++	return r
++}
++
++// cleanFamily drops the emptiness and placeholders fc-match can print in
++// place of a real family.
++func cleanFamily(s string) string {
++	s = strings.TrimSpace(s)
++	switch {
++	case s == "", s == "-", strings.EqualFold(s, "system"), strings.EqualFold(s, "sans-serif"):
++		return ""
++	}
++	return s
++}
++
++// Family is the default sans-serif family fontconfig resolves, or "".
++func Family() string { return detect().family }
++
++// Size is that family's size in points, and whether fontconfig gave one.
++func Size() (float32, bool) {
++	r := detect()
++	return r.size, r.hasSize
++}
++
++// Detected describes the detected font for the interface, as
++// "霞鹜文楷 屏幕阅读版 12pt", or "" when nothing was found.
++func Detected() string {
++	r := detect()
++	if r.family == "" {
++		return ""
++	}
++	if r.hasSize {
++		return r.family + " " + strconv.FormatFloat(float64(r.size), 'f', -1, 32) + "pt"
++	}
++	return r.family
++}
+diff --git a/internal/fontconfig/fontconfig_linux_test.go b/internal/fontconfig/fontconfig_linux_test.go
+new file mode 100644
+index 0000000..9e3c12c
+--- /dev/null
++++ b/internal/fontconfig/fontconfig_linux_test.go
+@@ -0,0 +1,159 @@
++//go:build linux
++
++package fontconfig
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++// fakeFc points detection at a shell script that prints body, and clears
++// the cache so the test sees this script.
++func fakeFc(t *testing.T, body string) {
++	t.Helper()
++	dir := t.TempDir()
++	p := filepath.Join(dir, "fc-match")
++	script := "#!/bin/sh\n" + body + "\n"
++	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	old := fcMatch
++	fcMatch = p
++	once = sync.Once{}
++	cached = result{}
++	t.Cleanup(func() {
++		fcMatch = old
++		once = sync.Once{}
++		cached = result{}
++	})
++}
++
++// TestDetectParses checks the normal answer: a family on the first line
++// and a point size on the second.
++func TestDetectParses(t *testing.T) {
++	fakeFc(t, `printf '霞鹜文楷 屏幕阅读版\n12\n'`)
++	if got := Family(); got != "霞鹜文楷 屏幕阅读版" {
++		t.Errorf("Family() = %q", got)
++	}
++	if pt, ok := Size(); !ok || pt != 12 {
++		t.Errorf("Size() = %v, %v", pt, ok)
++	}
++	if got := Detected(); got != "霞鹜文楷 屏幕阅读版 12pt" {
++		t.Errorf("Detected() = %q", got)
++	}
++}
++
++// TestDetectEmpty checks that no output means no font, not a panic.
++func TestDetectEmpty(t *testing.T) {
++	fakeFc(t, `exit 0`)
++	if got := Family(); got != "" {
++		t.Errorf("Family() = %q", got)
++	}
++	if _, ok := Size(); ok {
++		t.Error("Size() said it had a size")
++	}
++	if got := Detected(); got != "" {
++		t.Errorf("Detected() = %q", got)
++	}
++}
++
++// TestDetectFailure checks a failing fc-match: empty, silently.
++func TestDetectFailure(t *testing.T) {
++	fakeFc(t, `exit 1`)
++	if got := Family(); got != "" {
++		t.Errorf("Family() = %q", got)
++	}
++	if _, ok := Size(); ok {
++		t.Error("Size() said it had a size")
++	}
++}
++
++// TestDetectTimeout checks that an fc-match that never answers is cut off
++// by the timeout and leaves no font rather than hanging.
++func TestDetectTimeout(t *testing.T) {
++	fakeFc(t, `exec sleep 5`) // exec, so the timeout kills it rather than a shell
++	start := time.Now()
++	if got := Family(); got != "" {
++		t.Errorf("Family() = %q", got)
++	}
++	if _, ok := Size(); ok {
++		t.Error("Size() said it had a size")
++	}
++	if d := time.Since(start); d > 3*time.Second {
++		t.Errorf("detection took %v, want about the timeout", d)
++	}
++}
++
++// TestDetectNonNumericSize checks that an unparseable size line keeps the
++// family but reports no size.
++func TestDetectNonNumericSize(t *testing.T) {
++	fakeFc(t, `printf 'Some Font\nnot-a-number\n'`)
++	if got := Family(); got != "Some Font" {
++		t.Errorf("Family() = %q", got)
++	}
++	if _, ok := Size(); ok {
++		t.Error("Size() said it had a size")
++	}
++	if got := Detected(); got != "Some Font" {
++		t.Errorf("Detected() = %q", got)
++	}
++}
++
++// TestDetectZeroSize checks that a zero size is treated as none.
++func TestDetectZeroSize(t *testing.T) {
++	fakeFc(t, `printf 'Some Font\n0\n'`)
++	if _, ok := Size(); ok {
++		t.Error("Size() said it had a size")
++	}
++}
++
++// TestDetectFiltersPlaceholder checks that a placeholder family such as
++// "System" is dropped along with its size.
++func TestDetectFiltersPlaceholder(t *testing.T) {
++	for _, fam := range []string{"System", "system", "-", "  "} {
++		fakeFc(t, "printf '"+strings.ReplaceAll(fam, "'", `\'`)+"\n12\n'")
++		if got := Family(); got != "" {
++			t.Errorf("Family() = %q for placeholder %q", got, fam)
++		}
++		if _, ok := Size(); ok {
++			t.Errorf("Size() said it had a size for placeholder %q", fam)
++		}
++	}
++}
++
++// TestDetectCached checks that detection runs once: the script counts its
++// calls, and changing the answer without clearing the cache is ignored.
++func TestDetectCached(t *testing.T) {
++	dir := t.TempDir()
++	counter := filepath.Join(dir, "count")
++	p := filepath.Join(dir, "fc-match")
++	script := "#!/bin/sh\necho x >> " + counter + "\nprintf 'Cached Font\\n11\\n'\n"
++	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	old := fcMatch
++	fcMatch = p
++	once = sync.Once{}
++	cached = result{}
++	t.Cleanup(func() {
++		fcMatch = old
++		once = sync.Once{}
++		cached = result{}
++	})
++	for i := 0; i < 3; i++ {
++		Family()
++		Size()
++		Detected()
++	}
++	data, err := os.ReadFile(counter)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if n := strings.Count(string(data), "x"); n != 1 {
++		t.Errorf("fc-match ran %d times, want once", n)
++	}
++}
+diff --git a/internal/fontconfig/fontconfig_other.go b/internal/fontconfig/fontconfig_other.go
+new file mode 100644
+index 0000000..bd9649d
+--- /dev/null
++++ b/internal/fontconfig/fontconfig_other.go
+@@ -0,0 +1,15 @@
++//go:build !linux
++
++package fontconfig
++
++// On platforms without fontconfig the app keeps MyGo's own system font:
++// there is nothing to detect, and the empty answers say so.
++
++// Family is "", as there is no fontconfig here.
++func Family() string { return "" }
++
++// Size is 0 and false, as there is no fontconfig here.
++func Size() (float32, bool) { return 0, false }
++
++// Detected is "", as there is no fontconfig here.
++func Detected() string { return "" }

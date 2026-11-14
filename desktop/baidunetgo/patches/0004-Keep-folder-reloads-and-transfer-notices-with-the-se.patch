@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 10:27:07 +0800
+Subject: [PATCH] Keep folder reloads and transfer notices with the session
+ that asked for them, so a read under way cannot lose a refresh or speak for
+ the next account
+
+---
+ app/files.go          | 29 ++++++++++++++++++++++-------
+ app/settings.go       |  3 ---
+ app/transfers.go      | 34 ++++++++++++++++++++++++++--------
+ app/transfers_test.go | 19 +++++++++++++++++++
+ 4 files changed, 67 insertions(+), 18 deletions(-)
+
+diff --git a/app/files.go b/app/files.go
+index b8b4c07..fb25d3d 100644
+--- a/app/files.go
++++ b/app/files.go
+@@ -25,6 +25,7 @@ type listing struct {
+ 	sorted  baidu.Order
+ 	loaded  bool
+ 	loading bool
++	pending bool // read again once the one under way returns
+ 	err     string
+ 	shown   time.Time // when the files first showed, to stagger them in
+ 	read    time.Time // when the netdisk was last asked for them
+@@ -150,6 +151,9 @@ func (a *App) load(l *listing) {
+ 	go func() {
+ 		files, err := s.client.List(context.Background(), l.dir, order)
+ 		a.update(func() {
++			if a.sess != s {
++				return // another account's read, or none
++			}
+ 			l.loading = false
+ 			if err != nil {
+ 				l.err = err.Error()
+@@ -157,21 +161,32 @@ func (a *App) load(l *listing) {
+ 					a.signOut()
+ 					a.login.err = err.Error()
+ 				}
+-				return
++			} else {
++				l.files, l.loaded = a.keepDying(l.dir, files), true
++				l.sorted, l.ghosts = baidu.Order{}, nil
++				l.loads++
++				if l.shown.IsZero() {
++					l.shown = time.Now()
++				}
+ 			}
+-			l.files, l.loaded = a.keepDying(l.dir, files), true
+-			l.sorted, l.ghosts = baidu.Order{}, nil
+-			l.loads++
+-			if l.shown.IsZero() {
+-				l.shown = time.Now()
++			// A reload asked for while this read was under way waited
++			// for it, rather than being lost.
++			if l.pending {
++				l.pending = false
++				a.load(l)
+ 			}
+ 		})
+ 	}()
+ }
+ 
+-// reload reads the directory again, as after changing it.
++// reload reads the directory again, as after changing it; one being read
++// reads again as it returns, so the change is not lost.
+ func (a *App) reload(dir string) {
+ 	if l := a.listings[dir]; l != nil {
++		if l.loading {
++			l.pending = true
++			return
++		}
+ 		a.load(l)
+ 	}
+ }
+diff --git a/app/settings.go b/app/settings.go
+index d541beb..8f6b142 100644
+--- a/app/settings.go
++++ b/app/settings.go
+@@ -32,9 +32,6 @@ type settings struct {
+ 	SkipImport bool `json:"skip_pcs_import,omitempty"`
+ 	// ShareDest is the folder shares were last saved into.
+ 	ShareDest string `json:"share_dest,omitempty"`
+-	// SeenShare is the last share link found on the clipboard, and its
+-	// password, opened once and not again.
+-	SeenShare string `json:"seen_share,omitempty"`
+ }
+ 
+ type tuneRecord struct {
+diff --git a/app/transfers.go b/app/transfers.go
+index dfb0936..48a831f 100644
+--- a/app/transfers.go
++++ b/app/transfers.go
+@@ -91,11 +91,19 @@ func (a *App) startTransfers() {
+ 		})
+ 	}
+ 	m.OnFinish = func(t transfer.Task) {
+-		a.update(func() { a.finished(t) })
++		a.update(func() {
++			// A task that ends as the session goes must not speak for the
++			// one that follows it.
++			if a.xfer == m {
++				a.finished(t)
++			}
++		})
+ 	}
+ 	m.OnSkip = func(dir string, err error) {
+ 		a.update(func() {
+-			a.toast("无法读取「"+path.Base(dir)+"」，其中的文件没有加入下载："+err.Error(), "error")
++			if a.xfer == m {
++				a.toast("无法读取「"+path.Base(dir)+"」，其中的文件没有加入下载："+err.Error(), "error")
++			}
+ 		})
+ 	}
+ 	a.xfer = m
+@@ -104,8 +112,8 @@ func (a *App) startTransfers() {
+ }
+ 
+ func (a *App) stopTransfers() {
+-	if a.xfer != nil {
+-		a.xfer.Close()
++	if m := a.xfer; m != nil {
++		m.Close()
+ 		a.xfer = nil
+ 	}
+ 	a.transfers.notice.reset()
+@@ -136,20 +144,30 @@ func (a *App) finished(t transfer.Task) {
+ // notifyFinished gathers a finished transfer's notification, showing the
+ // ones that finish together at once, noticeDelay later.
+ func (a *App) notifyFinished(verb, id, name string) {
++	m := a.xfer
++	if m == nil {
++		return
++	}
+ 	g := &a.transfers.notice
+ 	g.add(verb, id, name)
+ 	if g.timer == nil {
+ 		g.timer = time.AfterFunc(noticeDelay, func() {
+-			a.update(a.flushNotice)
++			a.update(func() { a.flushNotice(m) })
+ 		})
+ 	}
+ }
+ 
+ // flushNotice shows what finished together, on the main thread: MyGo's
+-// notifications are not safe to show from several goroutines.
+-func (a *App) flushNotice() {
++// notifications are not safe to show from several goroutines. m is the
++// queue they finished in; a later session's notice is left for its own
++// timer, and a window the user came back to needs none.
++func (a *App) flushNotice(m *transfer.Manager) {
+ 	g := &a.transfers.notice
+-	if g.n == 0 {
++	if g.n == 0 || a.xfer != m {
++		return
++	}
++	if a.win != nil && a.win.IsFocused() {
++		g.reset()
+ 		return
+ 	}
+ 	title, body, id := g.message()
+diff --git a/app/transfers_test.go b/app/transfers_test.go
+index 38ed0c8..e185656 100644
+--- a/app/transfers_test.go
++++ b/app/transfers_test.go
+@@ -162,3 +162,22 @@ func TestReloadSoonCoalesces(t *testing.T) {
+ 		t.Errorf("a folder not cached waits to be read: %v", a.reloads)
+ 	}
+ }
++
++// TestReloadWhileLoadingReadsAgain keeps a reload asked for while the
++// folder is being read, so an upload that finished meanwhile shows once
++// that read returns instead of waiting for the next stale refresh.
++func TestReloadWhileLoadingReadsAgain(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	l := a.listings["/"]
++	before := l.loads
++	l.loading = true
++	a.reload("/")
++	if !l.pending {
++		t.Fatal("a reload while the folder was read was lost")
++	}
++	l.loading = false
++	a.load(l) // the read that was under way, returning
++	waitUntil(t, tt, "the reload after the read", func() bool {
++		return l.loads >= before+2 && !l.pending && !l.loading
++	})
++}

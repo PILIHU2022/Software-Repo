@@ -1,0 +1,250 @@
+name: BaiduNetGo desktop build
+
+# Watches github.com/pengstem/baidunetgo and rebuilds the patched desktop app
+# when its main branch moves. BaiduNetGo is a Go/MyGo desktop client, not an
+# Android app: nothing in this workflow touches fdroid/ or publishes through
+# F-Droid — the installers are workflow artifacts.
+#
+# Cadence: every 10 days. GitHub crons cannot express "every 10 days" (a
+# `*/10` day-of-month rule fires on the 1st, 11th, 21st and 31st), so the
+# workflow runs daily and the check job returns early unless
+# .watch-state.json's `baidunetgo` timestamp is 10 days old. A scheduled run that
+# finishes (even with a fallback build) advances that timestamp; only a hard
+# failure leaves it in place, so the next daily run retries.
+#
+# The queue in desktop/baidunetgo/patches is replayed onto the upstream head
+# with `git am -3` (the exported-commit form of rebasing the authoring branch).
+# When it no longer applies, the build retries once on the last successful
+# upstream commit recorded in desktop/.build-state.json.
+#
+# x86 only: linux/amd64 and windows/amd64, cross-built on the x86 runner.
+
+on:
+  schedule:
+    - cron: '43 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even when upstream has not changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: baidunetgo-build
+  cancel-in-progress: false
+
+env:
+  WATCH_INTERVAL_DAYS: '10'
+
+jobs:
+  check:
+    name: Check upstream
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      due: ${{ steps.gate.outputs.due }}
+      changed: ${{ steps.check.outputs.changed }}
+      force: ${{ steps.check.outputs.force }}
+      sha: ${{ steps.check.outputs.sha }}
+      short_sha: ${{ steps.check.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Respect the 10-day window
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          days="${WATCH_INTERVAL_DAYS:-10}"
+          due=true
+          if [[ "$EVENT" == "schedule" ]]; then
+            last="$(jq -r '.baidunetgo // empty' .watch-state.json 2>/dev/null || true)"
+            if [[ -n "$last" ]]; then
+              if last_epoch="$(date -u -d "$last" +%s 2>/dev/null)"; then
+                age=$(( $(date -u +%s) - last_epoch ))
+                if (( age < days * 86400 )); then
+                  due=false
+                  echo "::notice::Last BaiduNetGo watch was ${age}s ago; the next one is due in $(( days * 86400 - age ))s."
+                fi
+              else
+                echo "::warning::Unreadable timestamp '$last' in .watch-state.json; checking upstream anyway."
+              fi
+            fi
+          fi
+          echo "due=$due" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the upstream head
+        id: check
+        if: steps.gate.outputs.due == 'true'
+        env:
+          FORCE_INPUT: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          upstream_url="https://github.com/pengstem/baidunetgo.git"
+          sha=""
+          for attempt in 1 2 3; do
+            sha="$(git ls-remote "$upstream_url" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && break
+            echo "    ls-remote attempt ${attempt}/3 failed; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve $upstream_url main"; exit 1; }
+
+          previous="$(jq -r '.baidunetgo // empty' desktop/.build-state.json 2>/dev/null || true)"
+          changed=false
+          [[ "$sha" != "$previous" ]] && changed=true
+
+          echo "    upstream:  $sha"
+          echo "    last built: ${previous:-none}"
+          echo "    changed:   $changed"
+          {
+            echo "sha=$sha"
+            echo "short_sha=${sha:0:7}"
+            echo "changed=$changed"
+            echo "force=${FORCE_INPUT:-false}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build x86
+    needs: check
+    if: >-
+      needs.check.outputs.due == 'true' &&
+      (needs.check.outputs.changed == 'true' || needs.check.outputs.force == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      built_sha: ${{ steps.info.outputs.built_sha }}
+      fallback: ${{ steps.info.outputs.fallback }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      # Runs before setup-go so the Go version can be read from the patched
+      # tree's go.mod (upstream may move to a newer Go than the runner's).
+      - name: Fetch upstream and rebase the queue
+        run: ./scripts/build-baidunetgo.sh --prepare
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: .cache/work/baidunetgo/go.mod
+          cache: true
+          cache-dependency-path: .cache/work/baidunetgo/go.sum
+
+      - name: Install NSIS, for the Windows installers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nsis
+
+      - name: Build linux/amd64 and windows/amd64
+        run: ./scripts/build-baidunetgo.sh --build --out "$RUNNER_TEMP/dist"
+
+      - name: Read the build info
+        id: info
+        run: |
+          set -euo pipefail
+          info="$RUNNER_TEMP/dist/build-info.txt"
+          [[ -f "$info" ]] || { echo "::error::build-info.txt missing"; exit 1; }
+          built_sha="$(sed -n 's/^upstream_commit=//p' "$info" | head -n 1)"
+          fallback="$(sed -n 's/^upstream_fallback=//p' "$info" | head -n 1)"
+          version="$(sed -n 's/^version=//p' "$info" | head -n 1)"
+          {
+            echo "built_sha=$built_sha"
+            echo "fallback=$fallback"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '### BaiduNetGo x86 build'
+            echo ''
+            echo "- upstream head: \`${{ needs.check.outputs.sha }}\`"
+            echo "- built commit: \`$built_sha\` (fallback: ${fallback:-0})"
+            echo "- version: ${version:-unknown}"
+            echo ''
+            echo '| file | size |'
+            echo '| --- | --- |'
+            find "$RUNNER_TEMP/dist" -maxdepth 1 -type f ! -name build-info.txt -printf '| %f | %s B |\n' | sort
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the x86 installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: baidunetgo-x86-${{ needs.check.outputs.short_sha }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+
+  record:
+    name: Record the watch time
+    needs: [check, build]
+    # A scheduled run that really checked advances the 10-day window: nothing
+    # changed, or the build finished (a fallback build counts — it keeps the old
+    # recorded head below, so the next window retries the new upstream). A
+    # failed build leaves the timestamp alone, so the next daily run retries
+    # instead of waiting 10 days. Pushes and dispatches never move the window.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.check.result == 'success' &&
+      needs.check.outputs.due == 'true' &&
+      (needs.check.outputs.changed != 'true' || needs.build.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Update the state files
+        env:
+          CHANGED: ${{ needs.check.outputs.changed }}
+          BUILT_SHA: ${{ needs.build.outputs.built_sha }}
+          FALLBACK: ${{ needs.build.outputs.fallback }}
+        run: |
+          set -euo pipefail
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          tmp="$(mktemp)"
+          jq --arg t "$now" '. + {baidunetgo: $t}' .watch-state.json >"$tmp"
+          mv "$tmp" .watch-state.json
+          # A fallback was built from an older commit: keep the recorded head so
+          # the next window retries the real upstream change.
+          if [[ "$CHANGED" == "true" && "$BUILT_SHA" =~ ^[0-9a-f]{40}$ && "${FALLBACK:-0}" != "1" ]]; then
+            tmp="$(mktemp)"
+            jq --arg app baidunetgo --arg sha "$BUILT_SHA" '.[$app] = $sha' desktop/.build-state.json >"$tmp"
+            mv "$tmp" desktop/.build-state.json
+          fi
+          git diff -- .watch-state.json desktop/.build-state.json
+
+      - name: Commit the state
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name "DeepSeek Harness"
+          git config user.email "noreply@deepseek.com"
+          git add .watch-state.json desktop/.build-state.json
+          if git diff --cached --quiet; then
+            echo "No state change to commit"
+            exit 0
+          fi
+          git commit -m "Record the BaiduNetGo watch [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main \
+               && git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main; then
+              echo "::notice::State pushed"
+              exit 0
+            fi
+            echo "    push attempt ${attempt}/3 failed; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::warning title=State commit failed::Could not push .watch-state.json / desktop/.build-state.json (often HTTP 403: set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions')."

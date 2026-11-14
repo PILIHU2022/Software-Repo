@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 13:30:31 +0800
+Subject: [PATCH] Add a local installer that puts a rebuilt app in the launcher
+ beside the installed one, with its own profile seeded once from that app
+
+---
+ README.md                      |  12 ++++
+ tools/install-patched-local.sh | 111 +++++++++++++++++++++++++++++++++
+ 2 files changed, 123 insertions(+)
+ create mode 100755 tools/install-patched-local.sh
+
+diff --git a/README.md b/README.md
+index 6143681..188b552 100644
+--- a/README.md
++++ b/README.md
+@@ -100,6 +100,17 @@ echo '{"id":1,"method":"windows"}' | socat - UNIX-CONNECT:/tmp/baidunetgo.sock
+ 
+ 真实网盘的接口测试：`go test -tags live ./internal/baidu -run Live -v`（使用 BaiduPCS-Go 的登录）。
+ 
++### 本地构建的独立启动项
++
++想让本地修复构建和已安装版并存，并出现在 fuzzel 等启动器里：
++
++```bash
++go build -trimpath -ldflags='-s -w' -o build/baidunetgo-patched .
++tools/install-patched-local.sh
++```
++
++会安装独立的「百度网盘 Go（修复版）」条目（图标带橙色 P 标记），在 fuzzel 里搜索「修复」或「patch」可找到。修复版使用自己的配置目录 `~/.config/baidunetgo-patched-profile`：首次启动自动沿用已安装版的登录与设置，传输记录独立，因此可以和已安装版同时运行。重新构建后再次运行脚本即可更新程序，启动项和配置保持不变。
++
+ ### 发布
+ 
+ 每次推送到 `main` 都会自动发版（`.github/workflows/release.yml`）：跑测试 → 版本号自动加一 → 把更新说明写进 [CHANGELOG.md](CHANGELOG.md) 并提交、打 tag → 在 GitHub 上打包 Linux（amd64 / arm64 的 .deb 与 tar.gz）、Windows（amd64 / arm64 安装包与免安装 zip）、macOS（通用版 .dmg）→ 发布 Release。
+@@ -128,6 +139,7 @@ echo '{"id":1,"method":"windows"}' | socat - UNIX-CONNECT:/tmp/baidunetgo.sock
+ | `internal/fakepan` | 测试与演示用的假网盘服务 |
+ | `internal/selftest` | 真实账号自检 |
+ | `tools/release` | 发版：算版本号、写更新日志 |
++| `tools/install-patched-local.sh` | 把本地构建装成与已安装版并存的独立启动项 |
+ | `tools/appicon` | 绘制应用图标 `resources/icon.png` |
+ | `docs/course` | 软件工程课程材料：需求、设计、项目管理、AI 开发心得、汇报讲稿 |
+ 
+diff --git a/tools/install-patched-local.sh b/tools/install-patched-local.sh
+new file mode 100755
+index 0000000..dd987d7
+--- /dev/null
++++ b/tools/install-patched-local.sh
+@@ -0,0 +1,111 @@
++#!/usr/bin/env bash
++# Installs a locally built BaiduNetGo as its own launcher entry, beside an
++# installed copy: fuzzel and other launchers then list "百度网盘 Go（修复版）"
++# / "BaiduNetGo (Patched)" with a badge on its icon.
++#
++#   tools/install-patched-local.sh [binary]
++#
++# Without a binary it uses build/baidunetgo-patched, which
++#
++#   go build -trimpath -ldflags='-s -w' -o build/baidunetgo-patched .
++#
++# makes. The patched app gets its own profile under
++# ~/.config/baidunetgo-patched-profile, seeded once with the installed
++# app's saved login and settings, so it starts signed in; its transfers
++# stay its own. Both can run at once because they use different profiles
++# and single-instance locks.
++#
++# Run it again after rebuilding to replace the binary; the launcher entry
++# and profile stay as they are.
++set -euo pipefail
++
++root=$(cd "$(dirname "$0")/.." && pwd)
++bin=${1:-"$root/build/baidunetgo-patched"}
++name=baidunetgo-patched
++bindir=${XDG_BIN_HOME:-$HOME/.local/bin}
++data=${XDG_DATA_HOME:-$HOME/.local/share}
++apps="$data/applications"
++icons="$data/icons/hicolor"
++profile="$HOME/.config/baidunetgo-patched-profile"
++
++if [ ! -x "$bin" ]; then
++	echo "没有可执行文件：$bin" >&2
++	echo "先构建：cd '$root' && go build -trimpath -ldflags='-s -w' -o build/baidunetgo-patched ." >&2
++	exit 1
++fi
++
++install -d "$bindir" "$apps" "$icons/256x256/apps" "$icons/512x512/apps"
++install -m755 "$bin" "$bindir/$name"
++
++# The icon is the app's, with a badge that tells it apart in a launcher.
++if command -v magick >/dev/null 2>&1; then
++	magick "$root/resources/icon.png" -resize 256x256 \
++		\( -size 76x76 xc:none -fill '#ff9500' -draw 'roundrectangle 0,0 75,75 18,18' \
++		   -font DejaVu-Sans-Bold -pointsize 46 -gravity center -fill white -annotate +0+0 P \) \
++		-gravity southeast -geometry +8+8 -composite "$icons/256x256/apps/$name.png"
++	magick "$root/resources/icon.png" -resize 512x512 \
++		\( -size 152x152 xc:none -fill '#ff9500' -draw 'roundrectangle 0,0 151,151 36,36' \
++		   -font DejaVu-Sans-Bold -pointsize 92 -gravity center -fill white -annotate +0+0 P \) \
++		-gravity southeast -geometry +16+16 -composite "$icons/512x512/apps/$name.png"
++else
++	install -m644 "$root/resources/icon.png" "$icons/256x256/apps/$name.png"
++	install -m644 "$root/resources/icon.png" "$icons/512x512/apps/$name.png"
++fi
++
++# A launcher script, not the binary: the patched app keeps its own profile
++# so that it cannot share transfers.json or session.enc with the installed
++# app, and a first run seeds that profile with the installed app's login.
++cat >"$bindir/$name-run" <<WRAPPER
++#!/usr/bin/env bash
++set -eu
++base="\${XDG_CONFIG_HOME:-\$HOME/.config}"
++profile="\$base/baidunetgo-patched-profile"
++mkdir -p "\$profile"
++if [ ! -e "\$profile/seed.done" ]; then
++	for f in session.enc settings.json; do
++		src="\$base/BaiduNetGo/\$f"
++		if [ -f "\$src" ] && [ ! -e "\$profile/\$f" ]; then
++			cp -p "\$src" "\$profile/\$f" || true
++		fi
++	done
++	: >"\$profile/seed.done"
++fi
++export XDG_CONFIG_HOME="\$profile"
++exec "$bindir/$name" "\$@"
++WRAPPER
++chmod 755 "$bindir/$name-run"
++
++cat >"$apps/$name.desktop" <<DESKTOP
++[Desktop Entry]
++Type=Application
++Version=1.0
++Name=BaiduNetGo (Patched)
++Name[zh_CN]=百度网盘 Go（修复版）
++GenericName=Baidu Netdisk Client (Patched)
++GenericName[zh_CN]=百度网盘客户端（修复版）
++Comment=Local patched build: duplicate finder, file shortcuts and hang fixes; its own profile seeded once from the installed app
++Comment[zh_CN]=本地修复构建：查重、文件快捷键、无响应修复；独立配置目录，首次启动沿用原版的登录与设置
++Exec=$bindir/$name-run
++TryExec=$bindir/$name-run
++Icon=$name
++Terminal=false
++StartupNotify=true
++StartupWMClass=$name
++Categories=Network;
++Keywords=baidu;netdisk;pan;baidunetgo;百度;网盘;云盘;修复;patch;dev;test;
++DESKTOP
++
++if command -v desktop-file-validate >/dev/null 2>&1; then
++	desktop-file-validate "$apps/$name.desktop"
++fi
++if command -v update-desktop-database >/dev/null 2>&1; then
++	update-desktop-database "$apps" 2>/dev/null || true
++fi
++
++echo "已安装："
++echo "  启动项  $apps/$name.desktop"
++echo "  程序    $bindir/$name"
++echo "  配置    $profile"
++echo
++echo "fuzzel 里搜索「修复」或「patch」即可看到；首次启动沿用原版登录。"
++echo "重新构建后再次运行本脚本即可更新程序，启动项与配置保持不变。"

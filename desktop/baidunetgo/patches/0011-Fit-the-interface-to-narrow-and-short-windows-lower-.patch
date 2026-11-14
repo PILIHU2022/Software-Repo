@@ -1,0 +1,682 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 14:43:33 +0800
+Subject: [PATCH] Fit the interface to narrow and short windows: lower the
+ minimum size, fold the sidebar and list columns away and tighten the
+ transfers, dedup and sign-in layouts so a tiled window no longer clips the
+ status bar or tools.
+
+---
+ app/app.go          |   9 +-
+ app/browser.go      |  57 +++++++++---
+ app/dedup.go        |  31 +++++--
+ app/layout_test.go  | 209 ++++++++++++++++++++++++++++++++++++++++++++
+ app/login.go        |  51 +++++++----
+ app/newfolder.go    |   2 +-
+ app/shell.go        |  48 ++++++++++
+ app/toolbar_test.go |   5 +-
+ app/transfers.go    |  23 ++++-
+ main.go             |   4 +-
+ 10 files changed, 393 insertions(+), 46 deletions(-)
+ create mode 100644 app/layout_test.go
+
+diff --git a/app/app.go b/app/app.go
+index ec8d4f5..449aa61 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -96,8 +96,13 @@ type App struct {
+ 	settings      settings
+ 	pendingToasts []ui.Toast
+ 
+-	sidebarCollapsed bool
+-	compact          bool // the title bar is narrow: choices fold into pop-up buttons
++	sidebarCollapsed bool // the sidebar is hidden, automatically or by the user
++	// sidebarAuto tells whether that hiding came from a narrow window, and
++	// sidebarOverride the user's own choice: 1 shows the sidebar, -1 hides
++	// it, 0 lets the width decide. The user's choice wins over the width.
++	sidebarAuto     bool
++	sidebarOverride int8
++	compact         bool // the title bar is narrow: choices fold into pop-up buttons
+ 	// The folder's tools that fold, as wide as they were last shown open
+ 	// [0] and folded [1], and which way they were built last frame; and
+ 	// whether the search field was open then. They tell how much room
+diff --git a/app/browser.go b/app/browser.go
+index d5d91c3..5455998 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -66,6 +66,7 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 		a.land(dir, dropped, from)
+ 	}
+ 	page.Children(func() {
++		cols := listColumns(a.contentWidth(c))
+ 		switch {
+ 		case !l.loaded && l.err != "":
+ 			emptyState(c, t, p, "triangle-alert", "无法读取这个文件夹", l.err, func() { a.load(l) })
+@@ -76,7 +77,7 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 		case a.gridView:
+ 			a.fileGrid(c, t, p, l)
+ 		default:
+-			a.fileList(c, t, p, l)
++			a.fileList(c, t, p, l, cols)
+ 		}
+ 		if l.loaded {
+ 			a.statusBar(c, t, p, l)
+@@ -132,7 +133,7 @@ func (a *App) bindListState(l *listing) {
+ 	l.list.DragSelect = true // a drag over the rows chooses them, as in Finder
+ }
+ 
+-func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
++func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
+ 	a.bindListState(l)
+ 	now := c.Now()
+ 	tops := a.rowTops(l, now)
+@@ -140,7 +141,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 	if l.glides == nil {
+ 		l.glides = map[int64]rowGlide{}
+ 	}
+-	a.listHeader(c, t, p)
++	a.listHeader(c, t, p, cols)
+ 	list := ui.List(c, &l.list, len(l.files)+1).Grow(1).Padding(0, 10, 16)
+ 	outer, enter := c, false
+ 	list.Rows(func(row ui.ListRow) {
+@@ -217,8 +218,6 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 			if !f.IsDir {
+ 				size = humanSize(f.Size)
+ 			}
+-			ui.Text(c, kindLabel(f)).Width(colType).TextColor(muted).SingleLine()
+-			figure(c, size).Width(colSize).TextAlign(ui.End).TextColor(muted)
+ 			when := stampTime(f.Mtime, now)
+ 			if draft {
+ 				when = ""
+@@ -226,7 +225,15 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 			if g := a.gathers[f.Path]; g != nil && f.FsID < 0 {
+ 				when = uploadLabel(g)
+ 			}
+-			figure(c, when).Width(colTime).TextAlign(ui.End).TextColor(muted)
++			if cols.kind {
++				ui.Text(c, kindLabel(f)).Width(colType).TextColor(muted).SingleLine()
++			}
++			if cols.size {
++				figure(c, size).Width(colSize).TextAlign(ui.End).TextColor(muted)
++			}
++			if cols.time {
++				figure(c, when).Width(colTime).TextAlign(ui.End).TextColor(muted)
++			}
+ 		})
+ 		if !passing && !draft {
+ 			a.fileMenu(r, l, row.Index)
+@@ -249,9 +256,33 @@ const (
+ 	colTime = 128
+ )
+ 
++// The pane widths under which the list's trailing columns go, Finder's
++// way: the date first, then the size, then the kind, so that a narrow
++// window keeps the name and its icon. The header and the rows decide with
++// the same listColumns, so they never disagree.
++const (
++	colTimeAt = 620
++	colSizeAt = 520
++	colTypeAt = 420
++)
++
++// listCols says which trailing columns a pane w wide shows.
++type listCols struct {
++	kind, size, time bool
++}
++
++// listColumns chooses the columns of a pane w wide. No width yet (the
++// first frame) shows them all.
++func listColumns(w float32) listCols {
++	if w <= 0 {
++		return listCols{kind: true, size: true, time: true}
++	}
++	return listCols{kind: w >= colTypeAt, size: w >= colSizeAt, time: w >= colTimeAt}
++}
++
+ // listHeader names the columns, sorting by the one clicked: the column
+ // sorted by in the text color, with a chevron of its direction.
+-func (a *App) listHeader(c *ui.Context, t *ui.Theme, p *palette) {
++func (a *App) listHeader(c *ui.Context, t *ui.Theme, p *palette, cols listCols) {
+ 	ui.Row(c).Height(28).Shrink(0).PaddingX(20).Gap(8).AlignItems(ui.Center).
+ 		BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).FontSize(12).Children(func() {
+ 		col := func(label, by string, width float32) {
+@@ -281,9 +312,15 @@ func (a *App) listHeader(c *ui.Context, t *ui.Theme, p *palette) {
+ 			}
+ 		}
+ 		col("名称", "name", 0)
+-		ui.Text(c, "种类").Width(colType).TextColor(t.TextMuted)
+-		col("大小", "size", colSize)
+-		col("修改日期", "time", colTime)
++		if cols.kind {
++			ui.Text(c, "种类").Width(colType).TextColor(t.TextMuted)
++		}
++		if cols.size {
++			col("大小", "size", colSize)
++		}
++		if cols.time {
++			col("修改日期", "time", colTime)
++		}
+ 	})
+ }
+ 
+diff --git a/app/dedup.go b/app/dedup.go
+index eeb4a04..b4b3bac 100644
+--- a/app/dedup.go
++++ b/app/dedup.go
+@@ -1065,15 +1065,19 @@ func (a *App) dedupFileMenu(row ui.Element, g dedup.Group, fi int) {
+ // dedupGroupRow heads a group with its count and what it could free, and a
+ // way to keep just one of its copies.
+ func (a *App) dedupGroupRow(c *ui.Context, t *ui.Theme, p *palette, g dedup.Group, gi int) {
++	w := a.contentWidth(c)
++	narrow := w > 0 && w < 560
+ 	row := ui.Row(c).Height(42).PaddingX(10).Gap(8).AlignItems(ui.Center).Background(t.Background)
+ 	row.Children(func() {
+ 		ui.Icon(c, icon("copy")).FontSize(13).TextColor(t.TextMuted)
+ 		figure(c, itoa(len(g.Files))+" 个相同文件").FontSize(12).FontWeight(600)
+-		figure(c, "每个 "+humanSize(g.Size())).FontSize(11).TextColor(t.TextMuted)
++		if !narrow {
++			figure(c, "每个 "+humanSize(g.Size())).FontSize(11).TextColor(t.TextMuted)
++		}
+ 		ui.Spacer(c)
+ 		figure(c, "共 "+humanSize(g.Total())+" · 可释放 "+humanSize(g.Reclaim)).
+ 			FontSize(11).TextColor(t.TextMuted)
+-		if pill(c, t, p, "", "保留一份", false).Disabled(a.dedup.busy).Clicked() {
++		if pillOf(c, t, p, "check", "保留一份", false, narrow).Disabled(a.dedup.busy).Clicked() {
+ 			a.dedup.keepOne(gi)
+ 		}
+ 	})
+@@ -1082,12 +1086,15 @@ func (a *App) dedupGroupRow(c *ui.Context, t *ui.Theme, p *palette, g dedup.Grou
+ // dedupBar is the bar under the results: what is chosen, and the action.
+ func (a *App) dedupBar(c *ui.Context, t *ui.Theme, p *palette) {
+ 	d := &a.dedup
++	w := a.contentWidth(c)
++	narrow := w > 0 && w < 560
+ 	ui.Divider(c)
+ 	ui.Column(c).Padding(8, 12).Gap(4).Shrink(0).Children(func() {
+-		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+-			figure(c, "已选 "+itoa(d.selCount)+" 项 · 可释放 "+humanSize(d.selBytes)).
++		count := func() ui.Element {
++			return figure(c, "已选 "+itoa(d.selCount)+" 项 · 可释放 "+humanSize(d.selBytes)).
+ 				FontWeight(500).FontSize(12)
+-			ui.Spacer(c)
++		}
++		actions := func() {
+ 			if pill(c, t, p, "", "全选", false).Disabled(d.busy).Clicked() {
+ 				d.selectAll()
+ 			}
+@@ -1101,7 +1108,19 @@ func (a *App) dedupBar(c *ui.Context, t *ui.Theme, p *palette) {
+ 			if b.Clicked() {
+ 				d.confirm = true
+ 			}
+-		})
++		}
++		if narrow {
++			// Too narrow for the count and the actions on one line: the
++			// count takes its own, the actions stay on one below it.
++			count()
++			ui.Row(c).Gap(8).Justify(ui.End).Children(actions)
++		} else {
++			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
++				count()
++				ui.Spacer(c)
++				actions()
++			})
++		}
+ 		if d.actErr != "" {
+ 			ui.Text(c, d.actErr).FontSize(11).TextColor(t.Danger).SingleLine()
+ 		}
+diff --git a/app/layout_test.go b/app/layout_test.go
+new file mode 100644
+index 0000000..b24210a
+--- /dev/null
++++ b/app/layout_test.go
+@@ -0,0 +1,209 @@
++package app
++
++import (
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/transfer"
++)
++
++// TestLayoutAtSizes renders the browser at the sizes a tiling window
++// manager can force it to, including below the window's own minimum, and
++// checks that nothing panics and that the parts that must stay reachable
++// do: the status bar's count, the upload button and the sidebar, which
++// folds itself away when the window is narrow and comes back when it
++// widens.
++func TestLayoutAtSizes(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	cases := []struct {
++		w, h    int
++		sidebar bool // the sidebar shows
++		kind    bool // the 种类 column shows
++		size    bool // the 大小 column shows
++		date    bool // the 修改日期 column shows
++		upload  bool
++	}{
++		{w: 1180, h: 760, sidebar: true, kind: true, size: true, date: true, upload: true},
++		{w: 780, h: 540, sidebar: true, kind: true, size: true, date: false, upload: true},
++		{w: 560, h: 480, sidebar: false, kind: true, size: true, date: false, upload: true},
++		{w: 460, h: 420, sidebar: false, kind: true, size: false, date: false, upload: true},
++		{w: 420, h: 300, sidebar: false, kind: true, size: false, date: false, upload: true},
++	}
++	for _, c := range cases {
++		tt.SetSize(c.w, c.h)
++		tt.Advance(500 * time.Millisecond)
++		if got := !a.sidebarCollapsed; got != c.sidebar {
++			t.Errorf("%dx%d: sidebar shows %v, want %v", c.w, c.h, got, c.sidebar)
++		}
++		// The count at the foot is the one thing that must never fall off.
++		if !tt.HasText("项") {
++			t.Errorf("%dx%d: no item count in the status bar; texts %q", c.w, c.h, tt.Texts())
++		}
++		if got := tt.HasText("种类"); got != c.kind {
++			t.Errorf("%dx%d: 种类 column %v, want %v", c.w, c.h, got, c.kind)
++		}
++		if got := tt.HasText("大小"); got != c.size {
++			t.Errorf("%dx%d: 大小 column %v, want %v", c.w, c.h, got, c.size)
++		}
++		// The header's "修改日期" and the grid's sort menu share the name,
++		// but only the list is shown here.
++		if got := tt.HasText("修改日期"); got != c.date {
++			t.Errorf("%dx%d: 修改日期 column %v, want %v", c.w, c.h, got, c.date)
++		}
++		// The upload folds to its icon: its label is still found, and lies
++		// inside the window.
++		r, ok := tt.Find("上传")
++		if ok != c.upload {
++			t.Errorf("%dx%d: upload found %v, want %v", c.w, c.h, ok, c.upload)
++		} else if ok && (r.X < 0 || r.X+r.W > float32(c.w) || r.Y < 0 || r.Y+r.H > float32(c.h)) {
++			t.Errorf("%dx%d: upload at %v is outside the window", c.w, c.h, r)
++		}
++		// The sidebar toggle is reachable at every size.
++		toggle := "隐藏侧栏"
++		if !c.sidebar {
++			toggle = "显示侧栏"
++		}
++		if _, ok := tt.Find(toggle); !ok {
++			t.Errorf("%dx%d: no sidebar toggle %q", c.w, c.h, toggle)
++		}
++		save(t, tt, "layout-"+itoa(c.w)+"x"+itoa(c.h))
++	}
++}
++
++// TestLayoutBelowMinimum renders the browser and the grid at sizes under
++// the window's minimum, which tiling can force: they must not panic.
++func TestLayoutBelowMinimum(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	for _, sz := range [][2]int{{400, 280}, {360, 240}} {
++		tt.SetSize(sz[0], sz[1])
++		tt.Advance(300 * time.Millisecond)
++		if !tt.HasText("项") {
++			t.Errorf("%dx%d: no item count; texts %q", sz[0], sz[1], tt.Texts())
++		}
++		save(t, tt, "below-min-"+itoa(sz[0]))
++	}
++	a.gridView = true
++	for _, sz := range [][2]int{{400, 280}, {360, 240}, {420, 300}} {
++		tt.SetSize(sz[0], sz[1])
++		tt.Advance(300 * time.Millisecond)
++		if !tt.HasText("代码") {
++			t.Errorf("grid %dx%d: no folder tile; texts %q", sz[0], sz[1], tt.Texts())
++		}
++		save(t, tt, "grid-min-"+itoa(sz[0]))
++	}
++}
++
++// TestPagesAtSmallest renders every other page in the smallest window, so
++// a fixed-width card or row cannot push its content off the window.
++func TestPagesAtSmallest(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	for _, page := range []struct{ route, title string }{
++		{"/transfers", "传输"},
++		{"/shares", "我的分享"},
++		{"/offline", "离线下载"},
++		{"/dedup", "查重"},
++		{"/recycle", "回收站"},
++		{"/settings", "设置"},
++	} {
++		a.router.Replace(page.route)
++		tt.SetSize(420, 300)
++		tt.Advance(400 * time.Millisecond)
++		if !tt.HasText(page.title) {
++			t.Errorf("%s at 420x300: no title %q; texts %q", page.route, page.title, tt.Texts())
++		}
++		save(t, tt, "page-small"+strings.ReplaceAll(page.route, "/", "-"))
++	}
++}
++
++// TestLoginAtSizes renders the sign-in screen small, where it scrolls from
++// the top instead of centering, and checks its title stays in the window
++// rather than clipped away.
++func TestLoginAtSizes(t *testing.T) {
++	a := New()
++	a.fake = true
++	a.phase = phaseLogin
++	a.login.tab = 1 // the cookie panel, so no QR request is made
++	tt := ui.NewTester(a.View, 1180, 760)
++	tt.SetLocale("zh-Hans")
++	for _, sz := range [][2]int{{1180, 760}, {780, 540}, {420, 300}, {360, 240}} {
++		tt.SetSize(sz[0], sz[1])
++		tt.Advance(300 * time.Millisecond)
++		if !tt.HasText("登录百度网盘") {
++			t.Errorf("login %dx%d: title missing; texts %q", sz[0], sz[1], tt.Texts())
++		}
++		save(t, tt, "login-"+itoa(sz[0]))
++	}
++}
++
++// TestSpeedCardNarrow keeps the transfers page's speed card whole in the
++// smallest window: the speed and the counts stay, the connections
++// reading folds away with the room.
++func TestSpeedCardNarrow(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	a.transfers.tasks = []transfer.Task{{
++		ID: 1, Name: "电影.mkv", Kind: transfer.Download,
++		State: transfer.Running, Size: 1 << 30, Done: 256 << 20, Speed: 5 << 20,
++	}}
++	a.router.Push("/transfers")
++	tt.SetSize(420, 300)
++	tt.Advance(500 * time.Millisecond)
++	if !tt.HasText("当前速度") || !tt.HasText("下载") {
++		t.Errorf("speed card not shown; texts %q", tt.Texts())
++	}
++	if tt.HasText("连接") {
++		t.Errorf("connections reading still on the narrow card; texts %q", tt.Texts())
++	}
++	save(t, tt, "transfers-narrow-card")
++}
++
++// TestSidebarManualChoice keeps a choice the user made over later resizes,
++// above the width at which a forced-open sidebar would leave the tools no
++// room.
++func TestSidebarManualChoice(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	shown := func() bool { return !a.sidebarCollapsed }
++	fit := func(w, h int) {
++		tt.SetSize(w, h)
++		tt.Advance(400 * time.Millisecond)
++	}
++	// Folded by hand at a wide window, it stays folded as the window moves.
++	if err := tt.Click("隐藏侧栏"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(400 * time.Millisecond)
++	if shown() {
++		t.Fatal("the click did not fold the sidebar")
++	}
++	fit(1180, 760)
++	if shown() {
++		t.Error("a manual fold was undone by a wider window")
++	}
++	fit(900, 600)
++	if shown() {
++		t.Error("a manual fold was undone by a narrower window")
++	}
++	// Opened by hand in a narrow window, it stays open while there is room
++	// for it, and folds again only below the width that leaves no room.
++	if err := tt.Click("显示侧栏"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(400 * time.Millisecond)
++	if !shown() {
++		t.Fatal("the click did not open the sidebar")
++	}
++	fit(620, 480)
++	if !shown() {
++		t.Error("a manual open was undone by a narrower window")
++	}
++	fit(420, 300)
++	if shown() {
++		t.Error("the sidebar stayed open under the width with no room for it")
++	}
++	fit(620, 480)
++	if !shown() {
++		t.Error("the sidebar did not come back once there was room again")
++	}
++}
+diff --git a/app/login.go b/app/login.go
+index 43a7272..cecf4c3 100644
+--- a/app/login.go
++++ b/app/login.go
+@@ -11,6 +11,10 @@ import (
+ 	"github.com/pengstem/baidunetgo/internal/migrate"
+ )
+ 
++// loginShort is the window height under which the sign-in card scrolls
++// from the top instead of centering, as it is then taller than the window.
++const loginShort = 540
++
+ // loginState is the sign-in screen.
+ type loginState struct {
+ 	tab int // 0 QR code, 1 cookie
+@@ -125,29 +129,38 @@ func (a *App) loginView(c *ui.Context, t *ui.Theme, p *palette) {
+ 	}
+ 
+ 	root := ui.Box(c).Fill().Background(t.Background).Clip()
++	card := func() {
++		ui.Column(c).Key("login").Width(324).Gap(20).AlignItems(ui.Center).Transition(popIn).Children(func() {
++			ui.Column(c).Gap(8).AlignItems(ui.Center).Children(func() {
++				logoMark(c, t, p, 56).Margin(0, 0, 6)
++				ui.Text(c, "登录百度网盘").FontSize(20).FontWeight(700)
++				ui.Text(c, "用百度网盘 App 扫一扫，或粘贴 Cookie").FontSize(12).TextColor(t.TextMuted)
++			})
++			if l.tab == 0 {
++				ui.Column(c).Key("qr").AlignItems(ui.Center).Gap(14).Transition(popIn).Children(func() {
++					a.qrPanel(c, t, p)
++				})
++			} else {
++				ui.Column(c).Key("cookie").Width(324).Gap(12).Transition(popIn).Children(func() {
++					a.cookiePanel(c, t, p)
++				})
++			}
++			a.loginLinks(c, t, p)
++		})
++	}
+ 	root.Children(func() {
+ 		// The top drags the window.
+ 		ui.Box(c).Absolute().Top(0).Left(0).Right(0).Height(barHeight(c)).DragWindow()
+-
+-		ui.Column(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Children(func() {
+-			ui.Column(c).Key("login").Width(324).Gap(20).AlignItems(ui.Center).Transition(popIn).Children(func() {
+-				ui.Column(c).Gap(8).AlignItems(ui.Center).Children(func() {
+-					logoMark(c, t, p, 56).Margin(0, 0, 6)
+-					ui.Text(c, "登录百度网盘").FontSize(20).FontWeight(700)
+-					ui.Text(c, "用百度网盘 App 扫一扫，或粘贴 Cookie").FontSize(12).TextColor(t.TextMuted)
+-				})
+-				if l.tab == 0 {
+-					ui.Column(c).Key("qr").AlignItems(ui.Center).Gap(14).Transition(popIn).Children(func() {
+-						a.qrPanel(c, t, p)
+-					})
+-				} else {
+-					ui.Column(c).Key("cookie").Width(324).Gap(12).Transition(popIn).Children(func() {
+-						a.cookiePanel(c, t, p)
+-					})
+-				}
+-				a.loginLinks(c, t, p)
++		// A short window cannot center the whole card and show it: it
++		// scrolls from the top instead, so every way in stays reachable.
++		_, h := c.Size()
++		if h > 0 && h < loginShort {
++			ui.Scroll(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Padding(0, 0, 20).Children(func() {
++				ui.Column(c).FillWidth().Padding(barHeight(c)+8, 0, 12).AlignItems(ui.Center).Children(card)
+ 			})
+-		})
++			return
++		}
++		ui.Column(c).Absolute().Top(0).Left(0).Right(0).Bottom(0).Center().Children(card)
+ 	})
+ }
+ 
+diff --git a/app/newfolder.go b/app/newfolder.go
+index 9229701..77bb414 100644
+--- a/app/newfolder.go
++++ b/app/newfolder.go
+@@ -335,6 +335,6 @@ func (a *App) emptyFolder(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 		})
+ 		ui.Text(c, "这里还空着").FontSize(15).FontWeight(600)
+ 		ui.Text(c, "新建一个文件夹，或把文件拖进窗口上传").TextColor(t.TextMuted).TextAlign(ui.Center).MaxWidth(360)
+-		a.makerRow(c, t, p, l, true).Width(320).Margin(14, 0, 0)
++		a.makerRow(c, t, p, l, true).FillWidth().MaxWidth(320).Margin(14, 0, 0)
+ 	})
+ }
+diff --git a/app/shell.go b/app/shell.go
+index f17c581..4d9cb39 100644
+--- a/app/shell.go
++++ b/app/shell.go
+@@ -35,6 +35,14 @@ const (
+ 	// compactBar is the title bar's width under which its choices fold
+ 	// into pop-up buttons.
+ 	compactBar = 720
++	// sidebarAutoAt is the window width under which the sidebar hides
++	// itself to give the content the room, and shows again above it. A
++	// user who folded it by hand keeps their choice instead.
++	sidebarAutoAt = 700
++	// sidebarPinnedAt is the width under which even a sidebar the user
++	// opened by hand folds away: below it, keeping it would push the title
++	// bar's tools (and the upload) off the window, so the width wins.
++	sidebarPinnedAt = 520
+ )
+ 
+ // barHeight is how tall the title bar is: as tall as the window says, so
+@@ -50,6 +58,7 @@ func barHeight(c *ui.Context) float32 {
+ // material, and the pane of the page with its title bar.
+ func (a *App) shell(c *ui.Context, t *ui.Theme, p *palette) {
+ 	a.sampleSpeed(c)
++	a.updateSidebar(c)
+ 	if !a.dlg.open && a.pv == nil && c.Shortcut(ui.Cmd, ui.KeyComma) && a.router.Path() != "/settings" {
+ 		a.router.Push("/settings")
+ 	}
+@@ -115,8 +124,47 @@ func (a *App) shell(c *ui.Context, t *ui.Theme, p *palette) {
+ 	}
+ 	toggle.Children(func() { ui.Icon(c, icon("panel-left")).FontSize(16) })
+ 	if toggle.Clicked() {
++		// The user's choice is kept over later resizes: it is what the
++		// toggle keeps showing, whether the window is narrow or wide.
++		if a.sidebarCollapsed {
++			a.sidebarOverride = 1
++		} else {
++			a.sidebarOverride = -1
++		}
+ 		a.sidebarCollapsed = !a.sidebarCollapsed
++		a.sidebarAuto = false
++	}
++}
++
++// updateSidebar decides whether the sidebar shows: a user's own choice
++// stands, else a window narrower than sidebarAutoAt folds it away (and
++// gives the content its room back), and a wider one opens it again.
++func (a *App) updateSidebar(c *ui.Context) {
++	switch {
++	case a.sidebarOverride > 0:
++		w, _ := c.Size()
++		pinned := w > 0 && w < sidebarPinnedAt
++		a.sidebarCollapsed, a.sidebarAuto = pinned, pinned
++	case a.sidebarOverride < 0:
++		a.sidebarCollapsed, a.sidebarAuto = true, false
++	default:
++		w, _ := c.Size()
++		auto := w > 0 && w < sidebarAutoAt
++		a.sidebarCollapsed, a.sidebarAuto = auto, auto
++	}
++}
++
++// contentWidth is how wide the page has beside the sidebar, in DIPs, from
++// the window's width and whether the sidebar shows.
++func (a *App) contentWidth(c *ui.Context) float32 {
++	w, _ := c.Size()
++	if !a.sidebarCollapsed {
++		w -= sidebarWidth
++	}
++	if w < 0 {
++		w = 0
+ 	}
++	return w
+ }
+ 
+ // section returns the sidebar entry the page shown belongs to.
+diff --git a/app/toolbar_test.go b/app/toolbar_test.go
+index 2f4c1a9..1300663 100644
+--- a/app/toolbar_test.go
++++ b/app/toolbar_test.go
+@@ -89,8 +89,9 @@ func TestCompactToolbar(t *testing.T) {
+ }
+ 
+ // pathWide is a window the folder's path and tools both fit in, whatever
+-// the font; pathNarrowest is the narrowest window the app allows (its
+-// MinWidth in main.go), below which the title bar has no room to fold into.
++// the font; pathNarrowest is a window narrow enough that the title bar
++// must fold, above the width at which the sidebar hides itself, so the
++// search below is not thrown by the sidebar coming and going.
+ const (
+ 	pathWide      = 2000
+ 	pathNarrowest = 780
+diff --git a/app/transfers.go b/app/transfers.go
+index ccbc77d..86d4900 100644
+--- a/app/transfers.go
++++ b/app/transfers.go
+@@ -387,8 +387,21 @@ func (a *App) speedCard(c *ui.Context, t *ui.Theme, p *palette) {
+ 	down, up, queued, speed := a.transferCounts()
+ 	cfg := a.transferConfig()
+ 	green := navItems[1].tile
++	// A narrow pane tightens the row and drops the connections reading,
++	// which is the one thing here that repeats a setting, so the speed and
++	// the counts stay whole.
++	w := a.contentWidth(c)
++	narrow := w > 0 && w < 560
++	gap := float32(36)
++	if narrow {
++		gap = 16
++	}
++	big, unitSize := float32(36), float32(16)
++	if narrow {
++		big, unitSize = 28, 13
++	}
+ 	group(c, p).Margin(4, 20, 8).Padding(16, 18).Gap(12).Transition(popIn).Children(func() {
+-		ui.Row(c).Gap(36).AlignItems(ui.End).Children(func() {
++		ui.Row(c).Gap(gap).AlignItems(ui.End).Children(func() {
+ 			ui.Column(c).Gap(2).Children(func() {
+ 				ui.Text(c, "当前速度").FontSize(12).TextColor(t.TextMuted)
+ 				ui.Row(c).Gap(5).AlignItems(ui.Baseline).Children(func() {
+@@ -397,8 +410,8 @@ func (a *App) speedCard(c *ui.Context, t *ui.Theme, p *palette) {
+ 						v, u, _ := strings.Cut(humanSpeed(speed), " ")
+ 						n, unit = v, u
+ 					}
+-					figure(c, n).FontSize(36).FontWeight(700).ContentTransition(ui.ContentTransition{Numeric: true})
+-					ui.Text(c, unit).FontSize(16).FontWeight(600).TextColor(t.TextMuted)
++					figure(c, n).FontSize(big).FontWeight(700).ContentTransition(ui.ContentTransition{Numeric: true})
++					ui.Text(c, unit).FontSize(unitSize).FontWeight(600).TextColor(t.TextMuted)
+ 				})
+ 			})
+ 			stat := func(label, value string) {
+@@ -410,7 +423,9 @@ func (a *App) speedCard(c *ui.Context, t *ui.Theme, p *palette) {
+ 			stat("下载", itoa(down))
+ 			stat("上传", itoa(up))
+ 			stat("排队", itoa(queued))
+-			stat("连接", itoa(cfg.Threads)+" × "+itoa(cfg.Parallel))
++			if !narrow {
++				stat("连接", itoa(cfg.Threads)+" × "+itoa(cfg.Parallel))
++			}
+ 		})
+ 		speeds := a.transfers.speeds
+ 		ui.Box(c).Height(64).FillWidth().Radius(8).Background(green.Alpha(0.07)).Draw(func(pt *ui.Painter, r ui.Rect) {
+diff --git a/main.go b/main.go
+index a62bf1c..2c987a4 100644
+--- a/main.go
++++ b/main.go
+@@ -43,8 +43,8 @@ func main() {
+ 			Title:     "BaiduNetGo",
+ 			Width:     1180,
+ 			Height:    760,
+-			MinWidth:  780,
+-			MinHeight: 540,
++			MinWidth:  420,
++			MinHeight: 300,
+ 			StateKey:  "main",
+ 			// A native window: the traffic lights inset over the sidebar,
+ 			// which shows the window's translucent material (macOS,

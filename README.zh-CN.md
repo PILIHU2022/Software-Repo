@@ -6,24 +6,28 @@
 
 # Software-Repo —— Patchwork 构建叠加仓库
 
-这是一个面向三个 Android 应用的个人补丁式构建仓库：**ScreenTime**、
-**RecurringExpenseTracker** 与 **Fcitx5 for Android**。仓库里不保存任何应用源码，
-只保存一条有序的补丁队列，以及把补丁应用到上游当前代码、构建签名 APK、发布签名
-F-Droid 仓库的 CI。
+这是一个面向三个 Android 应用——**ScreenTime**、**RecurringExpenseTracker** 与
+**Fcitx5 for Android**——以及一个桌面应用 **BaiduNetGo** 的个人补丁式构建仓库。
+BaiduNetGo 只在这里构建，它**不属于** Android / F-Droid 应用。仓库里不保存任何
+应用源码，只保存按顺序应用的补丁队列，以及把补丁应用到上游当前代码、构建签名
+APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包并以 workflow artifact
+形式发布。
 
-> 个人项目，与上游作者（Dennis Bauer、Atharok、Fcitx5 for Android 贡献者）无关，
-> 也未获其背书。
+> 个人项目，与上游作者（Dennis Bauer、Atharok、Fcitx5 for Android 贡献者、
+> pengstem）无关，也未获其背书。
 
 ## 这是什么
 
 一个 *patchwork overlay*（补丁叠加）单仓库，只存两样东西，不存应用源码：
 
-1. **补丁队列** —— `apps/<app>/patches/*.patch`，能按顺序用 `git am -3` 应用到
-   上游分支之上的改动。监控的分支分别是：expenses `main`、screentime `main`、
-   fcitx5 `master`（GitHub 上 fcitx5-android 的真实默认分支，不是 `main`；URL
-   不受影响）；
+1. **补丁队列** —— Android 应用在 `apps/<app>/patches/*.patch`，桌面应用在
+   `desktop/baidunetgo/patches/*.patch`，都能按顺序用 `git am -3` 应用到上游分支
+   之上。监控的分支分别是：expenses `main`、screentime `main`、fcitx5 `master`
+   （GitHub 上 fcitx5-android 的真实默认分支，不是 `main`；URL 不受影响）与
+   baidunetgo `main`；
 2. **构建与发布自动化** —— CI 拉取上游当前 `main`，应用补丁队列，改写版本号，
-   构建签名 APK，并更新签名后的 F-Droid 仓库。
+   构建签名 APK，并更新签名后的 F-Droid 仓库；另一条独立的 `baidunetgo.yml`
+   只构建 x86 桌面安装包，并把安装包作为 artifact 上传，完全不碰 F-Droid。
 
 每次构建都把补丁重新应用到最新的上游提交上，因此上游的修复和新功能会自动进入
 构建，而不需要长期维护一个已经分叉的 fork。补丁一旦无法应用，流水线会失败并开
@@ -36,6 +40,11 @@ issue，而不是继续发布过期代码。
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `effbf0d` | 18 | `0.21.4-patchwork-fallback-effbf0d` (6806) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1303，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 4 | `0.1.3-patchwork`（11202，arm64-v8a） |
+| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 19 | `0.8.3`（linux/windows x86） |
+
+三个 Android 应用发布在 F-Droid。**BaiduNetGo 不发布**：它是 Go/MyGo 桌面程序，
+按自己的 10 天周期构建，产物是 workflow artifact（`baidunetgo-x86-<sha>`），
+永远不会变成 APK。
 
 **ScreenTime** —— 每日使用记录持久化到本地 SQLite 数据库，新增基于该历史的分析页
 （时长表格从 0 递增、星期进度条与柱图从 0 生长；新增独立的「分析」设置分类和本地
@@ -66,6 +75,19 @@ Rime 配置」，也可用
 设置时行为与上游完全一致，官方/F-Droid 构建不受影响。只发布 `arm64-v8a`
 （上游按 ABI 拆包、没有 universal APK），APK 约 52 MB。
 
+**BaiduNetGo（桌面，不进 F-Droid）** —— 基于 pengstem 的纯 Go 百度网盘客户端做的
+社区修复版：查重、应用内文件剪贴板与撤销、Finder 风格的框选与拖动移动、窗口/字体
+自适应，以及可配置的更新检查 feed；界面由 MyGo 原生 GPU 绘制。由
+`scripts/build-baidunetgo.sh` 从 `desktop/baidunetgo/patches` 构建，**只出 x86**
+（`linux/amd64`、`windows/amd64`），每次都把队列用 `git am -3`（导出成补丁的
+rebase 形式）重放到新的上游头上。安装包只作为 workflow artifact 发布，不进入
+F-Droid。
+
+两个带预编译原生依赖的 Android 应用（RecurringExpenseTracker、ScreenTime）都只编译
+**ARM**：其 `app.conf` 里的 `KEEP_ABIS="arm64-v8a armeabi-v7a"` 会让
+`build-app.sh` 在 Gradle 之后删掉 `lib/x86/`、`lib/x86_64/`，再按 16 KB 页对齐并用
+v2/v3 重新签名。Fcitx5 的 `arm64-v8a` 构建保持不变。
+
 ## F-Droid 仓库
 
 仓库地址（自定义域名，由 GitHub Pages 托管、CDN + TLS；**已上线并验证**）：
@@ -74,10 +96,9 @@ Rime 配置」，也可用
 https://software.sparkzh.top/repo
 ```
 
-索引返回 HTTP 200，`index-v2.json` 中列出 `de.dbauer.expensetracker` **6804**、
-`com.atharok.screentime` **1303** 与 `org.fcitx.fcitx5.android` **11201**。
-（仓库里已提交的 expenses APK 生成于最近一次补丁队列提交之前，下次构建会发布
-6805。）站点首页：<https://software.sparkzh.top/>。
+索引返回 HTTP 200，`index-v2.json` 中列出 `de.dbauer.expensetracker` **6806**、
+`com.atharok.screentime` **1303** 与 `org.fcitx.fcitx5.android` **11202**。
+站点首页：<https://software.sparkzh.top/>。
 GitHub Pages 地址 <https://pilihu2022.github.io/Software-Repo/repo> 会 301 跳转到
 这个域名。
 
@@ -89,7 +110,7 @@ SHA-256: D3:34:88:79:40:65:C9:2E:37:0D:24:A1:0E:61:4E:1E:64:E3:19:B7:5E:6F:8B:B7
 ```
 
 > 包名与官方应用完全相同，但签名密钥不同。Android 会拒绝跨密钥覆盖安装，请先卸载
-> 官方版本 —— 卸载会删除应用数据，请先备份。三个应用都是如此，Fcitx5 for Android
+> 官方版本 —— 卸载会删除应用数据，请先备份。三个 Android 应用都是如此，Fcitx5 for Android
 > 也一样：从官方版或官方 F-Droid 构建切换过来必须先卸载，`Download/Rime-Sync`
 > 下的 Rime 用户数据请自行备份。
 
@@ -107,21 +128,20 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 
 ## 自动化流程
 
-`build.yml` 每 **15 分钟**轮询一次上游仓库（`*/15 * * * *`），只有上游 SHA 与
-`fdroid/.build-state.json` 不同的 app 才会构建。它也响应推送到 `main` 且改动涉及
-`apps/**`、`scripts/**` 或工作流本身的提交，并支持手动触发（可选 `app` / `force`
-输入）。GitHub 的定时任务属于 best-effort，负载高时可能延迟，因此实际生效时间
-可能长于 15 分钟。
+`build.yml` 每 **10 天**检查一次上游仓库，只有上游 SHA 与
+`fdroid/.build-state.json` 不同的 app 才会构建。GitHub 的 cron 无法直接表达
+“每 10 天”（`*/10` 的日规则会在 1、11、21、31 号触发），因此工作流每天跑一次
+（`17 4 * * *`），check 任务在 `.watch-state.json` 的 `android` 时间戳距今不足
+10 天时直接退出。它也响应推送到 `main` 且改动涉及 `apps/**`、`scripts/**` 或
+工作流本身的提交，并支持手动触发（可选 `app` / `force` 输入）。改动补丁队列或
+`app.conf` 的提交会立即触发构建，并按下面的版本号规则 +1。
 
-改动 `apps/*/patches/` 的补丁提交本身就是一次 `apps/**` 推送：**会立即触发构建**
-（无需等定时运行），并按下文的版本号规则自动 +1。
-
-`upstream-watch.yml` 补足这个定时：GitHub 在本仓库上会把 `*/15` 的调度拖后数小时，
-因此 watcher 每 12 小时开一个 1 小时的窗口（`7 */12 * * *`），窗口内每 15 分钟检查
-一次上游分支，发现 SHA 变化就立刻派发 `build.yml`；窗口最长不超过 60 分钟。
-`watchdog.yml` 守的是这些窗口：每小时检查是否还有排队或在跑的窗口，若上一个窗口
-启动已超过 12 小时、或提前异常退出（托管 runner 可能在任务中途被回收，2026-10-28
-出现过一次），就派发一个新的。
+随着周期改为 10 天，原先 15 分钟一次的轮询（`upstream-watch.yml`）、它的每小时
+watchdog 和 1 小时轮询窗口都已删除：每天一次的带闸门运行更简单，延迟或漏掉一天
+也只是把窗口顺延一天；而且闸门只在一次定时运行完成之后才前进，硬失败会在第二天
+继续重试，而不是再等 10 天。补丁队列无法应用到新 head 时会回退到上次成功构建的
+上游提交，并在下一个窗口重试新 head。桌面 x86 构建则是另一条独立的
+`baidunetgo.yml`。
 
 构建按 app 分开：推送只重建 `apps/<app>/**` 有改动的那个 app（`scripts/**` 或
 工作流改动会重建全部三个；无法确定 before 的强制推送回退为全部三个）。定时运行只
@@ -130,19 +150,30 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 `extra-cmake-modules`/`gettext` 以及 NDK 28.0.13004108、CMake 3.31.6、
 build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 
-1. **check** —— `scripts/check-upstream.sh` 对比上游分支的 SHA（expenses /
-   screentime 是 `main`，fcitx5 是 `master`）与 `fdroid/.build-state.json`，生成
-   构建矩阵；
+1. **check** —— `scripts/check-upstream.sh` 先过 10 天闸门，再对比上游分支的
+   SHA（expenses / screentime 是 `main`，fcitx5 是 `master`）与
+   `fdroid/.build-state.json`，生成构建矩阵；
 2. **build** —— 每个有变化的应用一个矩阵任务（`fail-fast: false`）：在
    `.cache/mirror/<app>.git` 维护 mirror、创建全新检出、按需递归初始化子模块
    （fcitx5）、用 `git am -3` 应用补丁队列、处理版本号、Gradle release 构建、
-   keystore 签名，再用 `apksigner` / `aapt` 校验；
+   keystore 签名；设置了 `KEEP_ABIS` 的应用随后删除非 ARM ABI、按 16 KB 对齐并
+   重新签名，再用 `apksigner` / `aapt` 校验；
 3. **publish** —— `publish-fdroid.sh` 每个包最多保留 3 个 APK，按
    `(package, versionCode)` 去重，用 fdroidserver（`fdroid update`）签名索引，把
    `fdroid/repo` 与 `.build-state.json` 以 `[skip ci]` 提交回 `main`，最后部署
-   Pages。失败的矩阵任务保留旧状态，下次运行会重试；
+   Pages。失败的矩阵任务保留旧状态，下次运行会重试；`record-check` 任务只在定时
+运行完成之后才推进 10 天窗口（回退构建也算完成：对应 app 保留旧的上游记录，下一
+个窗口再试新 head）；
 4. **failure** —— 打开或评论 **“Patchwork build failed”** issue，附运行链接和本地
    复现命令。
+
+`baidunetgo.yml` 是桌面版对应的工作流：每天（`43 4 * * *`）运行，按
+`.watch-state.json` 的 `baidunetgo` 时间戳过 10 天闸门，用 `git ls-remote` 解析
+`pengstem/baidunetgo` 的 `main`；SHA 与 `desktop/.build-state.json` 不同时，把
+`desktop/baidunetgo/patches` 用 `git am -3` 重放到新 head（不适用时回退到上次成功
+构建的提交重试一次），用 `go tool mygo build` 构建 `linux/amd64,windows/amd64`，
+上传 `baidunetgo-x86-<sha>` artifact。回退构建不会记录新 head，下一个 10 天窗口
+会继续重试；整个流程不碰 `fdroid/`。
 
 最近一次完整构建
 （[run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167)）
@@ -161,15 +192,16 @@ versionCode = 上游 versionCode × 100 + PATCHWORK_REVISION
 versionName = "<上游 versionName>-patchwork"
 ```
 
-`PATCHWORK_REVISION` 默认取 `HEAD` 上触及 `apps/<app>/patches` 的提交数（上限 99，
-可用同名环境变量覆盖）。这正是“只改补丁”的版本也能在 F-Droid 里升级的原因：
-补丁队列提交会让 `versionCode` 增加，即使上游版本号没变。
+`PATCHWORK_REVISION` 默认取 `HEAD` 上触及 `apps/<app>` 整个目录的提交数（上限
+99，可用同名环境变量覆盖）。统计整个应用目录而不只是补丁队列，是为了让
+`KEEP_ABIS` 这类非补丁改动也能发布一个可升级的新包：任何下游提交都会让
+`versionCode` 增加，即使上游版本号没变。
 
-| 应用 | 上游 versionCode / versionName | 补丁队列提交数 | 构建结果 |
+| 应用 | 上游 versionCode / versionName | 应用目录提交数 | 构建结果 |
 | --- | --- | --- | --- |
-| ScreenTime | `13` / `"1.4.1"` | 3 | `1303` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 5 | `6805` / `"0.21.4-patchwork"` |
-| Fcitx5 for Android | `112`（arm64-v8a）/ `"0.1.3"` | 1 | `11201` / `"0.1.3-patchwork"` |
+| ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 8 | `6808` / `"0.21.4-patchwork"` |
+| Fcitx5 for Android | `112`（arm64-v8a）/ `"0.1.3"` | 2 | `11202` / `"0.1.3-patchwork"` |
 
 fcitx5 的上游 versionCode 本身就按 ABI 区分（`baseVersionCode × 10 + ABI id`，
 arm64-v8a 的 id 为 2），所以完整公式是：
@@ -193,11 +225,16 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 ├── README.zh-CN.md            # 简体中文说明（本文件）
 ├── LICENSE                    # GPL-3.0-only
 ├── apps/
-│   ├── expenses/{app.conf,patches/}     # 0001..0018
-│   ├── screentime/{app.conf,patches/}   # 0001..0011
+│   ├── expenses/{app.conf,patches/}     # 0001..0018，KEEP_ABIS=ARM
+│   ├── screentime/{app.conf,patches/}   # 0001..0011，KEEP_ABIS=ARM
 │   └── fcitx5/{app.conf,patches/}       # 0001..0003
+├── desktop/
+│   ├── baidunetgo/{app.conf,patches/}   # 0001..0019，x86 桌面构建
+│   └── .build-state.json                # 上次成功构建的上游提交
+├── .watch-state.json          # android / baidunetgo 的上次 10 天检查时间
 ├── scripts/
 │   ├── build-app.sh           # 拉上游、打补丁、改版本、构建、校验
+│   ├── build-baidunetgo.sh    # 拉上游、rebase 补丁队列、构建 x86 桌面版
 │   ├── check-upstream.sh      # 上游 SHA 差异 -> CI 矩阵
 │   ├── publish-fdroid.sh      # 发布 APK 并签名索引
 │   ├── test-publish-fdroid.sh # 发布脚本的回归测试
@@ -209,13 +246,17 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 │   └── .build-state.json
 ├── signing/patchwork-test.jks # 故意公开的测试签名密钥
 ├── docs/design/               # 日历规格、Expenses 架构图谱
-└── .github/workflows/{build,deploy-pages,upstream-watch,watchdog}.yml
+└── .github/workflows/{build,baidunetgo,deploy-pages}.yml
 ```
 
 ## 本地构建
 
 expenses / screentime 的前置条件：bash、Git、JDK 21、Android SDK 37（预览版
-platform 与 build-tools），发布还需要 `fdroidserver`。它们不需要 NDK。
+platform 与 build-tools），以及用于剥离非 ARM ABI 的 `zip`。它们不需要 NDK。
+
+桌面版需要 Go（版本以拉下来的上游 `go.mod` 为准）、`zip`，以及 Windows 安装包所需的
+NSIS（`makensis`）。MyGo 不需要 cgo，所以 `linux/amd64` 与 `windows/amd64` 都能在
+任意机器上构建。
 
 Fcitx5 for Android 需要更多：Android SDK 包 `platforms;android-36`、
 `build-tools;36.1.0`、`cmake;3.31.6`、`ndk;28.0.13004108`，宿主机包
@@ -237,18 +278,27 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-app.sh expenses --no-build    # 只拉上游 + 打补丁 + 改版本
 ./scripts/build-app.sh expenses              # 完整构建，输出到 dist/
 ./scripts/build-app.sh screentime --out dist
-./scripts/build-app.sh fcitx5 --no-build     # 拉上游 + 补丁，不下载子模块（11201）
+./scripts/build-app.sh fcitx5 --no-build     # 拉上游 + 补丁，不下载子模块（11202）
 ./scripts/build-app.sh fcitx5 --out ../.toolchain/tmp/fcitx5-dist
 ./scripts/check-upstream.sh                  # 输出 JSON；--all/--apps 选择 app
 ./scripts/publish-fdroid.sh --apk-dir dist   # 重建 fdroid/repo 与索引
 ./scripts/sync-patches.sh --check            # 对比作者仓库与补丁队列
 ./scripts/test-publish-fdroid.sh dist/RecurringExpenseTracker-0.21.4-patchwork.apk
+
+# 桌面版（只出 x86）：--prepare 拉上游并 rebase 补丁队列，--build 再编译。
+# --out 默认是 dist/baidunetgo。
+./scripts/build-baidunetgo.sh --prepare
+./scripts/build-baidunetgo.sh --build
+PATCHWORK_PLATFORMS=linux/amd64 ./scripts/build-baidunetgo.sh   # 本地没有 NSIS 时
 ```
 
 `dist/build-info.txt` 记录 `upstream_commit`、`patch_count`、`version_code`、
 `version_name`、`variant`、`built_at`、`apk`、`apk_size`、`sha256`；按 ABI 构建的
-应用（如 fcitx5）还会多一行 `abi`。构建缓存（`.cache/`）和产物（`dist/`）都已
-gitignore。
+应用（如 fcitx5）还会多一行 `abi`，只出 ARM 的应用多一行 `abis`。桌面构建把同类
+信息写到 `dist/baidunetgo/`（或 `--out` 指定目录）下的 `build-info.txt`：
+`upstream_head`、`upstream_commit`、`upstream_fallback`、`patch_count`、`version`、
+`platforms`、`built_at`，以及每个安装包一行 `file=`（含大小与 SHA-256）。构建
+缓存（`.cache/`）和产物（`dist/`）都已 gitignore。
 
 如果本地 GitHub HTTPS 拉取卡住（例如代理损坏），只对那一次运行改用 SSH，不要改
 脚本：
@@ -263,10 +313,11 @@ GIT_SSH_COMMAND='ssh -F /dev/null -o BatchMode=yes' \
 
 ## 更新补丁
 
-补丁仍在三个独立的 app clone 中开发；本仓库只消费导出的补丁文件。expenses 与
+补丁仍在四个独立的 app clone 中开发；本仓库只消费导出的补丁文件。expenses 与
 screentime 的队列放在 `.patchwork/patches/`（或 `patchwork` 分支）；fcitx5-android
 的队列在 `feat/rime-sync-manager` 分支上，用
-`git format-patch master..feat/rime-sync-manager` 导出。
+`git format-patch master..feat/rime-sync-manager` 导出；BaiduNetGo 的队列则直接
+叠在 `main` 上（上游 + 社区提交），相对 `origin/main` 导出。
 
 ```bash
 # 1. 在 app clone 中从上游 main 建 feature 分支并开发
@@ -286,6 +337,24 @@ git add apps/screentime/patches
 git commit -m "Update ScreenTime patch queue"
 git push origin main
 ```
+
+BaiduNetGo 的队列从作者 clone 的 `main` 导出（没有 `.patchwork/` 目录）：
+
+```bash
+cd ../baidunetgo
+git fetch origin
+rm -f ../Software-Repo/desktop/baidunetgo/patches/*.patch
+git format-patch --no-signature --zero-commit --no-numbered \
+  origin/main..main -o ../Software-Repo/desktop/baidunetgo/patches
+
+cd ../Software-Repo
+git add desktop/baidunetgo/patches
+git commit -m "Update the BaiduNetGo patch queue"
+git push origin main
+```
+
+`sync-patches.sh` 只认识三个 Android clone；桌面队列按上面的命令手动导出（工作流
+会在 10 天内重建，也可以手动运行 `baidunetgo.yml` 并勾选 `force`）。
 
 `./scripts/sync-patches.sh --check` 只报告差异（不同步时退出码为 1），适合 CI 或
 本地提交前检查。对 expenses / screentime，如果 clone 不在 `patchwork` 分支，脚本

@@ -1,0 +1,406 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 09:32:33 +0800
+Subject: [PATCH] Read the clipboard for share links only on Cmd-V or the
+ folder's link button, so a hung clipboard owner cannot freeze the main thread
+
+---
+ AGENTS.md          |  2 +-
+ CHANGELOG.md       |  4 +++
+ CLAUDE.md          |  2 +-
+ README.md          |  2 +-
+ app/app.go         | 68 ++++++++++++++++++++++------------------------
+ app/browser.go     | 10 +++++++
+ app/files.go       |  1 -
+ app/ops.go         |  6 +---
+ app/session.go     |  1 -
+ app/sharelink.go   | 47 ++++++++++++++------------------
+ app/shares_test.go | 66 +++++++++++++++++++++++++++++++++-----------
+ 11 files changed, 121 insertions(+), 88 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 5e195e0..43baec3 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -47,7 +47,7 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+ 
+-**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link it finds on the clipboard as the window comes forward, once per link (`settings.SeenShare`; links it copied itself count as seen), and on Cmd-V in the browser. fakepan knows `fakepan.DemoShare` and the account's own shares.
++**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button or Cmd-V in the browser; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
+ 
+ `baidu.OpenAt(creds, base)` points the client at a fake server. `c.fake()` swaps in fake-friendly behavior in the few library-bound paths (download URL, upload). Errno -6/-4/111 maps to `ErrNotLoggedIn`, which signs the user out.
+ 
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8944f1a..0956612 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -8,6 +8,10 @@
+ 
+ <!-- 写在这里的内容会成为下一个版本的更新说明；留空则按提交记录自动生成。 -->
+ 
++### 修复
++
++- 不再在窗口获得焦点或登录时自动读取剪贴板，避免剪贴板所有者无响应时 GTK 的同步读取卡住主线程；分享链接改由文件工具栏的链接按钮或 Cmd-V 显式读取。
++
+ ## [0.8.3] - 2026-11-09
+ 
+ ### 改进
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 9cd7371..b67319a 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -47,7 +47,7 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+ 
+-**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link it finds on the clipboard as the window comes forward, once per link (`settings.SeenShare`; links it copied itself count as seen), and on Cmd-V in the browser. fakepan knows `fakepan.DemoShare` and the account's own shares.
++**Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button or Cmd-V in the browser; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
+ 
+ `baidu.OpenAt(creds, base)` points the client at a fake server. `c.fake()` swaps in fake-friendly behavior in the few library-bound paths (download URL, upload). Errno -6/-4/111 maps to `ErrNotLoggedIn`, which signs the user out.
+ 
+diff --git a/README.md b/README.md
+index a893c5c..a2105d2 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,7 @@
+ - **传输**：多连接分块下载、断点续传、过期链接自动刷新；上传支持秒传与分片；拖文件进窗口即上传
+ - **自动调优**：按实测依次选出下载线路、每个文件的连接数、块大小、同时传输的文件数和上传连接数，每种会员等级每周测一次；连接数也可以手动指定
+ - **跟系统配合**：只运行一个实例，Dock 图标显示传输数和进度，传输时不让电脑休眠，完成后发通知（点开定位到文件），断网或睡眠时传输排队，恢复后接着传；网盘请求和扫码登录跟随系统代理与 PAC
+-- **分享**：创建带提取码与有效期的链接、管理我的分享、粘贴整段分享文字一键转存
++- **分享**：创建带提取码与有效期的链接、管理我的分享；工具栏的链接按钮或 Cmd-V 在你操作时读取剪贴板，粘贴整段分享文字一键转存
+ - **离线下载**：HTTP / 磁力链接交给网盘云端下载
+ - **动效**：跟随系统深浅色；文件夹打开时文件依次浮现，删除的文件碎成光点飘散，上传中的文件由光点聚拢成行，拖文件进来时窗口亮起一圈流动的光
+ 
+diff --git a/app/app.go b/app/app.go
+index 0be68c7..2076f9d 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -49,34 +49,39 @@ type App struct {
+ 	passed      time.Time          // when passTime last moved them on
+ 	gpu         bool               // the window draws on a GPU, so shaders draw at speed
+ 
+-	pv            *previewState
+-	dlg           dialog
+-	renaming      *renaming          // a name edited in place (rename.go)
+-	creating      *creating          // a folder named in the maker (newfolder.go)
+-	flights       map[string]*flight // files on their way into folders (landing.go)
+-	slow          slowClick
+-	recycle       recycleState
+-	recycleDirty  bool
+-	found         searchState
+-	xfer          *transfer.Manager
+-	stream        *stream.Server
+-	tuning        bool   // measuring download speeds
+-	tuneErr       string // why the last measurement failed
+-	tuneStage     string // what the measurement measures now
+-	tuneOpen      bool   // the measurement's details unfolded in settings
+-	transfers     transfersState
+-	sys           systemState
+-	shareForm     shareForm
+-	link          linkState // a share link opened to save (sharelink.go)
+-	clipCheck     bool      // look for a share link on the clipboard when free
+-	shares        sharesState
+-	sharesDirty   bool
+-	offline       offlineState
+-	dedup         dedupState
+-	copied        string // the toast after copying
+-	query         string
+-	copyText      string // to put on the clipboard in the next frame
+-	copyPNG       []byte // the same, for a picture
++	pv           *previewState
++	dlg          dialog
++	renaming     *renaming          // a name edited in place (rename.go)
++	creating     *creating          // a folder named in the maker (newfolder.go)
++	flights      map[string]*flight // files on their way into folders (landing.go)
++	slow         slowClick
++	recycle      recycleState
++	recycleDirty bool
++	found        searchState
++	xfer         *transfer.Manager
++	stream       *stream.Server
++	tuning       bool   // measuring download speeds
++	tuneErr      string // why the last measurement failed
++	tuneStage    string // what the measurement measures now
++	tuneOpen     bool   // the measurement's details unfolded in settings
++	transfers    transfersState
++	sys          systemState
++	shareForm    shareForm
++	link         linkState // a share link opened to save (sharelink.go)
++	shares       sharesState
++	sharesDirty  bool
++	offline      offlineState
++	dedup        dedupState
++	copied       string // the toast after copying
++	query        string
++	copyText     string // to put on the clipboard in the next frame
++	copyPNG      []byte // the same, for a picture
++	// clipRead reads the clipboard on an explicit command (Cmd-V or the
++	// toolbar's link button). Tests swap it to count the reads.
++	clipRead func(*ui.Context) string
++	// reloads are folders waiting to be read again after transfers
++	// finished in them, by path (transfers.go).
++	reloads       map[string]*time.Timer
+ 	settings      settings
+ 	pendingToasts []ui.Toast
+ 
+@@ -228,10 +233,6 @@ func (a *App) View(c *ui.Context) {
+ 			Animation: &motionPanel,
+ 			Enter:     &ui.Motion{Scale: 0.97},
+ 		}).Children(func() { a.shell(c, t, p) })
+-		if a.clipCheck && !a.dlg.open && a.pv == nil && a.renaming == nil && a.creating == nil {
+-			a.clipCheck = false
+-			a.checkClipboard(c)
+-		}
+ 		a.dialogs(c, t, p)
+ 		a.previewOverlay(c, t, p)
+ 	}
+@@ -239,9 +240,6 @@ func (a *App) View(c *ui.Context) {
+ 	if a.copyText != "" || a.copyPNG != nil {
+ 		if a.copyText != "" {
+ 			c.WriteClipboard(a.copyText)
+-			if link, pwd, ok := baidu.ParseShareLink(a.copyText); ok {
+-				a.seenShare(link, pwd) // the app's own, not to open
+-			}
+ 		} else {
+ 			writePNG(c, a.copyPNG)
+ 		}
+diff --git a/app/browser.go b/app/browser.go
+index 55598f4..f19f330 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -631,6 +631,9 @@ func (a *App) breadcrumbs(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ // once the path, whole, would still fit beside them open.
+ func (a *App) foldTools(path, room float32) bool {
+ 	if room <= 0 {
++		if a.toolsWidth[0] > 0 {
++			return true // the tools took the room the path needed
++		}
+ 		return a.compact // nothing laid out yet
+ 	}
+ 	if !a.toolsFolded {
+@@ -753,6 +756,13 @@ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	a.toolsFolded = a.compact
+ 	tools.Children(func() {
+ 		a.viewSwitch(c, t, p)
++		// The clipboard is read only when asked, here or with Cmd-V: its
++		// owner can make the read wait.
++		if toolButton(c, t, p, "link", "从剪贴板打开分享链接").Clicked() {
++			if !a.openClipboardShare(c, true) {
++				a.toast("剪贴板里没有分享链接", "")
++			}
++		}
+ 		if toolButton(c, t, p, "refresh-cw", "刷新").Clicked() {
+ 			a.reload(dir)
+ 		}
+diff --git a/app/files.go b/app/files.go
+index 631a0c2..7f4464f 100644
+--- a/app/files.go
++++ b/app/files.go
+@@ -108,7 +108,6 @@ func (a *App) listingFor(dir string) *listing {
+ // front, unless it was just read, and lets the others be read again as
+ // they show.
+ func (a *App) refocused() {
+-	a.clipCheck = true
+ 	cur := a.currentDir()
+ 	for dir, l := range a.listings {
+ 		switch {
+diff --git a/app/ops.go b/app/ops.go
+index 9575ee2..0a6008d 100644
+--- a/app/ops.go
++++ b/app/ops.go
+@@ -238,11 +238,7 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 		a.reload(l.dir)
+ 	}
+ 	if c.Shortcut(ui.Cmd, ui.KeyV) {
+-		if text := c.ReadClipboard(); len(text) < 4096 {
+-			if _, _, ok := baidu.ParseShareLink(text); ok {
+-				a.openLink(text, false)
+-			}
+-		}
++		a.openClipboardShare(c, false)
+ 	}
+ 	if c.Shortcut(ui.Cmd, ui.Key1) {
+ 		a.gridView = false
+diff --git a/app/session.go b/app/session.go
+index c630040..c618137 100644
+--- a/app/session.go
++++ b/app/session.go
+@@ -244,7 +244,6 @@ func (a *App) signOut() {
+ 
+ // onSignedIn starts what the signed-in app shows.
+ func (a *App) onSignedIn() {
+-	a.clipCheck = true
+ 	a.startThumbs()
+ 	a.startTransfers()
+ 	if srv, err := stream.Start(a.sess.client, baidu.Expired); err == nil {
+diff --git a/app/sharelink.go b/app/sharelink.go
+index 3ca4f71..9b575c4 100644
+--- a/app/sharelink.go
++++ b/app/sharelink.go
+@@ -18,7 +18,7 @@ type linkState struct {
+ 	text    string // what was pasted or typed
+ 	pwd     string // the password typed, when the text's is missing or wrong
+ 	key     string // the link and password opened, or being opened
+-	clip    bool   // it came from the clipboard by itself
++	clip    bool   // it came from the clipboard, read when the user asked
+ 	opening bool
+ 	err     error
+ 	shared  *baidu.Shared
+@@ -38,8 +38,8 @@ const (
+ 	shareListMax   = 6.5 * shareRowHeight
+ )
+ 
+-// openLink shows what a share link in text shares, from the clipboard by
+-// itself when clip.
++// openLink shows what a share link in text shares, clip when the user had
++// it read from the clipboard.
+ func (a *App) openLink(text string, clip bool) {
+ 	a.ask(dlgSaveLink, "/", nil)
+ 	dest := a.settings.ShareDest
+@@ -49,33 +49,26 @@ func (a *App) openLink(text string, clip bool) {
+ 	a.link = linkState{text: strings.TrimSpace(text), clip: clip, dest: picker{dir: dest}}
+ }
+ 
+-// checkClipboard opens a share link the clipboard holds, once for each
+-// link, as the window comes to the front.
+-func (a *App) checkClipboard(c *ui.Context) {
+-	text := c.ReadClipboard()
+-	if len(text) > 4096 {
+-		return
+-	}
+-	link, pwd, ok := baidu.ParseShareLink(text)
+-	if !ok || a.seenShare(link, pwd) {
+-		return
++// openClipboardShare opens a share link the clipboard holds, when the user
++// asks for it: the folder toolbar's link button, or Cmd-V in the browser.
++// The view never reads the clipboard by itself, as the clipboard's owner
++// can make that wait and hold up the main thread. It reports whether the
++// clipboard held a share link.
++func (a *App) openClipboardShare(c *ui.Context, clip bool) bool {
++	var text string
++	if a.clipRead != nil {
++		text = a.clipRead(c) // a test, counting the reads
++	} else {
++		text = c.ReadClipboard()
+ 	}
+-	a.openLink(text, true)
+-}
+-
+-// seenShare reports whether the clipboard showed a link already, and
+-// remembers that it has, across launches; links the app copied itself
+-// count as seen.
+-func (a *App) seenShare(link, pwd string) bool {
+-	key := link + "#" + pwd
+-	if a.settings.SeenShare == key {
+-		return true
++	if len(text) > 4096 {
++		return false
+ 	}
+-	a.settings.SeenShare = key
+-	if !a.fake {
+-		a.settings.save()
++	if _, _, ok := baidu.ParseShareLink(text); !ok {
++		return false
+ 	}
+-	return false
++	a.openLink(text, clip)
++	return true
+ }
+ 
+ // linkPassword is the password the link is opened with: the one typed,
+diff --git a/app/shares_test.go b/app/shares_test.go
+index 1e4f304..ae8cfd6 100644
+--- a/app/shares_test.go
++++ b/app/shares_test.go
+@@ -55,9 +55,12 @@ func TestShareFromClipboard(t *testing.T) {
+ 	srv.Add(fakepan.Node{Path: "/收到", IsDir: true})
+ 	a.settings.ShareDest = "/收到"
+ 
+-	// A link without its password: the dialog asks for it.
++	// A link without its password: the toolbar's button reads the clipboard,
++	// and the dialog asks for it.
+ 	tt.SetClipboard("快来看 https://pan.baidu.com/s/1demo")
+-	a.clipCheck = true
++	if err := tt.Click("从剪贴板打开分享链接"); err != nil {
++		t.Fatal(err)
++	}
+ 	waitFor(t, tt, "这个分享需要提取码")
+ 	tt.Advance(400 * time.Millisecond)
+ 	save(t, tt, "share-clip-password")
+@@ -74,14 +77,10 @@ func TestShareFromClipboard(t *testing.T) {
+ 	tt.Click("取消")
+ 	settle(tt)
+ 
+-	// The same link again is not opened again; one with its password is.
+-	a.clipCheck = true
+-	settle(tt)
+-	if a.dlg.open {
+-		t.Fatal("opened a link seen already")
+-	}
++	// A link with its password is pasted with Cmd-V, which reads the
++	// clipboard only as it is pressed.
+ 	tt.SetClipboard("链接: https://pan.baidu.com/s/1demo?pwd=abcd 提取码: abcd 复制这段内容后打开百度网盘")
+-	a.clipCheck = true
++	tt.Key(ui.Cmd, ui.KeyV)
+ 	waitFor(t, tt, "旅行的猫 的分享")
+ 	waitFor(t, tt, "旅行清单.txt")
+ 	tt.Advance(800 * time.Millisecond)
+@@ -111,15 +110,50 @@ func TestShareFromClipboard(t *testing.T) {
+ 	if a.dlg.open {
+ 		t.Error("dialog still open")
+ 	}
++}
+ 
+-	// The app's own copies are not opened.
+-	a.copy("链接: https://pan.baidu.com/s/1fake9?pwd=wxyz 提取码: wxyz", "")
+-	settle(tt)
+-	a.clipCheck = true
+-	settle(tt)
+-	if a.dlg.open {
+-		t.Error("opened a link the app copied")
++// TestClipboardOnlyWhenAsked tells that signing in and coming to the front
++// never read the clipboard or open the share link it holds: the read waits
++// for the toolbar's button or Cmd-V, as its owner can make it hang.
++func TestClipboardOnlyWhenAsked(t *testing.T) {
++	srv := fakepan.New()
++	t.Cleanup(srv.Close)
++	a := New()
++	a.fake = true
++	link := "链接: https://pan.baidu.com/s/1demo?pwd=abcd 提取码: abcd"
++	reads := 0
++	a.clipRead = func(*ui.Context) string {
++		reads++
++		return link
++	}
++	tt := ui.NewTester(a.View, 1180, 760)
++	tt.SetLocale("zh-Hans")
++	tt.SetClipboard(link)
++	go a.signInWith(baidu.OpenAt(baidu.Credentials{BDUSS: "fake", UID: 1}, srv.URL), false)
++	waitFor(t, tt, "照片")
++	tt.Advance(time.Second)
++	if reads != 0 || a.dlg.open {
++		t.Fatalf("signing in read the clipboard %d times, dialog %v", reads, a.dlg.open)
+ 	}
++
++	a.update(a.refocused)
++	tt.Advance(time.Second)
++	if reads != 0 || a.dlg.open {
++		t.Fatalf("coming to the front read the clipboard %d times, dialog %v", reads, a.dlg.open)
++	}
++
++	if err := tt.Click("从剪贴板打开分享链接"); err != nil {
++		t.Fatal(err)
++	}
++	waitFor(t, tt, "旅行的猫 的分享")
++	if reads != 1 {
++		t.Errorf("the button read the clipboard %d times, want once", reads)
++	}
++	if !tt.HasText("来自剪贴板") {
++		t.Errorf("the share did not say it came from the clipboard: %q", tt.Texts())
++	}
++	tt.Click("取消")
++	settle(tt)
+ }
+ 
+ func TestOfflineFlow(t *testing.T) {

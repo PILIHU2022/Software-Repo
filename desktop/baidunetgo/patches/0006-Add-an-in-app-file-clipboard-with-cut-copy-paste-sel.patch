@@ -1,0 +1,754 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 10:59:20 +0800
+Subject: [PATCH] Add an in-app file clipboard with cut, copy, paste,
+ select-all, copy-path and share-link shortcuts so the browser's keys match
+ Finder's #minor
+
+---
+ AGENTS.md             |   2 +
+ CHANGELOG.md          |   1 +
+ CLAUDE.md             |   2 +
+ README.md             |  33 +++++
+ app/app.go            |   2 +
+ app/browser.go        |  32 +++-
+ app/fileclip.go       | 126 ++++++++++++++++
+ app/grid.go           |   5 -
+ app/ops.go            |  34 ++++-
+ app/picker.go         |   9 +-
+ app/session.go        |   3 +
+ app/shortcuts_test.go | 329 ++++++++++++++++++++++++++++++++++++++++++
+ 12 files changed, 567 insertions(+), 11 deletions(-)
+ create mode 100644 app/fileclip.go
+ create mode 100644 app/shortcuts_test.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index f8cbaea..2f8ec46 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -43,6 +43,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
++**File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does.
++
+ **Netdisk client (`internal/baidu`).** `baidu.Open(creds)` builds a `baidupcs.BaiduPCS` from cookies and never touches BaiduPCS-Go's global config. It also turns TLS verification back on (the library disables it). Two code paths:
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 43b9f86..0044437 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,7 @@
+ ### 新增
+ 
+ - 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。删除前会重新读取所在目录，核对 fs_id、大小和 MD5，并确保每组仍留有一份，过期或被替换的文件不会误删。
++- 文件浏览器新增剪切 / 复制 / 粘贴（Cmd+X / Cmd+C / Cmd+V）：文件剪贴板只在应用内，跨文件夹移动或复制沿用“复制到…”的同名冲突处理（跳过 / 替换 / 保留两者）；剪切成功后才清空剪贴板，失败、取消或全部跳过时保留可重试，复制则可连续粘贴；剪切到原文件夹、把文件夹粘进自身或子目录会被拒绝，注销时清空。另有 Cmd+A 全选、Cmd+Shift+C 复制网盘路径、Cmd+Shift+V 始终打开系统剪贴板里的分享链接（Cmd+V 在文件剪贴板为空时才这么做）、F5 刷新；右键菜单与状态栏显示剪贴板状态，被剪切的行标出“待移动”，README 增补了快捷键说明。
+ 
+ ### 修复
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index a70784d..fcc4fa8 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -43,6 +43,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
++**File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does.
++
+ **Netdisk client (`internal/baidu`).** `baidu.Open(creds)` builds a `baidupcs.BaiduPCS` from cookies and never touches BaiduPCS-Go's global config. It also turns TLS verification back on (the library disables it). Two code paths:
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+diff --git a/README.md b/README.md
+index 79667f9..37f37a7 100644
+--- a/README.md
++++ b/README.md
+@@ -30,6 +30,39 @@
+ 
+ ![深色设置](docs/screenshots/settings-dark.png)
+ 
++## 快捷键
++
++macOS 上是 ⌘（Command），其它平台上是 Ctrl；下表写作 Cmd。
++
++| 快捷键 | 作用 |
++|---|---|
++| `Cmd+Shift+N` | 新建文件夹 |
++| `Cmd+R` / `F5` | 刷新当前文件夹 |
++| `Cmd+1` / `Cmd+2` | 列表 / 网格视图 |
++| `Cmd+F` | 搜索 |
++| `Cmd+,` | 设置 |
++| `F2` | 重命名（macOS 上 Enter 也可以） |
++| `Delete` / `Cmd+Backspace` | 移到回收站，可在提示条里撤销 |
++| `Cmd+I` | 显示详情 |
++| `Space` | 不落盘预览选中的文件 |
++| `Cmd+Down` | 打开选中的文件或文件夹 |
++| `Cmd+Up` / `Alt+Up` | 上一级文件夹 |
++| `Cmd+A` | 全选当前文件夹的文件，列表与网格都可以；上传中、正在命名等临时行会跳过 |
++| `Esc` | 取消选择，关闭弹层 |
++| `Cmd+C` / `Cmd+X` | 复制 / 剪切选中的文件到应用内的文件剪贴板 |
++| `Cmd+V` | 粘贴文件剪贴板；它为空时改为打开系统剪贴板里的分享链接 |
++| `Cmd+Shift+V` | 始终打开系统剪贴板里的分享链接 |
++| `Cmd+Shift+C` | 复制选中文件的网盘路径，多个文件一行一个 |
++
++剪切 / 复制 / 粘贴的规则：
++
++- 文件剪贴板只存在应用内，不写系统剪贴板：网盘路径对其它程序没有意义。切到别的文件夹后按 `Cmd+V` 即移动（剪切）或复制过去。
++- 目标文件夹已有同名项目时，用与“移动到… / 复制到…”相同的对话框处理：跳过、替换或保留两者。
++- 剪切成功后才清空剪贴板；失败、取消冲突或全部跳过时保留，方便再试。复制则一直保留，可以连续粘贴。
++- 剪切后回到文件所在的文件夹再粘贴会被拒绝，提示“文件已在当前文件夹”；把文件夹粘贴进它自己或它的子文件夹也会被拒绝。复制到同一文件夹是允许的，会生成“名称 (1)”这样的空闲名。
++- 注销或切换账号会清空文件剪贴板，避免旧账号的路径带到新会话。
++- 被剪切的行在文件名旁标出“待移动”，状态栏显示“已复制 / 已剪切 N 项”，右键菜单里也有剪切、复制、粘贴和复制路径。
++
+ ## 开发
+ 
+ ```bash
+diff --git a/app/app.go b/app/app.go
+index 2076f9d..d31e863 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -38,6 +38,8 @@ type App struct {
+ 	listingTick uint64
+ 	order       baidu.Order
+ 	gridView    bool
++	fileClip    fileClipboard     // files cut or copied, to paste (fileclip.go)
++	fileClipGen uint64            // counts puts, to spot a paste of an older clip
+ 	finding     bool              // Cmd-F asks for the search field
+ 	askingQuit  bool              // the question whether to quit is showing
+ 	quitOK      atomic.Bool       // the user said to quit while transfers go on
+diff --git a/app/browser.go b/app/browser.go
+index f19f330..d5d91c3 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -203,7 +203,15 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 			} else if a.renamingIn(l, f) {
+ 				a.nameField(c, t, l, f, false)
+ 			} else {
+-				a.clickName(l, f, wholeOnHover(c, ui.Text(c, f.Name).Grow(1).Shrink(1).SingleLine(), f.Name, 0))
++				name := ui.Row(c).Grow(1).Shrink(1).MinWidth(0).Gap(6).AlignItems(ui.Center)
++				name.Children(func() {
++					a.clickName(l, f, wholeOnHover(c, ui.Text(c, f.Name).Grow(1).Shrink(1).SingleLine(), f.Name, 0))
++					// Cut files say they are to move, wherever they are
++					// pasted from here.
++					if a.isCut(f) {
++						chip(c, "待移动", t.Warning).Shrink(0)
++					}
++				})
+ 			}
+ 			size := "—"
+ 			if !f.IsDir {
+@@ -294,6 +302,15 @@ func (a *App) statusBar(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 		}
+ 		figure(c, label)
+ 		ui.Spacer(c)
++		// What the file clipboard holds stays in view wherever it will be
++		// pasted: copies in the accent color, cuts in the warning one.
++		if len(a.fileClip.files) > 0 {
++			color := t.Accent
++			if a.fileClip.cut {
++				color = t.Warning
++			}
++			statusDot(c, color, a.clipLabel())
++		}
+ 		if n, speed := a.transferPulse(); n > 0 {
+ 			statusDot(c, t.Accent, itoa(n)+" 个传输")
+ 			statusDot(c, t.Success, humanSpeed(speed))
+@@ -553,8 +570,17 @@ func (a *App) fileMenu(e ui.Element, l *listing, i int) {
+ 		if m.Item("复制到…").Chosen() {
+ 			a.ask(dlgCopy, l.dir, files)
+ 		}
+-		if one && m.Item("复制路径").Chosen() {
+-			a.copy(f.Path, "已复制路径")
++		if m.Item("剪切").Shortcut(ui.Cmd, ui.KeyX).Chosen() {
++			a.putFiles(l.dir, files, true)
++		}
++		if m.Item("复制").Shortcut(ui.Cmd, ui.KeyC).Chosen() {
++			a.putFiles(l.dir, files, false)
++		}
++		if len(a.fileClip.files) > 0 && m.Item("粘贴").Shortcut(ui.Cmd, ui.KeyV).Chosen() {
++			a.pasteFiles(l)
++		}
++		if m.Item("复制路径").Shortcut(ui.Cmd|ui.Shift, ui.KeyC).Chosen() {
++			a.copyPaths(files)
+ 		}
+ 		if one && kindOf(&f) == kindImage && m.Item("复制图片").Chosen() {
+ 			a.copyImage(f, nil)
+diff --git a/app/fileclip.go b/app/fileclip.go
+new file mode 100644
+index 0000000..3949174
+--- /dev/null
++++ b/app/fileclip.go
+@@ -0,0 +1,126 @@
++package app
++
++import (
++	"path"
++	"strings"
++
++	"github.com/pengstem/baidunetgo/internal/baidu"
++)
++
++// fileClipboard is the files cut or copied in the browser, waiting to be
++// pasted into another folder. It lives in memory: a netdisk path means
++// nothing to another application, so the system clipboard is not used.
++// from is the folder the files were taken from, and cut tells whether a
++// paste moves them there rather than copying them. cutSet holds the paths
++// of a cut, so that a row tells in constant time whether it is to move.
++// gen says which putting this is: a paste it started clears the clipboard
++// only while it is still the one the user put there, not one cut
++// meanwhile.
++type fileClipboard struct {
++	files  []baidu.File
++	from   string
++	cut    bool
++	cutSet map[string]bool
++	gen    uint64
++}
++
++// putFiles puts files taken from dir in the file clipboard, cut when they
++// are to be moved. It says so, as the paste may be in a folder far away.
++func (a *App) putFiles(dir string, files []baidu.File, cut bool) {
++	if len(files) == 0 {
++		return
++	}
++	var cutSet map[string]bool
++	if cut {
++		cutSet = make(map[string]bool, len(files))
++		for _, f := range files {
++			cutSet[f.Path] = true
++		}
++	}
++	a.fileClipGen++
++	a.fileClip = fileClipboard{
++		files: append([]baidu.File(nil), files...), from: path.Clean(dir), cut: cut, cutSet: cutSet, gen: a.fileClipGen,
++	}
++	verb := "已复制"
++	if cut {
++		verb = "已剪切"
++	}
++	a.toast(verb+" "+itoa(len(files))+" 项，可在其他文件夹粘贴", "success")
++}
++
++// clipLabel says what the file clipboard holds, as the status bar shows
++// it.
++func (a *App) clipLabel() string {
++	verb := "已复制"
++	if a.fileClip.cut {
++		verb = "已剪切"
++	}
++	return verb + " " + itoa(len(a.fileClip.files)) + " 项，可在其他文件夹粘贴"
++}
++
++// copyPaths puts the netdisk paths of files on the system clipboard, one a
++// line when there are several.
++func (a *App) copyPaths(files []baidu.File) {
++	if len(files) == 0 {
++		return
++	}
++	a.copy(strings.Join(paths(files), "\n"), "已复制路径")
++}
++
++// isCut reports whether f is one of the files cut in the file clipboard,
++// which show a chip saying they are to move: a path lookup, as a folder
++// may hold thousands of rows and thousands of files may be cut.
++func (a *App) isCut(f *baidu.File) bool {
++	return a.fileClip.cut && a.fileClip.cutSet[f.Path]
++}
++
++// selectAllFiles chooses every file of a listing, in the list and in the
++// grid, but the temporary rows: an upload still gathering and the folder
++// being named have no fs_id to act on.
++func (a *App) selectAllFiles(l *listing) {
++	l.sel.Clear()
++	for _, f := range l.files {
++		if f.FsID >= 0 {
++			l.sel.Add(f.FsID)
++		}
++	}
++}
++
++// pasteFiles pastes the file clipboard into the folder showing. A cut is a
++// move and a copy a copy, both through place so that names the folder has
++// already get the same question as a move from the picker: skip, replace
++// or keep both. A folder cannot go into itself or under itself, and cut
++// files cannot be pasted where they already are. The clipboard is cleared
++// only once a cut went through, and only while it is still the clip that
++// was pasted, so a paste that failed, was skipped or was cancelled can be
++// tried again; a copy stays for as many pastes as wanted.
++func (a *App) pasteFiles(l *listing) {
++	fc := &a.fileClip
++	if len(fc.files) == 0 {
++		return
++	}
++	to := path.Clean(l.dir)
++	for _, f := range fc.files {
++		p := path.Clean(f.Path)
++		if f.IsDir && (to == p || strings.HasPrefix(to, p+"/")) {
++			a.toast("不能把「"+f.Name+"」放进它自己里面", "error")
++			return
++		}
++	}
++	if fc.cut && path.Clean(fc.from) == to {
++		a.toast("文件已在当前文件夹", "")
++		return
++	}
++	kind, files, from := dlgCopy, fc.files, fc.from
++	if fc.cut {
++		kind = dlgMove
++	}
++	// A cut clears the clipboard once its move went through, but only if
++	// the user has not cut or copied something else meanwhile.
++	gen := fc.gen
++	a.moveOrCopyAfter(kind, files, from, to, func() {
++		if a.fileClip.gen == gen && a.fileClip.cut {
++			a.fileClip = fileClipboard{}
++		}
++	})
++}
+diff --git a/app/grid.go b/app/grid.go
+index 3e87cb2..a16176e 100644
+--- a/app/grid.go
++++ b/app/grid.go
+@@ -149,11 +149,6 @@ func (a *App) tileGrid(c *ui.Context, l *listing, maker func(e ui.Element), tile
+ 		}
+ 		g.scrollIntoView(to, viewH)
+ 	}
+-	if grid.Shortcut(ui.Cmd, ui.KeyA) {
+-		for _, f := range l.files {
+-			l.sel.Add(f.FsID)
+-		}
+-	}
+ 	if grid.Shortcut(0, ui.KeyEnter) && l.selected >= 0 && l.selected < n {
+ 		// Enter renames the file on macOS, as in Finder, and opens it
+ 		// elsewhere.
+diff --git a/app/ops.go b/app/ops.go
+index 0a6008d..1f83397 100644
+--- a/app/ops.go
++++ b/app/ops.go
+@@ -234,11 +234,29 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyN) {
+ 		a.newFolder(l, l.makerAt)
+ 	}
+-	if c.Shortcut(ui.Cmd, ui.KeyR) {
++	// F5 refreshes as Cmd-R does, for keyboards where it is the habit.
++	if c.Shortcut(ui.Cmd, ui.KeyR) || c.Shortcut(0, ui.KeyF5) {
+ 		a.reload(l.dir)
+ 	}
++	// Cmd-V pastes the files cut or copied in the browser when the file
++	// clipboard holds any; only when it is empty does it open a share link
++	// the system clipboard holds, as it always did.
+ 	if c.Shortcut(ui.Cmd, ui.KeyV) {
+-		a.openClipboardShare(c, false)
++		if len(a.fileClip.files) > 0 {
++			a.pasteFiles(l)
++		} else {
++			a.openClipboardShare(c, false)
++		}
++	}
++	// Cmd-Shift-V opens a share link the system clipboard holds even while
++	// files are cut or copied, which Cmd-V pastes instead.
++	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyV) {
++		if !a.openClipboardShare(c, false) {
++			a.toast("剪贴板里没有分享链接", "")
++		}
++	}
++	if c.Shortcut(ui.Cmd, ui.KeyA) {
++		a.selectAllFiles(l)
+ 	}
+ 	if c.Shortcut(ui.Cmd, ui.Key1) {
+ 		a.gridView = false
+@@ -249,6 +267,18 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	if len(files) == 0 {
+ 		return
+ 	}
++	// The file clipboard moves inside the app, not the system one: a
++	// netdisk path means nothing to another application. Cmd-Shift-C puts
++	// the paths themselves on the system clipboard.
++	if c.Shortcut(ui.Cmd, ui.KeyC) {
++		a.putFiles(l.dir, files, false)
++	}
++	if c.Shortcut(ui.Cmd, ui.KeyX) {
++		a.putFiles(l.dir, files, true)
++	}
++	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyC) {
++		a.copyPaths(files)
++	}
+ 	// Space looks at the file chosen, as Quick Look does; Cmd-Down opens
+ 	// it, a folder too.
+ 	if len(files) == 1 && !files[0].IsDir && c.Shortcut(0, ui.KeySpace) {
+diff --git a/app/picker.go b/app/picker.go
+index 164b500..eb1ed68 100644
+--- a/app/picker.go
++++ b/app/picker.go
+@@ -88,6 +88,13 @@ func (a *App) pickerDialog(c *ui.Context, t *ui.Theme, p *palette) {
+ // moveOrCopy moves or copies files from one folder into another, asking
+ // first what to do with names it has already.
+ func (a *App) moveOrCopy(kind dialogKind, files []baidu.File, from, to string) {
++	a.moveOrCopyAfter(kind, files, from, to, nil)
++}
++
++// moveOrCopyAfter is moveOrCopy, calling after once the netdisk has done
++// it and the folders are reloading. A paste clears a cut's clipboard then,
++// and only then: a skipped, cancelled or failed move keeps it to retry.
++func (a *App) moveOrCopyAfter(kind dialogKind, files []baidu.File, from, to string, after func()) {
+ 	verb := "移动"
+ 	if kind == dlgCopy {
+ 		verb = "复制"
+@@ -124,7 +131,7 @@ func (a *App) moveOrCopy(kind dialogKind, files []baidu.File, from, to string) {
+ 		if len(replaced) > 0 {
+ 			a.recycleDirty = true
+ 		}
+-		a.run(op, []string{from, to}, "已"+verb+"到「"+dirLabel(to)+"」", nil)
++		a.run(op, []string{from, to}, "已"+verb+"到「"+dirLabel(to)+"」", after)
+ 	})
+ }
+ 
+diff --git a/app/session.go b/app/session.go
+index cb433c3..6f906ed 100644
+--- a/app/session.go
++++ b/app/session.go
+@@ -272,5 +272,8 @@ func (a *App) onSignedOut() {
+ 	}
+ 	a.dedup = dedupState{}
+ 	a.shares, a.offline, a.recycle = sharesState{}, offlineState{}, recycleState{}
++	// The file clipboard names one account's paths: another account must
++	// not paste them.
++	a.fileClip = fileClipboard{}
+ 	a.listings = nil
+ }
+diff --git a/app/shortcuts_test.go b/app/shortcuts_test.go
+new file mode 100644
+index 0000000..b969c1c
+--- /dev/null
++++ b/app/shortcuts_test.go
+@@ -0,0 +1,329 @@
++package app
++
++import (
++	"slices"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/baidu"
++	"github.com/pengstem/baidunetgo/internal/fakepan"
++)
++
++// chooseFiles adds the named files of dir to its selection.
++func chooseFiles(t *testing.T, a *App, dir string, names ...string) []baidu.File {
++	t.Helper()
++	l := a.listings[dir]
++	if l == nil {
++		t.Fatalf("no listing of %q", dir)
++	}
++	var out []baidu.File
++	for _, n := range names {
++		f := fileNamed(t, a, dir, n)
++		l.sel.Add(f.FsID)
++		out = append(out, f)
++	}
++	return out
++}
++
++// realFiles counts a listing's files that a shortcut may act on: the
++// temporary rows of uploads and the folder being named have no fs_id.
++func realFiles(l *listing) int {
++	n := 0
++	for _, f := range l.files {
++		if f.FsID >= 0 {
++			n++
++		}
++	}
++	return n
++}
++
++func menuHas(tt *ui.Tester, label string) bool { return slices.Contains(tt.Menu(), label) }
++
++// TestFileClipboardCopyPaste copies files, goes elsewhere and pastes them
++// there: the copies arrive, the originals stay, and the clipboard keeps
++// them for another paste. Cmd-V pastes the file clipboard rather than
++// opening the share link the system clipboard may also hold.
++func TestFileClipboardCopyPaste(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	files := chooseFiles(t, a, "/", "README.md", "安装包.dmg")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyC)
++	tt.Advance(100 * time.Millisecond)
++	if a.fileClip.cut || len(a.fileClip.files) != 2 || a.fileClip.from != "/" {
++		t.Fatalf("clipboard %+v", a.fileClip)
++	}
++	if !tt.HasText("已复制 2 项，可在其他文件夹粘贴") {
++		t.Errorf("no copy toast or status; texts %q", tt.Texts())
++	}
++
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	// A share link in the system clipboard must give way to the files.
++	tt.SetClipboard("链接: https://pan.baidu.com/s/1demo?pwd=abcd 提取码: abcd")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the copies", func() bool {
++		return srv.Exists("/代码/README.md") && srv.Exists("/代码/安装包.dmg")
++	})
++	settle(tt)
++	if a.dlg.kind == dlgSaveLink || a.dlg.open {
++		t.Fatalf("Cmd-V opened the share link instead of pasting: %+v", a.dlg)
++	}
++	if !srv.Exists("/README.md") || !srv.Exists("/安装包.dmg") {
++		t.Error("copying moved the originals")
++	}
++	if a.fileClip.cut || len(a.fileClip.files) != len(files) {
++		t.Errorf("clipboard after copying %+v", a.fileClip)
++	}
++	if !tt.HasText("已复制 2 项，可在其他文件夹粘贴") {
++		t.Errorf("the status bar lost the copy: %q", tt.Texts())
++	}
++	// The row menu offers pasting while the file clipboard holds any, and
++	// cutting and copying always.
++	rightClickRow(t, tt, "README.md")
++	tt.Advance(100 * time.Millisecond)
++	for _, want := range []string{"剪切", "复制", "粘贴", "复制路径"} {
++		if !menuHas(tt, want) {
++			t.Errorf("menu has no %q: %q", want, tt.Menu())
++		}
++	}
++	tt.CloseMenu()
++	tt.Advance(100 * time.Millisecond)
++}
++
++// TestFileClipboardCutPaste cuts files and pastes them elsewhere: they
++// leave the folder they came from, arrive in the other, and the clipboard
++// empties so that a second paste does nothing.
++func TestFileClipboardCutPaste(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "安装包.dmg")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	if !a.fileClip.cut || len(a.fileClip.files) != 1 {
++		t.Fatalf("clipboard %+v", a.fileClip)
++	}
++	if !tt.HasText("已剪切 1 项，可在其他文件夹粘贴") {
++		t.Errorf("no cut toast or status; texts %q", tt.Texts())
++	}
++	// The file to move says so beside its name.
++	if !tt.HasText("待移动") {
++		t.Errorf("no chip on the cut file: %q", tt.Texts())
++	}
++
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the move", func() bool {
++		return !srv.Exists("/安装包.dmg") && srv.Exists("/代码/安装包.dmg")
++	})
++	settle(tt)
++	if len(a.fileClip.files) != 0 || a.fileClip.cut {
++		t.Errorf("the clipboard did not empty after a cut: %+v", a.fileClip)
++	}
++	if tt.HasText("待移动") {
++		t.Errorf("the chip outlived the clip: %q", tt.Texts())
++	}
++	// A second Cmd-V has no files to paste and falls back to the system
++	// clipboard, which holds no link here.
++	tt.Key(ui.Cmd, ui.KeyV)
++	settle(tt)
++	if a.dlg.open {
++		t.Errorf("a second paste acted: %+v", a.dlg)
++	}
++}
++
++// TestFileClipboardSelectAll: Cmd-A chooses every file, in the list and in
++// the grid, and Escape lets them go.
++func TestFileClipboardSelectAll(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	l := a.listings["/"]
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyA)
++	tt.Advance(100 * time.Millisecond)
++	if want := realFiles(l); l.sel.Len() != want || want == 0 {
++		t.Fatalf("Cmd-A chose %d of %d files", l.sel.Len(), want)
++	}
++	for id := range l.sel.All() {
++		if id < 0 {
++			t.Errorf("Cmd-A chose the temporary row %d", id)
++		}
++	}
++	tt.Key(0, ui.KeyEscape)
++	tt.Advance(100 * time.Millisecond)
++	if l.sel.Len() != 0 {
++		t.Errorf("Escape kept %d chosen", l.sel.Len())
++	}
++
++	a.gridView = true
++	tt.Advance(200 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyA)
++	tt.Advance(100 * time.Millisecond)
++	if want := realFiles(l); l.sel.Len() != want {
++		t.Errorf("Cmd-A in the grid chose %d of %d files", l.sel.Len(), want)
++	}
++}
++
++// TestFileClipboardCopyPath: Cmd-Shift-C puts the netdisk paths on the
++// system clipboard, one a line for several files.
++func TestFileClipboardCopyPath(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	chooseFiles(t, a, "/", "README.md", "安装包.dmg")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd|ui.Shift, ui.KeyC)
++	tt.Advance(100 * time.Millisecond)
++	got := tt.Clipboard()
++	lines := strings.Split(got, "\n")
++	if len(lines) != 2 || !slices.Contains(lines, "/README.md") || !slices.Contains(lines, "/安装包.dmg") {
++		t.Errorf("clipboard %q", got)
++	}
++	if !tt.HasText("已复制路径") {
++		t.Errorf("no toast: %q", tt.Texts())
++	}
++	if a.fileClip.files != nil {
++		t.Error("Cmd-Shift-C touched the file clipboard")
++	}
++}
++
++// TestFileClipboardCutInPlace: cutting and pasting in the folder the files
++// are already in moves nothing and says so, keeping the clipboard to paste
++// elsewhere.
++func TestFileClipboardCutInPlace(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	// Even with a share link in the system clipboard, the file clipboard
++	// takes Cmd-V.
++	tt.SetClipboard("链接: https://pan.baidu.com/s/1demo?pwd=abcd 提取码: abcd")
++	tt.Key(ui.Cmd, ui.KeyV)
++	settle(tt)
++	if !tt.HasText("文件已在当前文件夹") {
++		t.Errorf("no word about the same folder: %q", tt.Texts())
++	}
++	if a.dlg.open || a.dlg.kind == dlgSaveLink {
++		t.Errorf("the paste did something: %+v", a.dlg)
++	}
++	if !srv.Exists("/README.md") || srv.Exists("/README (1).md") {
++		t.Error("the files moved or were copied beside themselves")
++	}
++	if !a.fileClip.cut || len(a.fileClip.files) != 1 {
++		t.Errorf("the clipboard did not keep the cut: %+v", a.fileClip)
++	}
++}
++
++// TestFileClipboardFolderIntoItself: a cut folder cannot be pasted into
++// itself or a folder under it, which would lose it.
++func TestFileClipboardFolderIntoItself(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "代码")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码/备份"))
++	waitFor(t, tt, "读我（副本）.txt")
++	tt.Key(ui.Cmd, ui.KeyV)
++	settle(tt)
++	if !tt.HasText("不能把「代码」放进它自己里面") {
++		t.Errorf("no refusal: %q", tt.Texts())
++	}
++	if !srv.Exists("/代码/main.go") || srv.Exists("/代码/备份/代码") {
++		t.Error("the folder moved into its own subtree")
++	}
++	if !a.fileClip.cut || len(a.fileClip.files) != 1 {
++		t.Errorf("the clipboard did not keep the cut: %+v", a.fileClip)
++	}
++}
++
++// TestFileClipboardConflict: pasting onto a name the folder has asks the
++// same question a move from the picker does; keeping both gives the copy a
++// free name.
++func TestFileClipboardConflict(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	srv.Add(fakepan.Node{Path: "/代码/README.md", Data: []byte("旧的")})
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyC)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the question", func() bool { return a.dlg.open && a.dlg.kind == dlgConflict })
++	tt.Advance(200 * time.Millisecond)
++	if err := tt.Click("保留两者"); err != nil {
++		t.Fatal(err)
++	}
++	waitUntil(t, tt, "the copy beside its name", func() bool { return srv.Exists("/代码/README (1).md") })
++	settle(tt)
++	if a.dlg.open {
++		t.Errorf("the dialog stayed open: %q", a.dlg.err)
++	}
++	if string(srv.Data("/代码/README.md")) != "旧的" {
++		t.Error("keeping both changed the file there")
++	}
++	if a.fileClip.cut || len(a.fileClip.files) != 1 {
++		t.Errorf("the clipboard changed after a copy: %+v", a.fileClip)
++	}
++}
++
++// TestShortcutRefreshAlias: F5 reads the folder again as Cmd-R does.
++func TestShortcutRefreshAlias(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	srv.Add(fakepan.Node{Path: "/刷新出来的.txt", Data: []byte("hi")})
++	if tt.HasText("刷新出来的.txt") {
++		t.Fatal("the file showed before the refresh")
++	}
++	tt.Key(0, ui.KeyF5)
++	waitFor(t, tt, "刷新出来的.txt")
++	if a.listings["/"].loaded != true {
++		t.Error("the listing was not read")
++	}
++}
++
++// TestFileClipboardShareKey: Cmd-Shift-V opens a share link in the system
++// clipboard even while files are cut or copied, which Cmd-V would paste
++// instead.
++func TestFileClipboardShareKey(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyC)
++	tt.Advance(100 * time.Millisecond)
++	tt.SetClipboard("链接: https://pan.baidu.com/s/1demo?pwd=abcd 提取码: abcd")
++	tt.Key(ui.Cmd|ui.Shift, ui.KeyV)
++	waitFor(t, tt, "旅行的猫 的分享")
++	if len(a.fileClip.files) != 1 {
++		t.Errorf("Cmd-Shift-V touched the file clipboard: %+v", a.fileClip)
++	}
++}
++
++// TestFileClipboardStaleCut: a cut starting while an older cut is still
++// moving keeps its place; the older paste must not clear it when it ends.
++func TestFileClipboardStaleCut(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	srv.Add(fakepan.Node{Path: "/代码/README.md", Data: []byte("旧的")})
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	older := a.fileClip.gen
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the question", func() bool { return a.dlg.open && a.dlg.kind == dlgConflict })
++	// Another cut lands while the first paste waits to be answered.
++	a.putFiles("/", []baidu.File{fileNamed(t, a, "/", "安装包.dmg")}, true)
++	if err := tt.Click("保留两者"); err != nil {
++		t.Fatal(err)
++	}
++	waitUntil(t, tt, "the first move", func() bool {
++		return srv.Exists("/代码/README (1).md") && !srv.Exists("/README.md")
++	})
++	settle(tt)
++	if a.fileClip.gen == older || len(a.fileClip.files) != 1 || a.fileClip.files[0].Name != "安装包.dmg" {
++		t.Errorf("the older paste cleared the newer clip: %+v", a.fileClip)
++	}
++}

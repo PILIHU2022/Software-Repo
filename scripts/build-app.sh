@@ -10,9 +10,12 @@
 # screentime and fcitx5). The list is not hard-coded here.
 #
 # Environment:
-#   PATCHWORK_REVISION        patch revision appended after the upstream
+#   PATCHWORK_REVISION        revision appended after the upstream
 #                             versionCode * 100 (default: number of commits
-#                             that touched apps/<app>/patches, max 99)
+#                             that touched apps/<app>, max 99)
+#   KEEP_ABIS                 space-separated ABIs to keep in the APK (set by
+#                             apps/<app>/app.conf; the others are stripped and
+#                             the APK is re-aligned and re-signed)
 #   PATCHWORK_KEYSTORE_FILE   signing keystore (default: signing/patchwork-test.jks)
 #   PATCHWORK_STORE_PASSWORD  keystore password (default: patchwork123)
 #   PATCHWORK_KEY_ALIAS       key alias (default: patchwork)
@@ -114,19 +117,24 @@ for var in APP_ID PROJECT_NAME UPSTREAM_URL UPSTREAM_BRANCH PACKAGE \
     [[ -n "${!var:-}" ]] || die "app config $CONF does not set $var"
 done
 
-# The revision suffix keeps patch-only releases installable: every commit that
-# touches this app's patch queue bumps the effective versionCode by one, even
-# when the upstream version itself did not change. Callers can still pin an
-# exact revision with PATCHWORK_REVISION=…
+# Filled in after the build when app.conf sets KEEP_ABIS; print_result and
+# build-info read it, so it must exist even on --no-build runs.
+KEPT_ABIS=()
+
+# The revision suffix keeps downstream releases installable: every commit that
+# touches this app's directory (its patch queue, its app.conf, a build policy
+# such as KEEP_ABIS) bumps the effective versionCode by one, even when the
+# upstream version itself did not change. Callers can still pin an exact
+# revision with PATCHWORK_REVISION=…
 if [[ -z "${PATCHWORK_REVISION:-}" ]]; then
-    PATCHWORK_REVISION="$(git -C "$ROOT" rev-list --count HEAD -- "apps/$APP/patches" 2>/dev/null || true)"
+    PATCHWORK_REVISION="$(git -C "$ROOT" rev-list --count HEAD -- "apps/$APP" 2>/dev/null || true)"
     [[ -n "$PATCHWORK_REVISION" ]] || PATCHWORK_REVISION=0
-    echo "==> PATCHWORK_REVISION not set; using patch-queue commit count: $PATCHWORK_REVISION"
+    echo "==> PATCHWORK_REVISION not set; using apps/$APP commit count: $PATCHWORK_REVISION"
 fi
 [[ "$PATCHWORK_REVISION" =~ ^[0-9]+$ ]] \
     || die "PATCHWORK_REVISION must be a non-negative integer, got '$PATCHWORK_REVISION'"
 if (( 10#$PATCHWORK_REVISION > 99 )); then
-    die "PATCHWORK_REVISION=$PATCHWORK_REVISION exceeds the maximum of 99 (versionCode = upstream_code * 100 + revision, so larger revisions would collide with the next upstream release). Squash patch-queue commits or set PATCHWORK_REVISION explicitly."
+    die "PATCHWORK_REVISION=$PATCHWORK_REVISION exceeds the maximum of 99 (versionCode = upstream_code * 100 + revision, so larger revisions would collide with the next upstream release). Squash downstream commits or set PATCHWORK_REVISION explicitly."
 fi
 
 mkdir -p "$OUT"
@@ -553,6 +561,9 @@ print_result() {
     echo "PATCHWORK_RESULT_upstream_commit=$UPSTREAM_SHA"
     echo "PATCHWORK_RESULT_upstream_fallback=$FALLBACK_USED"
     echo "PATCHWORK_RESULT_patch_count=${#PATCHES[@]}"
+    if (( ${#KEPT_ABIS[@]} > 0 )); then
+        echo "PATCHWORK_RESULT_abis=$(IFS=,; printf '%s' "${KEPT_ABIS[*]}")"
+    fi
     echo "PATCHWORK_RESULT_version_code=$NEW_CODE"
     echo "PATCHWORK_RESULT_version_name=$NEW_NAME"
     echo "PATCHWORK_RESULT_worktree=$WORK"
@@ -627,19 +638,6 @@ chmod +x "$WORK/gradlew"
 )
 
 APK_DIR="$WORK/$APK_SUBDIR"
-# Apps that build per-ABI split APKs (no universal APK) select the one ABI this
-# run built, so a stray APK from another ABI is never picked up.
-APK_FIND_NAME='*.apk'
-if [[ -n "${BUILD_ABI:-}" ]]; then
-    APK_FIND_NAME="*-${BUILD_ABI}-release.apk"
-fi
-mapfile -t APKS < <(find "$APK_DIR" -maxdepth 1 -type f -name "$APK_FIND_NAME" ! -name '*-unsigned.apk' | LC_ALL=C sort)
-[[ ${#APKS[@]} -gt 0 ]] || die "build succeeded but no APK was found in $APK_SUBDIR (filter: $APK_FIND_NAME)"
-APK_PATH="${APKS[0]}"
-
-DEST="$OUT/${APK_NAME_PREFIX}-${NEW_NAME}${APK_NAME_SUFFIX:+-$APK_NAME_SUFFIX}.apk"
-cp "$APK_PATH" "$DEST"
-echo "==> APK: $DEST"
 
 find_build_tool() {
     local tool="$1" candidate
@@ -659,6 +657,79 @@ find_build_tool() {
 
 APKSIGNER="$(find_build_tool apksigner)" || die "apksigner not found (set ANDROID_HOME)"
 AAPT="$(find_build_tool aapt)" || die "aapt not found (set ANDROID_HOME)"
+
+# Apps that build per-ABI split APKs (no universal APK) select the one ABI this
+# run built, so a stray APK from another ABI is never picked up.
+APK_FIND_NAME='*.apk'
+if [[ -n "${BUILD_ABI:-}" ]]; then
+    APK_FIND_NAME="*-${BUILD_ABI}-release.apk"
+fi
+mapfile -t APKS < <(find "$APK_DIR" -maxdepth 1 -type f -name "$APK_FIND_NAME" ! -name '*-unsigned.apk' | LC_ALL=C sort)
+[[ ${#APKS[@]} -gt 0 ]] || die "build succeeded but no APK was found in $APK_SUBDIR (filter: $APK_FIND_NAME)"
+APK_PATH="${APKS[0]}"
+
+DEST="$OUT/${APK_NAME_PREFIX}-${NEW_NAME}${APK_NAME_SUFFIX:+-$APK_NAME_SUFFIX}.apk"
+cp "$APK_PATH" "$DEST"
+echo "==> APK: $DEST"
+
+# --- ARM ABI policy --------------------------------------------------------
+# Expenses and ScreenTime package prebuilt native libraries for four ABIs. When
+# apps/<app>/app.conf sets KEEP_ABIS (arm64-v8a armeabi-v7a), strip
+# the other lib/<abi>/ trees and then re-align and re-sign the APK: removing
+# entries invalidates the Gradle signature. The package name and versionCode are
+# untouched, so the versionCode bump that ships the ARM-only binary comes from
+# the apps/<app> commit count above.
+if [[ -n "${KEEP_ABIS:-}" ]]; then
+    read -r -a WANTED_ABIS <<<"$KEEP_ABIS"
+    mapfile -t APK_ABIS < <(unzip -Z1 "$DEST" 2>/dev/null | sed -n 's#^lib/\([^/]*\)/.*#\1#p' | LC_ALL=C sort -u)
+    if (( ${#APK_ABIS[@]} == 0 )); then
+        echo "WARNING: KEEP_ABIS='$KEEP_ABIS' is set but $APP has no lib/<abi>/ entries; nothing to strip" >&2
+    else
+        remove=()
+        for abi in "${APK_ABIS[@]}"; do
+            keep=0
+            for wanted in "${WANTED_ABIS[@]}"; do
+                [[ "$abi" == "$wanted" ]] && keep=1
+            done
+            if (( keep == 1 )); then
+                KEPT_ABIS+=("$abi")
+            else
+                remove+=("lib/$abi/*")
+            fi
+        done
+        if (( ${#remove[@]} > 0 )); then
+            command -v zip >/dev/null 2>&1 \
+                || die "zip is required to strip non-ARM ABIs from $(basename "$DEST")"
+            echo "==> Stripping non-ARM ABIs: ${remove[*]}"
+            zip -q -d "$DEST" "${remove[@]}"
+            # Realign the remaining uncompressed .so files to 16 KB pages (what
+            # AGP 8.5+ and Android 15 expect) and sign v2/v3 only: minSdk is
+            # above 24, so a v1 JAR signature would just add ~270 KB.
+            ZIPALIGN="$(find_build_tool zipalign)" || die "zipalign not found (set ANDROID_HOME)"
+            align_tmp="$(mktemp "$OUT/.apk-align.XXXXXX")"
+            sign_tmp="$(mktemp "$OUT/.apk-sign.XXXXXX")"
+            "$ZIPALIGN" -f -P 16 4 "$DEST" "$align_tmp"
+            "$APKSIGNER" sign \
+                --ks "$KEYSTORE" --ks-pass "pass:$STORE_PASSWORD" \
+                --key-pass "pass:$KEY_PASSWORD" --ks-key-alias "$KEY_ALIAS" \
+                --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
+                --out "$sign_tmp" "$align_tmp"
+            mv -f "$sign_tmp" "$DEST"
+            rm -f "$align_tmp"
+            echo "==> Re-signed $(basename "$DEST") after stripping"
+            mapfile -t REMAINING_ABIS < <(unzip -Z1 "$DEST" | sed -n 's#^lib/\([^/]*\)/.*#\1#p' | LC_ALL=C sort -u)
+            for abi in "${REMAINING_ABIS[@]}"; do
+                keep=0
+                for wanted in "${WANTED_ABIS[@]}"; do
+                    [[ "$abi" == "$wanted" ]] && keep=1
+                done
+                (( keep == 1 )) || die "APK still contains non-ARM lib/$abi/ after stripping"
+            done
+            "$ZIPALIGN" -c -P 16 4 "$DEST" || die "APK is not 16 KB aligned after re-signing"
+            "$APKSIGNER" verify "$DEST" || die "APK signature is invalid after re-signing"
+        fi
+    fi
+fi
 
 echo "==> Verifying APK signature"
 "$APKSIGNER" verify --print-certs "$DEST"
@@ -697,9 +768,13 @@ apk_size=$APK_SIZE
 sha256=$SHA256
 INFO
 # Only per-ABI builds carry an abi= line; the Gradle-only apps keep their
-# historical build-info.txt exactly as before.
+# historical build-info.txt exactly as before. Apps with KEEP_ABIS record the
+# ABIs their APK actually ships (for expenses/screentime: ARM only).
 if [[ -n "${BUILD_ABI:-}" ]]; then
     printf 'abi=%s\n' "$BUILD_ABI" >>"$OUT/build-info.txt"
+fi
+if (( ${#KEPT_ABIS[@]} > 0 )); then
+    printf 'abis=%s\n' "$(IFS=,; printf '%s' "${KEPT_ABIS[*]}")" >>"$OUT/build-info.txt"
 fi
 
 echo "==> Build info"

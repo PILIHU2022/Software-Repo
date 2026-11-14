@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 16:39:35 +0800
+Subject: [PATCH] Offer the step Cmd-Z would undo in the file's context menu,
+ so a mistaken move or copy is one click away as well as one keystroke
+
+---
+ CHANGELOG.md     |  1 +
+ README.md        |  1 +
+ app/browser.go   |  7 ++++++-
+ app/undo.go      |  8 ++++++++
+ app/undo_test.go | 28 ++++++++++++++++++++++++++++
+ 5 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1eff867..d0adab9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -9,6 +9,7 @@
+ - 文件操作撤销：`Cmd+Z`（macOS 为 ⌘Z、其它平台为 Ctrl+Z）撤销上一步文件操作——移动（含剪切粘贴、拖拽移动）把文件移回原处和原名，复制删除这次复制出的副本，重命名改回原名，新建文件夹移入回收站，删除到回收站则从回收站还原，回收站的还原会再次删除；替换过的同名文件在撤销时一并恢复。撤销栈只在内存里、按会话保留（最多 50 步，重启不保留、注销清空），只撤最后一步；撤销失败（如原处已有同名项目）会报错并保留该步以便重试，上传完成与清空回收站 / 彻底删除不记入撤销。
+ - 界面字体族与字号新增「跟随本机 fontconfig」：默认读取 `fc-match sans-serif` 解析出的字体（字号按 1pt ≈ 4/3 DIP 换算并限幅 11–17），可在设置页「外观」里关闭改用内置字体；`BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖，没有 fontconfig 时静默回落。
+ - 查重结果行新增右键菜单：打开预览（同一重复组的图片可在预览里用左右键翻页）、在文件夹中显示、复制路径。
++- 撤销：Cmd+Z（其它平台 Ctrl+Z）撤销上一步文件操作——移动 / 复制 / 重命名 / 新建文件夹 / 删除到回收站 / 回收站还原——按记录的反向操作在网盘上执行；撤销失败会保留该步以便重试，上传与清空回收站等不可逆操作不记录；右键菜单也会显示下一步可撤销的操作。
+ - 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。删除前会重新读取所在目录，核对 fs_id、大小和 MD5，并确保每组仍留有一份，过期或被替换的文件不会误删。
+ - 文件浏览器新增剪切 / 复制 / 粘贴（Cmd+X / Cmd+C / Cmd+V）：文件剪贴板只在应用内，跨文件夹移动或复制沿用“复制到…”的同名冲突处理（跳过 / 替换 / 保留两者）；剪切成功后才清空剪贴板，失败、取消或全部跳过时保留可重试，复制则可连续粘贴；剪切到原文件夹、把文件夹粘进自身或子目录会被拒绝，注销时清空。另有 Cmd+A 全选、Cmd+Shift+C 复制网盘路径、Cmd+Shift+V 始终打开系统剪贴板里的分享链接（Cmd+V 在文件剪贴板为空时才这么做）、F5 刷新；右键菜单与状态栏显示剪贴板状态，被剪切的行标出“待移动”，README 增补了快捷键说明。
+ - 列表与网格视图按住左键拖动时显示选择框（弹力框）：从按下点拉到指针位置，半透明强调色填充加 1 像素边框、圆角，列表行仍由原有拖选选择，网格会选中与矩形相交的瓦片；预览、对话框、重命名 / 新建文件夹输入中以及把外部文件拖进窗口时不显示。
+diff --git a/README.md b/README.md
+index e1aedaa..ab81ed1 100644
+--- a/README.md
++++ b/README.md
+@@ -57,6 +57,7 @@ macOS 上是 ⌘（Command），其它平台上是 Ctrl；下表写作 Cmd。
+ | `Cmd+V` | 粘贴文件剪贴板；它为空时改为打开系统剪贴板里的分享链接 |
+ | `Cmd+Shift+V` | 始终打开系统剪贴板里的分享链接 |
+ | `Cmd+Shift+C` | 复制选中文件的网盘路径，多个文件一行一个 |
++| `Cmd+Z` | 撤销上一步文件操作（移动 / 复制 / 重命名 / 新建文件夹 / 删除），右键菜单也会显示它 |
+ | 右键 | 文件行的右键菜单；查重结果行上可打开预览、在文件夹中显示、复制路径 |
+ 
+ 剪切 / 复制 / 粘贴的规则：
+diff --git a/app/browser.go b/app/browser.go
+index 99d32c7..bbc9001 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -1041,7 +1041,12 @@ func (a *App) fileMenu(e ui.Element, l *listing, i int) {
+ 				a.playInMPV(f)
+ 			}
+ 		}
+-		m.Separator()
++		if label, ok := a.nextUndo(); ok {
++			if m.Item("撤销"+label).Shortcut(ui.Cmd, ui.KeyZ).Chosen() {
++				a.undoLast()
++			}
++			m.Separator()
++		}
+ 		if m.Item("下载").Chosen() {
+ 			a.download(files)
+ 		}
+diff --git a/app/undo.go b/app/undo.go
+index 3f3aad2..28ffe2f 100644
+--- a/app/undo.go
++++ b/app/undo.go
+@@ -53,6 +53,14 @@ func (a *App) dropUndo(e *undoEntry) bool {
+ 	return false
+ }
+ 
++// nextUndo says what the next Cmd-Z would undo, if there is a step.
++func (a *App) nextUndo() (string, bool) {
++	if n := len(a.undoStack); n > 0 && !a.undoBusy {
++		return a.undoStack[n-1].label, true
++	}
++	return "", false
++}
++
+ // undoLast undoes the last step: it runs the reverse operation on a
+ // goroutine and, on the UI thread, pops the entry, counts the change,
+ // reads the folders again, runs after and says so. A failed reverse keeps
+diff --git a/app/undo_test.go b/app/undo_test.go
+index 8825797..417445f 100644
+--- a/app/undo_test.go
++++ b/app/undo_test.go
+@@ -323,3 +323,31 @@ func TestUndoChain(t *testing.T) {
+ 		t.Errorf("stack holds %d after the chain, want 0", len(a.undoStack))
+ 	}
+ }
++
++// TestUndoMenu: the file menu offers the step Cmd-Z would undo, labelled
++// with what it did, and only while there is one.
++func TestUndoMenu(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	rightClickRow(t, tt, "README.md")
++	tt.Advance(100 * time.Millisecond)
++	for _, item := range tt.Menu() {
++		if len(item) >= 3 && item[:3] == "撤销 " {
++			t.Fatalf("menu offers %q with nothing to undo", item)
++		}
++	}
++	tt.CloseMenu()
++	a.pushUndo(&undoEntry{label: "测试"})
++	tt.Advance(50 * time.Millisecond)
++	rightClickRow(t, tt, "README.md")
++	tt.Advance(100 * time.Millisecond)
++	found := false
++	for _, item := range tt.Menu() {
++		if item == "撤销测试" {
++			found = true
++		}
++	}
++	if !found {
++		t.Errorf("menu lacks the undo step: %q", tt.Menu())
++	}
++	tt.CloseMenu()
++}

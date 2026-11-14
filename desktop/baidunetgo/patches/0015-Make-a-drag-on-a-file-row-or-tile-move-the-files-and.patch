@@ -1,0 +1,1261 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 16:03:21 +0800
+Subject: [PATCH] Make a drag on a file row or tile move the files and a
+ blank-space drag choose what its box crosses, since MyGo's DragSelect only
+ chose rows pressed on and dragged files were wrongly multi-selected.
+
+---
+ AGENTS.md            |   2 +-
+ CHANGELOG.md         |   2 +
+ CLAUDE.md            |   2 +-
+ README.md            |   2 +-
+ app/app_test.go      |  27 ++-
+ app/browser.go       | 510 ++++++++++++++++++++++++++++++++++---------
+ app/dragmove_test.go | 268 +++++++++++++++++++++++
+ app/files.go         |  60 +++--
+ app/grid.go          |   4 -
+ app/marquee_test.go  | 101 +++++----
+ 10 files changed, 791 insertions(+), 187 deletions(-)
+ create mode 100644 app/dragmove_test.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 6dd4e2e..944c51f 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -95,4 +95,4 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+ - Sidebar icons are drawn in code (`app/navicons.go`) so their parts can move; `navGlyph` takes the time into the gesture. A page's icon plays once when the page opens (`a.navRun`).
+-- The browser's rubber-band selection (`marquee` in `app/browser.go`): pressing the primary button in the list or grid and dragging paints a rounded rectangle from the press point to the pointer with `page.DrawOver` — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke — clipped to the list's or grid's viewport (`l.dragArea`). The press comes from the page's `ObserveInput`, so a drag begun in a row's blank space counts too and the box ends on the release; the list's rows are still chosen by MyGo's `ListState.DragSelecting` (`DragSelect`), which the rectangle only mirrors, while the grid chooses the tiles whose `gridSpot.rect` the rectangle intersects. It is hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
++- The browser's pointer gestures (`marquee` and the move drag in `app/browser.go`): the page's `ObserveInput` (the capture phase) sees every pointer press, move and release in it, in window coordinates (`page.PointerPosition` plus the page's box). A press on a row or a grid tile — `l.rowRects`, filled each frame with each list row's `Bounds`, and `gridSpot.rect` — begins a move drag once the pointer goes `marqueeSlop` DIPs: it drags the whole choice when the pressed item is one of it, else it chooses just that item and drags it (a plain click still chooses by MyGo's `ListState`). While dragging, `page.DrawOver` paints a translucent card that follows the pointer (icon + name, or "N 项") and lights the folder under it (`l.moveTarget`/`l.moveTargetRect`: a folder row, a folder tile, or a breadcrumb from `l.crumbRects`); the release moves the files with `moveOrCopyAfter`, refusing the same folder, the folder itself and its own subfolders, and asking `place` about clashing names, while a release on blank space or off the window cancels. A press on the list's or grid's blank space instead paints the rubber band — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke, rounded, clipped to `l.dragArea` — and chooses the rows (`l.rowRects`) or tiles (`gridSpot.rect`) it intersects, replacing the choice or, with Cmd held at the press, adding to it (`l.dragBase`); MyGo's `ListState.DragSelect` is off. A release over the title bar is not under the page, so `filesToolbar`'s own `ObserveInput` ends a drag dropped on a breadcrumb or let go over the tools, and a canceled or fresh press clears any leftover state. Both gestures are hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 9f12605..3f105fb 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,11 +14,13 @@
+ 
+ ### 改进
+ 
++- 新增「拖动即移动」：在列表或网格中按住文件 / 文件夹拖动并放到另一个文件夹行、文件夹瓦片或面包屑上即可移动过去，拖动时跟随指针显示半透明卡片（多项显示「N 项」），可投放的目标会高亮；拖到空白处或窗口外取消，同名交给冲突对话框，拖进自身或其子目录会被拒绝。左键拖动项目不再多选。
+ - 文件夹页的路径栏新增一条工具栏，把新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传放在路径与搜索之后；窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏。列表底部不再重复新建文件夹与上传两个按钮，拖拽时整行提示投放位置、不拖拽时不占高度；网格最后一格改为整块「新建」磁贴，点击即新建文件夹；空文件夹保留「这里还空着」并只给一个专属的上传入口，避免与工具栏按钮同名；新建文件夹的飞入动画改从工具栏按钮出发。
+ - 查重结果会缓存到用户数据目录（`dedup.json`，默认 7 天内有效）：网盘文件没有变动时，再次进入查重页立即显示上次结果，不再整盘重扫；删除、移动 / 复制、重命名、新建文件夹、还原或清空回收站、上传完成、离线下载完成等改动会记一次变更，使缓存失效并在进入页面时自动重扫；扫描期间有改动则不写缓存，并在页头提示重新扫描。
+ 
+ ### 修复
+ 
++- 修复选择框只能看不能选：从列表或网格空白处拖出的框现在会真正选中与矩形相交的行（此前依赖 MyGo 的 DragSelect，只在按下落在行上时才选，空白起框选不中任何行）与瓦片；默认替换选择，按住 ⌘ 拖框则追加。
+ - 不再在窗口获得焦点或登录时自动读取剪贴板，避免剪贴板所有者无响应时 GTK 的同步读取卡住主线程；分享链接改由文件工具栏的链接按钮或 Cmd-V 显式读取。
+ - 上传大量小文件时，合并同一目录的完成刷新（约 500 毫秒内一次）与后台完成通知（2 秒内合成一条），并停止空闲时每秒重绘图表和失焦窗口的定时目录刷新，减少界面无响应。
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index caebef3..991c09b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -96,4 +96,4 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+ - Sidebar icons are drawn in code (`app/navicons.go`) so their parts can move; `navGlyph` takes the time into the gesture. A page's icon plays once when the page opens (`a.navRun`).
+-- The browser's rubber-band selection (`marquee` in `app/browser.go`): pressing the primary button in the list or grid and dragging paints a rounded rectangle from the press point to the pointer with `page.DrawOver` — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke — clipped to the list's or grid's viewport (`l.dragArea`). The press comes from the page's `ObserveInput`, so a drag begun in a row's blank space counts too and the box ends on the release; the list's rows are still chosen by MyGo's `ListState.DragSelecting` (`DragSelect`), which the rectangle only mirrors, while the grid chooses the tiles whose `gridSpot.rect` the rectangle intersects. It is hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
++- The browser's pointer gestures (`marquee` and the move drag in `app/browser.go`): the page's `ObserveInput` (the capture phase) sees every pointer press, move and release in it, in window coordinates (`page.PointerPosition` plus the page's box). A press on a row or a grid tile — `l.rowRects`, filled each frame with each list row's `Bounds`, and `gridSpot.rect` — begins a move drag once the pointer goes `marqueeSlop` DIPs: it drags the whole choice when the pressed item is one of it, else it chooses just that item and drags it (a plain click still chooses by MyGo's `ListState`). While dragging, `page.DrawOver` paints a translucent card that follows the pointer (icon + name, or "N 项") and lights the folder under it (`l.moveTarget`/`l.moveTargetRect`: a folder row, a folder tile, or a breadcrumb from `l.crumbRects`); the release moves the files with `moveOrCopyAfter`, refusing the same folder, the folder itself and its own subfolders, and asking `place` about clashing names, while a release on blank space or off the window cancels. A press on the list's or grid's blank space instead paints the rubber band — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke, rounded, clipped to `l.dragArea` — and chooses the rows (`l.rowRects`) or tiles (`gridSpot.rect`) it intersects, replacing the choice or, with Cmd held at the press, adding to it (`l.dragBase`); MyGo's `ListState.DragSelect` is off. A release over the title bar is not under the page, so `filesToolbar`'s own `ObserveInput` ends a drag dropped on a breadcrumb or let go over the tools, and a canceled or fresh press clears any leftover state. Both gestures are hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
+diff --git a/README.md b/README.md
+index a1d65bf..09e4617 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,7 @@
+ ## 特性
+ 
+ - **登录**：百度网盘 App 扫码，或粘贴 Cookie / BDUSS+STOKEN；也能直接沿用本机百度网盘 Linux 客户端或 BaiduPCS-Go 的登录。凭据用 AES-GCM 加密保存，密钥放在系统钥匙串
+-- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；按住左键拖动时显示选择框（弹力框）；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；路径栏右侧是一条工具栏，放着新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传，窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏再把上层文件夹收进「…」
++- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；从列表或网格的空白处按住左键拖动会显示选择框（弹力框）并选中框住的行 / 瓦片（按住 ⌘ 追加选择）；拖动文件或文件夹则是移动它们（按下即选中被拖的项目，已在选择中的则整批拖动），拖动时显示跟随指针的半透明卡片，悬停在文件夹行、网格文件夹瓦片或面包屑上会高亮，松开即移动过去，松开在空白处或窗口外取消；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；路径栏右侧是一条工具栏，放着新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传，窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏再把上层文件夹收进「…」
+ - **不落盘预览**：文件只读进内存
+   - 图片：支持 SVG 矢量和 GIF 动画，从缩略图"长"出来的共享元素动画，滚轮缩放、拖拽平移、←/→ 切换；可复制图片（按 EXIF 方向摆正，SVG 转 PNG，GIF 取首帧）
+   - 文本与代码（语法高亮，UTF-8 / GB18030 自动识别）、Markdown 渲染，可一键复制全文
+diff --git a/app/app_test.go b/app/app_test.go
+index 7b66ad3..656deaf 100644
+--- a/app/app_test.go
++++ b/app/app_test.go
+@@ -127,23 +127,32 @@ func TestSortByHeader(t *testing.T) {
+ 	}
+ }
+ 
+-// TestDragSelect drags over the rows, which chooses them, then
+-// right-clicks a row not chosen, which chooses it alone before its menu
+-// opens, so the menu acts on it.
++// TestDragSelect drags a row, which begins moving the file rather than
++// choosing several rows as MyGo's DragSelect did, then right-clicks a row
++// not chosen, which chooses it alone before its menu opens, so the menu
++// acts on it.
+ func TestDragSelect(t *testing.T) {
+ 	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
+ 	l := a.listings["/"]
+ 	from, _ := tt.Find(l.files[0].Name)
+-	to, _ := tt.Find(l.files[2].Name)
+ 	tt.Press(from.X+5, from.Y+5)
+-	for y := from.Y + 5; y < to.Y+5; y += 6 {
+-		tt.Move(from.X+5, y)
++	tt.Frame()
++	// Dragging up out of the rows, over the list's header, is no drop.
++	for i := 1; i <= 5; i++ {
++		tt.Move(from.X+5, from.Y+5-float32(i)*5)
+ 		tt.Frame()
+ 	}
+-	tt.Release(from.X+5, to.Y+5)
++	if !l.moveDrag || l.dragOn {
++		t.Fatalf("a drag on a row gave moveDrag=%v dragOn=%v, want moving and no rubber band", l.moveDrag, l.dragOn)
++	}
++	if l.sel.Len() != 1 || !l.sel.Has(l.files[0].FsID) {
++		t.Errorf("a drag on a row chose %d, want just that row", l.sel.Len())
++	}
++	tt.Release(from.X+5, from.Y+5-25)
+ 	tt.Frame()
+-	if l.sel.Len() != 3 || !l.sel.Has(l.files[0].FsID) || !l.sel.Has(l.files[2].FsID) {
+-		t.Fatalf("drag chose %d", l.sel.Len())
++	if l.moveDrag || l.dragOn {
++		t.Errorf("after a canceled drag moveDrag=%v dragOn=%v", l.moveDrag, l.dragOn)
+ 	}
+ 	rightClickRow(t, tt, l.files[4].Name)
+ 	tt.Frame()
+diff --git a/app/browser.go b/app/browser.go
+index 98a84e6..bb6fac0 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -47,24 +47,26 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	a.slowRename(c, l)
+ 	// A new frame's views say where a rubber band clips; a press the last
+ 	// frame saw is looked at below.
+-	l.dragTileHit = false
+ 	l.dragArea = ui.Rect{}
+ 	var pageBox ui.Rect // where the page showed last frame, to read a press
+ 	page := ui.Column(c).Key("files:" + dir).Grow(1).ObserveInput(func(ev ui.InputEvent) {
+ 		// The page sees every pointer press and release in it, whatever
+ 		// takes it, so a drag from the rows' blank space or a tile's gap
+-		// counts too, and the release can end the rubber band.
++		// counts too, and the release ends it. A release over the title bar
++		// does not come here but to filesToolbar's listener.
+ 		switch ev.Kind {
+ 		case ui.InputPointerDown:
+ 			if ev.Button == 0 {
+ 				l.pressDown, l.pressNew = true, true
++				l.pressMods = ev.Mods
+ 				l.pressAt = ui.Point{X: pageBox.X + ev.X, Y: pageBox.Y + ev.Y}
+ 			}
+ 		case ui.InputPointerUp:
+ 			if ev.Button == 0 {
+-				l.pressDown, l.pressNew = false, false
+-				l.dragOn, l.dragRows, l.dragGrid = false, false, false
+-				l.dragRect = ui.Rect{}
++				if l.moveDrag && !ev.Canceled {
++					a.dropMove(l, ui.Point{X: pageBox.X + ev.X, Y: pageBox.Y + ev.Y})
++				}
++				a.endDrag(l)
+ 			}
+ 		}
+ 	})
+@@ -108,7 +110,7 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 		a.flightCards(c, t, p, l, page.Bounds())
+ 	})
+ 	pageBox = page.Bounds()
+-	a.marquee(c, t, l, page)
++	a.marquee(c, t, p, l, page)
+ 	l.sole = 0
+ 	if files := l.chosen(); len(files) == 1 {
+ 		l.sole = files[0].FsID
+@@ -154,7 +156,9 @@ func (a *App) bindListState(l *listing) {
+ 	l.list.Header = func(i int) bool { return i == len(files) }
+ 	l.list.Selected = &l.selected
+ 	l.list.Selection = &l.sel
+-	l.list.DragSelect = true // a drag over the rows chooses them, as in Finder
++	// MyGo's DragSelect is off: a drag over a row means moving the files,
++	// and the rubber band chooses rows itself, by the rectangle (marquee).
++	l.list.DragSelect = false
+ }
+ 
+ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
+@@ -162,6 +166,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 	now := c.Now()
+ 	tops := a.rowTops(l, now)
+ 	l.rowsBuilt = map[int64]float32{}
++	l.rowRects = map[int64]ui.Rect{}
+ 	if l.glides == nil {
+ 		l.glides = map[int64]rowGlide{}
+ 	}
+@@ -265,6 +270,9 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 				figure(c, when).Width(colTime).TextAlign(ui.End).TextColor(muted)
+ 			}
+ 		})
++		if !draft {
++			l.rowRects[f.FsID] = r.Bounds() // where a drag or a drop finds it
++		}
+ 		if !passing && !draft {
+ 			a.fileMenu(r, l, row.Index)
+ 		}
+@@ -281,62 +289,82 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ }
+ 
+ // The rubber band: from the press point to the pointer, in the accent
+-// color, with a faint fill and a 1px edge, rounded a little.
++// color, with a faint fill and a 1px edge, rounded a little. A press that
++// moves this far from where it went down is a drag, not a click.
+ const (
+ 	marqueeRadius = 3
+-	marqueeSlop   = 3 // DIPs the pointer must move before the box shows
++	marqueeSlop   = 3 // DIPs the pointer must move before it is a drag
+ )
+ 
+-// marqueeBlocked says a rubber band must not show: the preview or a
+-// dialog owns the pointer, a name is being edited, a folder is being
+-// named, or files from another app are dragged in.
++// crumbTarget is a breadcrumb's box in the window and the folder it opens,
++// where a dragged file can be dropped.
++type crumbTarget struct {
++	rect ui.Rect
++	path string
++}
++
++// marqueeBlocked says a pointer gesture must not run: the preview or a
++// dialog owns the pointer, a name is being edited, a folder is being named,
++// or files from another app are dragged in.
+ func (a *App) marqueeBlocked(l *listing) bool {
+ 	return a.pv != nil || a.dlg.open || a.dlg.busy || a.renaming != nil || a.creating != nil || l.over
+ }
+ 
+-// marquee moves the rubber band along with the pointer and paints it over
+-// the page, above the rows or the tiles. The selection itself stays as it
+-// was: the list's rows are still chosen by MyGo's DragSelect, and the grid
+-// chooses the tiles the box covers.
+-func (a *App) marquee(c *ui.Context, t *ui.Theme, l *listing, page ui.Element) {
+-	if a.marqueeBlocked(l) || !l.pressDown {
+-		l.dragOn, l.dragRows, l.dragGrid = false, false, false
+-		l.dragRect = ui.Rect{}
+-		return
+-	}
+-	if l.pressNew {
+-		l.pressNew = false
+-		// A press in the viewport starts a box; a tile in the grid choosing
+-		// itself, or a press on the header or the status bar, does not.
+-		if l.dragArea.W > 0 && l.dragArea.Contains(l.pressAt.X, l.pressAt.Y) &&
+-			!(a.gridView && l.dragTileHit) {
+-			l.dragOn, l.dragFrom, l.dragGrid = true, l.pressAt, a.gridView
+-			l.dragRows, l.dragLast = false, ui.Rect{}
++// endDrag gives up whatever pointer gesture the listing holds, as after a
++// release, a canceled press, or a dialog taking over.
++func (a *App) endDrag(l *listing) {
++	l.pressDown, l.pressNew = false, false
++	l.movePress, l.moveDrag, l.moveFiles = false, false, nil
++	l.moveTarget, l.moveTargetRect = "", ui.Rect{}
++	l.dragOn, l.dragGrid = false, false
++	l.dragRect = ui.Rect{}
++	l.dragBase = nil
++}
++
++// marquee follows the pointer: a press on a row or a tile begins a move
++// drag once it goes far enough (dragMove), and a press on the list's or
++// grid's blank space paints the rubber band and chooses the rows or tiles
++// it crosses. The two never run together.
++func (a *App) marquee(c *ui.Context, t *ui.Theme, p *palette, l *listing, page ui.Element) {
++	if a.marqueeBlocked(l) {
++		if l.moveDrag || l.movePress || l.dragOn {
++			a.endDrag(l)
+ 		}
+-	}
+-	if !l.dragOn {
+ 		return
+ 	}
+-	if !l.dragGrid {
+-		if l.list.DragSelecting() {
+-			l.dragRows = true // MyGo's own drag began choosing rows
+-		} else if l.dragRows {
+-			// It ended, even if the release came outside the window.
+-			l.dragOn, l.dragRows = false, false
++	if !l.pressDown {
++		if l.dragOn || l.dragGrid {
++			l.dragOn, l.dragGrid = false, false
+ 			l.dragRect = ui.Rect{}
+-			return
+ 		}
++		return
+ 	}
+ 	b := page.Bounds()
+ 	x, y, _ := page.PointerPosition()
+-	to := ui.Point{X: b.X + x, Y: b.Y + y}
+-	rect := marqueeRect(l.dragFrom, to, l.dragArea)
+-	if rect.W < marqueeSlop && rect.H < marqueeSlop && !l.list.DragSelecting() {
++	at := ui.Point{X: b.X + x, Y: b.Y + y}
++	if l.pressNew {
++		l.pressNew = false
++		a.pressBegin(l, at)
++	}
++	if l.movePress && !l.moveDrag && farApart(l.moveFrom, at, marqueeSlop) {
++		a.beginMove(l)
++	}
++	if l.moveDrag {
++		l.moveTarget, l.moveTargetRect = a.dropTargetAt(l, at)
++		a.dragGhost(c, t, p, l, page, at)
++		a.dragScroll(c, l, at)
++		return // moving the files: never a rubber band beside it
++	}
++	if !l.dragOn {
++		return
++	}
++	rect := marqueeRect(l.dragFrom, at, l.dragArea)
++	if rect.W < marqueeSlop && rect.H < marqueeSlop {
+ 		l.dragRect = ui.Rect{} // a click, not yet a drag
+ 		return
+ 	}
+ 	l.dragRect = rect
+-	page.DrawOver(func(p *ui.Painter, r ui.Rect) {
++	page.DrawOver(func(pt *ui.Painter, r ui.Rect) {
+ 		rr := l.dragRect
+ 		if rr.W <= 0 && rr.H <= 0 {
+ 			return
+@@ -348,37 +376,270 @@ func (a *App) marquee(c *ui.Context, t *ui.Theme, l *listing, page ui.Element) {
+ 		if rr.H < 1 {
+ 			rr.H = 1
+ 		}
+-		p.Fill(rr, t.Accent.Alpha(0.12), marqueeRadius)
+-		p.Stroke(rr, t.Accent, marqueeRadius, 1)
++		pt.Fill(rr, t.Accent.Alpha(0.12), marqueeRadius)
++		pt.Stroke(rr, t.Accent, marqueeRadius, 1)
+ 	})
+ 	if l.dragGrid {
+ 		a.gridMarquee(l, rect)
++	} else {
++		a.listMarquee(l, rect)
+ 	}
++	a.dragScroll(c, l, at)
+ }
+ 
+-// marqueeRect is the rectangle from a to b, clipped to area.
+-func marqueeRect(a, b ui.Point, area ui.Rect) ui.Rect {
+-	x0, x1 := min(a.X, b.X), max(a.X, b.X)
+-	y0, y1 := min(a.Y, b.Y), max(a.Y, b.Y)
+-	x0, y0 = max(x0, area.X), max(y0, area.Y)
+-	x1, y1 = min(x1, area.X+area.W), min(y1, area.Y+area.H)
+-	if x1 < x0 {
+-		x1 = x0
++// farApart reports whether a and b are more than d DIPs apart.
++func farApart(a, b ui.Point, d float32) bool {
++	dx, dy := a.X-b.X, a.Y-b.Y
++	return dx*dx+dy*dy > d*d
++}
++
++// pressBegin starts the gesture of a new press at at: a move drag from a
++// row or tile (which waits to see it move), else the rubber band from the
++// view's blank space.
++func (a *App) pressBegin(l *listing, at ui.Point) {
++	if a.gridView {
++		if id, hit := l.gridSlotAt(at); hit {
++			// A press on a tile is never a rubber band; the maker's is no
++			// draggable file.
++			if i := l.index(id); id >= 0 && i >= 0 && a.draggable(l, i) {
++				l.movePress, l.movePressIdx, l.moveFrom = true, i, at
++			}
++			return
++		}
++	} else if i, hit := l.listRowAt(at); hit {
++		if a.draggable(l, i) {
++			l.movePress, l.movePressIdx, l.moveFrom = true, i, at
++		}
++		return
+ 	}
+-	if y1 < y0 {
+-		y1 = y0
++	if l.dragArea.W > 0 && l.dragArea.Contains(at.X, at.Y) {
++		l.dragOn, l.dragFrom, l.dragGrid = true, at, a.gridView
++		l.dragAdd = l.pressMods&ui.Cmd != 0
++		l.dragBase = nil
++		if l.dragAdd {
++			for id := range l.sel.All() {
++				l.dragBase = append(l.dragBase, id)
++			}
++		}
++		l.dragLast = ui.Rect{}
+ 	}
+-	return ui.Rect{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}
+ }
+ 
+-// gridMarquee chooses the grid's tiles the box covers. It is the grid's
+-// own version of DragSelect, which the list has and the grid does not.
++// beginMove turns a press on an item into a move drag: it drags the whole
++// choice when the item is one of it, else just the item, which it chooses
++// first.
++func (a *App) beginMove(l *listing) {
++	if l.movePressIdx < 0 || l.movePressIdx >= len(l.files) {
++		return
++	}
++	f := l.files[l.movePressIdx]
++	if l.sel.Has(f.FsID) {
++		l.moveFiles = l.chosen()
++	} else {
++		l.sel.Clear()
++		l.sel.Add(f.FsID)
++		l.selected = l.movePressIdx
++		l.moveFiles = []baidu.File{f}
++	}
++	if len(l.moveFiles) == 0 {
++		l.moveFiles = []baidu.File{f}
++	}
++	l.moveDrag = true
++	l.dragOn, l.dragRect = false, ui.Rect{}
++}
++
++// draggable reports whether the file at i can be dragged: a real entry,
++// neither a draft nor one that is coming or going.
++func (a *App) draggable(l *listing, i int) bool {
++	if i < 0 || i >= len(l.files) {
++		return false
++	}
++	f := &l.files[i]
++	return f.FsID >= 0 && f.FsID != draftID && a.dying[f.FsID] == nil
++}
++
++// listRowAt returns the file whose row in the list holds p, in the window.
++func (l *listing) listRowAt(p ui.Point) (int, bool) {
++	for id, r := range l.rowRects {
++		if id >= 0 && r.W > 0 && r.Contains(p.X, p.Y) {
++			if i := l.index(id); i >= 0 {
++				return i, true
++			}
++		}
++	}
++	return 0, false
++}
++
++// gridSlotAt returns the spot (a file's or the maker's) that holds p.
++func (l *listing) gridSlotAt(p ui.Point) (int64, bool) {
++	for id, s := range l.grid.spots {
++		if s.rect.W > 0 && s.rect.Contains(p.X, p.Y) {
++			return id, true
++		}
++	}
++	return 0, false
++}
++
++// dropTargetAt returns the folder a release at p would drop the files into
++// (a breadcrumb first, then a folder row or tile), and where it showed, so
++// the drag can light it; "" when p is over none.
++func (a *App) dropTargetAt(l *listing, p ui.Point) (string, ui.Rect) {
++	for _, cr := range l.crumbRects {
++		if cr.rect.W > 0 && cr.rect.Contains(p.X, p.Y) {
++			return cr.path, cr.rect
++		}
++	}
++	if a.gridView {
++		for id, s := range l.grid.spots {
++			if id < 0 || s.rect.W <= 0 {
++				continue
++			}
++			if i := l.index(id); i >= 0 && l.files[i].IsDir && s.rect.Contains(p.X, p.Y) {
++				return l.files[i].Path, s.rect
++			}
++		}
++		return "", ui.Rect{}
++	}
++	for id, r := range l.rowRects {
++		if id < 0 || r.W <= 0 {
++			continue
++		}
++		if i := l.index(id); i >= 0 && l.files[i].IsDir && r.Contains(p.X, p.Y) {
++			return l.files[i].Path, r
++		}
++	}
++	return "", ui.Rect{}
++}
++
++// dropMove moves the files being dragged into the folder under p, if any:
++// a release on blank space or outside cancels it.
++func (a *App) dropMove(l *listing, p ui.Point) {
++	files := l.moveFiles
++	if len(files) == 0 {
++		return
++	}
++	target, _ := a.dropTargetAt(l, p)
++	if target == "" {
++		return // blank space: a canceled drag changes nothing
++	}
++	a.applyMove(l, files, target)
++}
++
++// applyMove moves files from l's folder into target, refusing what must not
++// move and leaving the conflict to place's question.
++func (a *App) applyMove(l *listing, files []baidu.File, target string) {
++	from := l.dir
++	if target == from {
++		a.toast("已在当前文件夹", "")
++		return
++	}
++	for _, f := range files {
++		if f.IsDir && (target == f.Path || strings.HasPrefix(target, f.Path+"/")) {
++			a.toast("不能把「"+f.Name+"」放进它自己里面", "error")
++			return
++		}
++	}
++	a.moveOrCopyAfter(dlgMove, files, from, target, nil)
++}
++
++// dragGhost paints the drag card following the pointer (the icon and name
++// of one file, or "N 项") and a light around the folder it would drop into.
++func (a *App) dragGhost(c *ui.Context, t *ui.Theme, p *palette, l *listing, page ui.Element, at ui.Point) {
++	label, iconName := "1 项", "file"
++	if len(l.moveFiles) == 1 {
++		f := &l.moveFiles[0]
++		label, iconName = f.Name, kindOf(f).look(p).icon
++	} else if len(l.moveFiles) > 1 {
++		label, iconName = itoa(len(l.moveFiles))+" 项", "layers"
++	}
++	tw, _ := c.MeasureText(0, ui.Span{Text: label, Size: 12.5})
++	const ih = 22
++	w := 10 + ih + 8 + tw + 12
++	box := ui.Rect{X: at.X + 14, Y: at.Y + 16, W: w, H: 42}
++	target := l.moveTargetRect
++	page.DrawOver(func(pt *ui.Painter, r ui.Rect) {
++		if target.W > 0 {
++			pt.Fill(target, t.Accent.Alpha(0.12), 6)
++			pt.Stroke(target, t.Accent, 6, 2)
++		}
++		pt.Fill(box, p.Card.Alpha(0.97), 10)
++		pt.Stroke(box, t.Accent.Alpha(0.35), 10, 1)
++		pt.Image(icon(iconName), ui.Rect{X: box.X + 10, Y: box.Y + 10, W: ih, H: ih}, ui.Contain)
++		pt.Text(box.X+10+ih+8, box.Y+10+(ih-14)/2+1, label, 12.5, t.Text)
++	})
++}
++
++// dragScroll scrolls the view when a drag reaches its top or bottom edge,
++// so a box or a file can reach rows and tiles out of view. It steps at most
++// about fifteen times a second, and asks for the next frame meanwhile.
++func (a *App) dragScroll(c *ui.Context, l *listing, at ui.Point) {
++	area := l.dragArea
++	if area.W <= 0 || at.X < area.X || at.X > area.X+area.W {
++		return
++	}
++	const band = 26
++	dir := 0
++	switch {
++	case at.Y < area.Y+band:
++		dir = -1
++	case at.Y > area.Y+area.H-band:
++		dir = 1
++	}
++	if dir == 0 {
++		return
++	}
++	now := c.Now()
++	if now.Sub(l.scrollAt) < 60*time.Millisecond {
++		c.Invalidate()
++		return
++	}
++	l.scrollAt = now
++	if a.gridView {
++		l.grid.scroll.Y = max(0, l.grid.scroll.Y+float32(dir)*40)
++	} else {
++		first, last := l.list.Visible()
++		if dir > 0 {
++			l.list.ScrollIntoView(last + 1)
++		} else {
++			l.list.ScrollIntoView(first - 1)
++		}
++	}
++	c.Invalidate()
++}
++
++// listMarquee chooses the list's rows the box crosses: those it holds,
++// plus, with Cmd held at the press, those chosen before.
++func (a *App) listMarquee(l *listing, rect ui.Rect) {
++	if rect == l.dragLast {
++		return
++	}
++	l.dragLast = rect
++	l.sel.Clear()
++	for _, id := range l.dragBase {
++		l.sel.Add(id)
++	}
++	for id, r := range l.rowRects {
++		if id < 0 || r.W <= 0 || a.dying[id] != nil {
++			continue
++		}
++		if rectIntersects(rect, r) {
++			l.sel.Add(id)
++		}
++	}
++	l.selected = -1
++}
++
++// gridMarquee chooses the grid's tiles the box crosses, as listMarquee the
++// rows.
+ func (a *App) gridMarquee(l *listing, rect ui.Rect) {
+ 	if rect == l.dragLast {
+ 		return
+ 	}
+ 	l.dragLast = rect
+ 	l.sel.Clear()
++	for _, id := range l.dragBase {
++		l.sel.Add(id)
++	}
+ 	for id, spot := range l.grid.spots {
+ 		if id >= 0 && spot.rect.W > 0 && rectIntersects(rect, spot.rect) {
+ 			l.sel.Add(id)
+@@ -387,6 +648,21 @@ func (a *App) gridMarquee(l *listing, rect ui.Rect) {
+ 	l.selected = -1
+ }
+ 
++// marqueeRect is the rectangle from a to b, clipped to area.
++func marqueeRect(a, b ui.Point, area ui.Rect) ui.Rect {
++	x0, x1 := min(a.X, b.X), max(a.X, b.X)
++	y0, y1 := min(a.Y, b.Y), max(a.Y, b.Y)
++	x0, y0 = max(x0, area.X), max(y0, area.Y)
++	x1, y1 = min(x1, area.X+area.W), min(y1, area.Y+area.H)
++	if x1 < x0 {
++		x1 = x0
++	}
++	if y1 < y0 {
++		y1 = y0
++	}
++	return ui.Rect{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}
++}
++
+ // rectIntersects reports whether a and b share some area.
+ func rectIntersects(a, b ui.Rect) bool {
+ 	return a.X < b.X+b.W && b.X < a.X+a.W && a.Y < b.Y+b.H && b.Y < a.Y+a.H
+@@ -795,6 +1071,7 @@ func (a *App) breadcrumbs(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	a.compact = a.foldTools(crumbsWidth(widths), room)
+ 	from, root := fitCrumbs(c, widths, room)
+ 	target := func(i int) string { return "/" + path.Join(parts[1:i+1]...) }
++	var crumbRects []crumbTarget
+ 	row.Children(func() {
+ 		chevron := func() { ui.Icon(c, icon("chevron-right")).FontSize(12).TextColor(p.Faint) }
+ 		for i := range parts {
+@@ -823,11 +1100,17 @@ func (a *App) breadcrumbs(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 				}
+ 			}
+ 			crumb.Children(func() { ui.Text(c, label).SingleLine() })
++			if b := crumb.Bounds(); b.W > 0 {
++				crumbRects = append(crumbRects, crumbTarget{rect: b, path: target(i)})
++			}
+ 			if crumb.Clicked() && !last {
+ 				a.router.Push(filesRoute(target(i)))
+ 			}
+ 		}
+ 	})
++	if l := a.listings[dir]; l != nil {
++		l.crumbRects = crumbRects
++	}
+ }
+ 
+ // foldTools tells whether the folder's tools fold, from last frame's room
+@@ -938,56 +1221,77 @@ func fitCrumbs(c *ui.Context, widths []float32, room float32) (from int, root bo
+ // the path and the search first, then the folder's tools, which are the
+ // actions a folder wants at hand rather than at the foot of its files.
+ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+-	ui.Row(c).Gap(0).Children(func() {
+-		if iconButton(c, t, p, "chevron-left", "后退").Disabled(!a.router.CanGoBack()).Clicked() {
+-			a.router.Back()
+-		}
+-		if iconButton(c, t, p, "chevron-right", "前进").Disabled(!a.router.CanGoForward()).Clicked() {
+-			a.router.Forward()
++	var barBox ui.Rect // where it showed last frame, to read a release
++	bar := ui.Row(c).Grow(1).Gap(0).AlignItems(ui.Center)
++	// A release over the title bar does not reach the page's ObserveInput
++	// (the page is not under it), so a drag dropped on a breadcrumb, or let
++	// go over the tools, ends here.
++	bar.ObserveInput(func(ev ui.InputEvent) {
++		if ev.Kind != ui.InputPointerUp || ev.Button != 0 {
++			return
+ 		}
+-	})
+-	a.breadcrumbs(c, t, p, dir)
+-	a.searchField(c, t, p)
+-	// Those that fold, together so that their width, open and folded,
+-	// tells foldTools what opening them takes from the path.
+-	tools := ui.Row(c.Key("folding-tools")).Gap(6).AlignItems(ui.Center).Shrink(0)
+-	if w := tools.Bounds().W; w > 0 {
+-		folded := 0
+-		if a.toolsFolded {
+-			folded = 1
+-		}
+-		a.toolsWidth[folded] = w
+-	}
+-	a.toolsFolded = a.compact
+-	tools.Children(func() {
+-		// A new folder is named at the top, its card flying from this
+-		// button; its box stays the maker's place, where Cmd-Shift-N
+-		// makes one from too.
+ 		l := a.listings[dir]
+-		nb := toolButton(c, t, p, "folder-plus", "新建文件夹")
+-		nb.Tooltip("新建文件夹（⌘⇧N）")
+-		if b := nb.Bounds(); b.W > 0 && l != nil {
+-			l.makerAt = b
+-		}
+-		if nb.Clicked() && l != nil {
+-			a.newFolder(l, nb.Bounds())
+-		}
+-		a.sortMenu(c, t, p)
+-		a.viewSwitch(c, t, p)
+-		// The clipboard is read only when asked, here or with Cmd-V: its
+-		// owner can make the read wait.
+-		if toolButton(c, t, p, "link", "从剪贴板打开分享链接").Clicked() {
+-			if !a.openClipboardShare(c, true) {
+-				a.toast("剪贴板里没有分享链接", "")
+-			}
+-		}
+-		if toolButton(c, t, p, "refresh-cw", "刷新").Clicked() {
+-			a.reload(dir)
++		if l == nil || (!l.moveDrag && !l.dragOn) {
++			return
+ 		}
+-		if up := pillOf(c, t, p, "upload", "上传", true, a.compact); up.Clicked() {
+-			a.askUpload(dir, up.Bounds())
++		if l.moveDrag && !ev.Canceled {
++			a.dropMove(l, ui.Point{X: barBox.X + ev.X, Y: barBox.Y + ev.Y})
+ 		}
++		a.endDrag(l)
++	})
++	bar.Children(func() {
++		ui.Row(c).Gap(0).Children(func() {
++			if iconButton(c, t, p, "chevron-left", "后退").Disabled(!a.router.CanGoBack()).Clicked() {
++				a.router.Back()
++			}
++			if iconButton(c, t, p, "chevron-right", "前进").Disabled(!a.router.CanGoForward()).Clicked() {
++				a.router.Forward()
++			}
++		})
++		a.breadcrumbs(c, t, p, dir)
++		a.searchField(c, t, p)
++		// Those that fold, together so that their width, open and folded,
++		// tells foldTools what opening them takes from the path.
++		tools := ui.Row(c.Key("folding-tools")).Gap(6).AlignItems(ui.Center).Shrink(0)
++		if w := tools.Bounds().W; w > 0 {
++			folded := 0
++			if a.toolsFolded {
++				folded = 1
++			}
++			a.toolsWidth[folded] = w
++		}
++		a.toolsFolded = a.compact
++		tools.Children(func() {
++			// A new folder is named at the top, its card flying from this
++			// button; its box stays the maker's place, where Cmd-Shift-N
++			// makes one from too.
++			l := a.listings[dir]
++			nb := toolButton(c, t, p, "folder-plus", "新建文件夹")
++			nb.Tooltip("新建文件夹（⌘⇧N）")
++			if b := nb.Bounds(); b.W > 0 && l != nil {
++				l.makerAt = b
++			}
++			if nb.Clicked() && l != nil {
++				a.newFolder(l, nb.Bounds())
++			}
++			a.sortMenu(c, t, p)
++			a.viewSwitch(c, t, p)
++			// The clipboard is read only when asked, here or with Cmd-V: its
++			// owner can make the read wait.
++			if toolButton(c, t, p, "link", "从剪贴板打开分享链接").Clicked() {
++				if !a.openClipboardShare(c, true) {
++					a.toast("剪贴板里没有分享链接", "")
++				}
++			}
++			if toolButton(c, t, p, "refresh-cw", "刷新").Clicked() {
++				a.reload(dir)
++			}
++			if up := pillOf(c, t, p, "upload", "上传", true, a.compact); up.Clicked() {
++				a.askUpload(dir, up.Bounds())
++			}
++		})
+ 	})
++	barBox = bar.Bounds()
+ }
+ 
+ // sortOrders are what the browser sorts by, as the list's columns.
+diff --git a/app/dragmove_test.go b/app/dragmove_test.go
+new file mode 100644
+index 0000000..e528695
+--- /dev/null
++++ b/app/dragmove_test.go
+@@ -0,0 +1,268 @@
++package app
++
++import (
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/baidu"
++	"github.com/pengstem/baidunetgo/internal/fakepan"
++)
++
++// dragFromTo presses at a, drags the pointer to b in steps, and leaves it
++// there, without releasing: the caller releases at b.
++func dragFromTo(tt *ui.Tester, a, b ui.Point, steps int) {
++	tt.Press(a.X, a.Y)
++	tt.Frame()
++	for i := 1; i <= steps; i++ {
++		f := float32(i) / float32(steps)
++		tt.Move(lerp(a.X, b.X, f), lerp(a.Y, b.Y, f))
++		tt.Frame()
++	}
++}
++
++// rowCenter is a point inside a row or tile rect, away from its edge.
++func rowCenter(r ui.Rect) ui.Point { return ui.Point{X: r.X + 20, Y: r.Y + r.H/2} }
++
++// shownToast reports whether a toast holding sub appeared.
++func shownToast(a *App, tt *ui.Tester, sub string) bool {
++	for _, t := range a.pendingToasts {
++		if strings.Contains(t.Title, sub) {
++			return true
++		}
++	}
++	return tt.HasText(sub)
++}
++
++// TestDragMoveList drags a file's row onto a folder's row: it moves into
++// it, the old path gone and the folder showing the file, and the netdisk's
++// change counter went up.
++func TestDragMoveList(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	gen := a.netdiskGen
++	ri, fi := l.indexNamed("README.md"), l.indexNamed("空文件夹")
++	if ri < 0 || fi < 0 {
++		t.Fatalf("rows missing: README %d, 空文件夹 %d", ri, fi)
++	}
++	from := l.rowRects[l.files[ri].FsID]
++	to := l.rowRects[l.files[fi].FsID]
++	if from.W <= 0 || to.W <= 0 {
++		t.Fatalf("no row rects: %v %v", from, to)
++	}
++	dragFromTo(tt, rowCenter(from), rowCenter(to), 14)
++	if !l.moveDrag {
++		t.Fatalf("a drag on a file row gave moveDrag=%v", l.moveDrag)
++	}
++	if l.dragOn {
++		t.Errorf("the rubber band showed while moving files")
++	}
++	if l.moveTarget != "/空文件夹" {
++		t.Errorf("hovering 空文件夹: target %q", l.moveTarget)
++	}
++	save(t, tt, "drag-ghost")
++	tt.Release(rowCenter(to).X, rowCenter(to).Y)
++	tt.Frame()
++	if l.moveDrag {
++		t.Errorf("moveDrag stayed after release")
++	}
++	waitUntil(t, tt, "the file moved", func() bool { return srv.Exists("/空文件夹/README.md") })
++	if srv.Exists("/README.md") {
++		t.Errorf("the old path still exists")
++	}
++	waitUntil(t, tt, "the change counted", func() bool { return a.netdiskGen > gen })
++}
++
++// TestDragMoveMulti drags one of two chosen files: both move.
++func TestDragMoveMulti(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	r1i, r2i, fi := l.indexNamed("README.md"), l.indexNamed("安装包.dmg"), l.indexNamed("空文件夹")
++	if r1i < 0 || r2i < 0 || fi < 0 {
++		t.Fatalf("rows missing: %d %d %d", r1i, r2i, fi)
++	}
++	r1, r2 := l.rowRects[l.files[r1i].FsID], l.rowRects[l.files[r2i].FsID]
++	fr := l.rowRects[l.files[fi].FsID]
++	tt.ClickAt(r1.X+20, r1.Y+r1.H/2)
++	tt.Frame()
++	tt.ClickAtWith(ui.Cmd, r2.X+20, r2.Y+r2.H/2)
++	tt.Frame()
++	if l.sel.Len() != 2 {
++		t.Fatalf("chose %d, want two files", l.sel.Len())
++	}
++	// Let the double-click counter forget the Cmd-click, so the drag's press
++	// is a drag and not a double click that opens the file.
++	tt.Advance(time.Second)
++	dragFromTo(tt, rowCenter(r2), rowCenter(fr), 14)
++	if !l.moveDrag || len(l.moveFiles) != 2 {
++		t.Fatalf("dragging one of two: moveDrag=%v, files=%d", l.moveDrag, len(l.moveFiles))
++	}
++	tt.Release(rowCenter(fr).X, rowCenter(fr).Y)
++	tt.Frame()
++	waitUntil(t, tt, "both moved", func() bool {
++		return srv.Exists("/空文件夹/README.md") && srv.Exists("/空文件夹/安装包.dmg")
++	})
++	if srv.Exists("/README.md") || srv.Exists("/安装包.dmg") {
++		t.Errorf("an old path still exists")
++	}
++}
++
++// TestDragMoveBlankCancels lets a dragged file go over blank space: nothing
++// moves and the choice stays.
++func TestDragMoveBlankCancels(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	ri := l.indexNamed("README.md")
++	from := l.rowRects[l.files[ri].FsID]
++	to := ui.Point{X: from.X + 20, Y: l.dragArea.Y - 12} // the list's header
++	dragFromTo(tt, rowCenter(from), to, 10)
++	if !l.moveDrag {
++		t.Fatalf("no move drag")
++	}
++	tt.Release(to.X, to.Y)
++	tt.Frame()
++	if l.moveDrag {
++		t.Errorf("moveDrag stayed after release")
++	}
++	if !srv.Exists("/README.md") {
++		t.Errorf("a canceled drag moved the file away")
++	}
++	if l.sel.Len() != 1 || !l.sel.Has(l.files[ri].FsID) {
++		t.Errorf("after cancel chose %d, want the dragged file kept", l.sel.Len())
++	}
++}
++
++// TestDragMoveCrumb drops a file on the "我的文件" breadcrumb: it moves to
++// the folder above.
++func TestDragMoveCrumb(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	a.router.Push(filesRoute("/照片"))
++	waitFor(t, tt, "IMG_2310.jpg")
++	tt.Advance(time.Second)
++	l := a.listingFor("/照片")
++	ri := l.indexNamed("IMG_2310.jpg")
++	if ri < 0 {
++		t.Fatalf("no IMG_2310.jpg row")
++	}
++	from := l.rowRects[l.files[ri].FsID]
++	var root ui.Rect
++	for _, cr := range l.crumbRects {
++		if cr.path == "/" {
++			root = cr.rect
++		}
++	}
++	if root.W <= 0 {
++		t.Fatalf("no root breadcrumb: %+v", l.crumbRects)
++	}
++	to := ui.Point{X: root.X + root.W/2, Y: root.Y + root.H/2}
++	dragFromTo(tt, rowCenter(from), to, 18)
++	if !l.moveDrag || l.moveTarget != "/" {
++		t.Fatalf("over the root crumb: moveDrag=%v target=%q", l.moveDrag, l.moveTarget)
++	}
++	tt.Release(to.X, to.Y)
++	tt.Frame()
++	waitUntil(t, tt, "moved to the root", func() bool { return srv.Exists("/IMG_2310.jpg") })
++	if srv.Exists("/照片/IMG_2310.jpg") {
++		t.Errorf("the file stayed in 照片")
++	}
++}
++
++// TestDragMoveRejects says a folder cannot be dropped on itself, nor into
++// its own subfolder, and neither moves anything.
++func TestDragMoveRejects(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	// Drag 空文件夹 onto its own row and let go: a toast, no move.
++	ri := l.indexNamed("空文件夹")
++	from := l.rowRects[l.files[ri].FsID]
++	dragFromTo(tt, rowCenter(from), ui.Point{X: from.X + 24, Y: from.Y + 4}, 8)
++	tt.Release(from.X+24, from.Y+4)
++	tt.Frame()
++	if !srv.Exists("/空文件夹") {
++		t.Fatalf("the folder vanished")
++	}
++	if srv.Exists("/空文件夹/空文件夹") {
++		t.Errorf("a folder was moved into itself")
++	}
++	if !shownToast(a, tt, "不能把") {
++		t.Errorf("no toast refusing the drop on itself; texts %q", tt.Texts())
++	}
++	// A subfolder target is refused directly.
++	ci := l.indexNamed("代码")
++	if ci < 0 {
++		t.Fatalf("no 代码 folder")
++	}
++	a.applyMove(l, []baidu.File{l.files[ci]}, "/代码/备份")
++	if !shownToast(a, tt, "不能把") {
++		t.Errorf("no toast refusing the drop into its subfolder")
++	}
++	if !srv.Exists("/代码/备份") {
++		t.Errorf("the subfolder vanished")
++	}
++}
++
++// TestDragMoveConflict drops a file where a same name is: the conflict
++// dialog opens, and keeping both gives the arriving one a free name.
++func TestDragMoveConflict(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	srv.Add(fakepan.Node{Path: "/目标/README.md", Category: 4, Data: []byte("旧说明")})
++	a.reload("/")
++	waitFor(t, tt, "目标")
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	ri, ti := l.indexNamed("README.md"), l.indexNamed("目标")
++	if ri < 0 || ti < 0 {
++		t.Fatalf("rows missing: README %d, 目标 %d", ri, ti)
++	}
++	from, to := l.rowRects[l.files[ri].FsID], l.rowRects[l.files[ti].FsID]
++	dragFromTo(tt, rowCenter(from), rowCenter(to), 14)
++	tt.Release(rowCenter(to).X, rowCenter(to).Y)
++	waitUntil(t, tt, "the conflict question", func() bool { return a.dlg.open && a.dlg.kind == dlgConflict })
++	tt.Advance(200 * time.Millisecond)
++	if err := tt.Click("保留两者"); err != nil {
++		t.Fatalf("keep both: %v", err)
++	}
++	waitUntil(t, tt, "the renamed copy", func() bool { return srv.Exists("/目标/README (1).md") })
++	if !srv.Exists("/目标/README.md") {
++		t.Errorf("the original in 目标 went away")
++	}
++	if srv.Exists("/README.md") {
++		t.Errorf("the moved file stayed at the root")
++	}
++}
++
++// TestDragMoveGrid drags a photo tile onto a folder tile: it moves into the
++// folder.
++func TestDragMoveGrid(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	a.gridView = true
++	a.router.Push(filesRoute("/照片"))
++	waitFor(t, tt, "IMG_2310.jpg")
++	tt.Advance(time.Second)
++	l := a.listingFor("/照片")
++	fi, di := l.indexNamed("IMG_2310.jpg"), l.indexNamed("京都")
++	if fi < 0 || di < 0 {
++		t.Fatalf("tiles missing: IMG %d, 京都 %d", fi, di)
++	}
++	fromSpot, ok1 := l.grid.spots[l.files[fi].FsID]
++	toSpot, ok2 := l.grid.spots[l.files[di].FsID]
++	if !ok1 || !ok2 || fromSpot.rect.W <= 0 || toSpot.rect.W <= 0 {
++		t.Fatalf("no tile rects: %+v %+v", fromSpot, toSpot)
++	}
++	dragFromTo(tt, rowCenter(fromSpot.rect), rowCenter(toSpot.rect), 14)
++	if !l.moveDrag || l.moveTarget != "/照片/京都" {
++		t.Fatalf("grid drag: moveDrag=%v target=%q", l.moveDrag, l.moveTarget)
++	}
++	tt.Release(rowCenter(toSpot.rect).X, rowCenter(toSpot.rect).Y)
++	tt.Frame()
++	waitUntil(t, tt, "the photo moved", func() bool { return srv.Exists("/照片/京都/IMG_2310.jpg") })
++	if srv.Exists("/照片/IMG_2310.jpg") {
++		t.Errorf("the photo stayed in 照片")
++	}
++}
+diff --git a/app/files.go b/app/files.go
+index 3f9b7fa..ab0948d 100644
+--- a/app/files.go
++++ b/app/files.go
+@@ -38,27 +38,45 @@ type listing struct {
+ 	sole     int64 // the file chosen alone in the last frame, else 0
+ 	refocus  bool  // the files take the focus back, from a name edited
+ 	over     bool  // files dragged over the window, which light the maker
+-	// The rubber band: pressing the primary button in the list or the grid
+-	// and dragging shows a rectangle from the press point to the pointer.
+-	// The press comes from ObserveInput (so a drag from the rows' blank
+-	// space counts too), the viewport it is clipped to from the view
+-	// built this frame, both in window coordinates.
+-	pressDown bool // the primary button is down over the page
+-	pressNew  bool // a press has not been looked at yet, to start a drag
+-	pressAt   ui.Point
+-	dragOn    bool // the rubber band is showing
+-	dragFrom  ui.Point
+-	dragRect  ui.Rect // the rectangle drawn this frame, in window coordinates
+-	dragArea  ui.Rect // the viewport it is clipped to: the list or the grid
+-	// dragRows says MyGo's own DragSelect began choosing rows, so its end
+-	// (the release) tells the rectangle to go even if the release is not
+-	// seen (outside the window); dragGrid says the drag began in the grid,
+-	// dragTileHit that the press landed on a tile there and so is no rubber
+-	// band, and dragLast is the rectangle the grid chose tiles by.
+-	dragRows    bool
+-	dragGrid    bool
+-	dragTileHit bool
+-	dragLast    ui.Rect
++	// The pointer gesture, from a press the page's ObserveInput saw: a drag
++	// from a row or a tile moves the files chosen there, a drag from the
++	// list's or grid's blank space paints the rubber band, which chooses
++	// the rows or tiles it crosses. The viewport is that of the view built
++	// this frame, and the coordinates are the window's.
++	pressDown bool         // the primary button is down over the page
++	pressNew  bool         // a press has not been looked at yet, to start a drag
++	pressAt   ui.Point     // where it pressed, in window coordinates
++	pressMods ui.Modifiers // the modifiers held as it pressed
++
++	// The rubber band.
++	dragOn   bool     // it is showing
++	dragFrom ui.Point // where the blank drag began
++	dragRect ui.Rect  // the rectangle drawn this frame, in the window
++	dragArea ui.Rect  // the viewport it clips to: the list or the grid
++	dragGrid bool     // it began in the grid, choosing tiles
++	dragAdd  bool     // Cmd was held at the press: add to the choice
++	dragBase []int64  // the choice a Cmd drag adds to
++	dragLast ui.Rect  // the rectangle the choice was made by, to skip a repeat
++
++	// Moving the files by dragging them: movePress says the press landed on
++	// an item and a drag may still begin; moveDrag says it began and the
++	// files are on the way to moveFiles; moveTarget is the folder under the
++	// pointer (a row, a tile or a breadcrumb) and moveTargetRect where it
++	// showed, to light it.
++	movePress      bool
++	movePressIdx   int
++	moveFrom       ui.Point
++	moveDrag       bool
++	moveFiles      []baidu.File
++	moveTarget     string
++	moveTargetRect ui.Rect
++	scrollAt       time.Time // when the edges last scrolled the drag
++
++	// rowRects are where the list's rows showed this frame, in the window,
++	// for the rubber band to choose and a dragged file to drop on; crumbs
++	// are where the breadcrumbs showed, by the folder each opens.
++	rowRects   map[int64]ui.Rect
++	crumbRects []crumbTarget
+ 	// rowsShown are where the list's rows of the last frame showed, by
+ 	// file, and rowsBuilt those of this frame (glideRow).
+ 	rowsShown, rowsBuilt map[int64]float32
+diff --git a/app/grid.go b/app/grid.go
+index 701f41b..2b467fe 100644
+--- a/app/grid.go
++++ b/app/grid.go
+@@ -119,10 +119,6 @@ func (a *App) tileGrid(c *ui.Context, l *listing, maker func(e ui.Element), tile
+ 					slot.Translate(dx, dy)
+ 				}
+ 				spot.x, spot.y = spot.x+dx, spot.y+dy
+-				// A press on a cell is no rubber band: it chooses its tile.
+-				if slot.PressedInside() {
+-					l.dragTileHit = true
+-				}
+ 				if i == n {
+ 					slot.Children(func() { maker(ui.Column(c).Grow(1)) })
+ 					spot.rect = slot.Bounds()
+diff --git a/app/marquee_test.go b/app/marquee_test.go
+index ad5a6e6..1ce80d5 100644
+--- a/app/marquee_test.go
++++ b/app/marquee_test.go
+@@ -10,74 +10,81 @@ import (
+ 	"github.com/pengstem/baidunetgo/internal/fakepan"
+ )
+ 
+-// TestMarqueeDragSelect drags over the rows: MyGo's DragSelect still
+-// chooses the three rows, and a rubber-band rectangle follows the pointer
+-// from where it went down, then goes at the release. A second drag from
+-// the rows' blank space shows the box too, without changing the choice.
++// TestMarqueeDragSelect drags a box from the list's blank space below the
++// rows up across the last three: it chooses exactly those, and a Cmd drag
++// adds to the choice it had.
+ func TestMarqueeDragSelect(t *testing.T) {
+ 	a, tt, _ := signedIn(t)
+ 	tt.Advance(time.Second)
+ 	l := a.listings["/"]
+-	from, _ := tt.Find(l.files[0].Name)
+-	to, _ := tt.Find(l.files[2].Name)
+-	x, y0 := from.X+5, from.Y+5
+-	y1 := to.Y + 5
++	n := len(l.files)
++	if n < 4 {
++		t.Fatalf("need a few rows, have %d", n)
++	}
++	area := l.dragArea
++	// Blank space below the last row, dragged up to the third from last.
++	x0, x1 := area.X+20, area.X+64
++	y0 := area.Y + area.H - 12
++	var last3IDs []int64
++	for _, f := range l.files[n-3:] {
++		last3IDs = append(last3IDs, f.FsID)
++	}
++	top := l.rowRects[last3IDs[0]].Y + 2
+ 
+-	tt.Press(x, y0)
++	tt.Press(x0, y0)
+ 	tt.Frame()
+-	tallest := ui.Rect{}
+-	steps := int((y1 - y0) / 6)
+-	for i := 1; i <= steps; i++ {
+-		tt.Move(x+float32(i)*4, y0+float32(i)*6)
++	for i := 1; i <= 20; i++ {
++		f := float32(i) / 20
++		tt.Move(x0+(x1-x0)*f, y0+(top-y0)*f)
+ 		tt.Frame()
+-		if l.dragOn && l.dragRect.H > tallest.H {
+-			tallest = l.dragRect
+-		}
+ 	}
+-	if !l.dragOn {
+-		t.Fatalf("no marquee while dragging; press %v rect %v", l.dragFrom, l.dragRect)
++	if !l.dragOn || l.dragRect.W <= 0 || l.dragRect.H <= 0 {
++		t.Fatalf("no marquee from blank space: on=%v rect=%v", l.dragOn, l.dragRect)
+ 	}
+-	if tallest.W <= 0 || tallest.H <= 0 {
+-		t.Fatalf("marquee has no size: %v", tallest)
++	if l.sel.Len() != 3 {
++		t.Fatalf("blank drag chose %d, want the last three rows", l.sel.Len())
+ 	}
+-	// It starts at the press, not snapped to a row, and keeps inside the
+-	// list's viewport.
+-	if d := l.dragFrom.Y - y0; d < -1 || d > 1 {
+-		t.Errorf("marquee starts at y=%.0f, press at %.0f", l.dragFrom.Y, y0)
++	for _, id := range last3IDs {
++		if !l.sel.Has(id) {
++			t.Errorf("blank drag missed row %d", id)
++		}
+ 	}
+-	if r := tallest; r.Y < l.dragArea.Y-1 || r.Y+r.H > l.dragArea.Y+l.dragArea.H+1 {
+-		t.Errorf("marquee %v outside the list %v", r, l.dragArea)
++	if n > 3 && l.sel.Has(l.files[n-4].FsID) {
++		t.Errorf("blank drag chose the row above the box")
+ 	}
+-
+-	tt.Release(x+float32(steps)*4, y0+float32(steps)*6)
++	save(t, tt, "marquee-selects")
++	tt.Release(x1, top)
+ 	tt.Frame()
+ 	if l.dragOn || l.dragRect != (ui.Rect{}) {
+ 		t.Errorf("marquee stayed after release: on=%v rect=%v", l.dragOn, l.dragRect)
+ 	}
+-	if l.sel.Len() != 3 || !l.sel.Has(l.files[0].FsID) || !l.sel.Has(l.files[2].FsID) {
+-		t.Fatalf("drag chose %d, not the three rows", l.sel.Len())
+-	}
+ 
+-	// A drag begun in the rows' blank space shows the box as well; the
+-	// choice is still MyGo's DragSelect's, which a blank press does not
+-	// begin, so the three rows stay chosen.
+-	last, _ := tt.Find(l.files[len(l.files)-1].Name)
+-	bx, by := last.X+30, last.Y+80
+-	tt.Press(bx, by)
++	// Cmd-drag adds to what was already chosen: choose the first row, then
++	// Cmd-drag a box over the last two. The Tester's Press carries no
++	// modifier, so the press's mods and the box are driven directly, as the
++	// same gesture the pointer would make with Cmd held.
++	first := l.rowRects[l.files[0].FsID]
++	tt.ClickAt(first.X+first.W/2, first.Y+first.H/2)
+ 	tt.Frame()
+-	for i := 1; i <= 18; i++ {
+-		tt.Move(bx+float32(i)*2, by-float32(i)*11)
+-		tt.Frame()
++	if l.sel.Len() != 1 || !l.sel.Has(l.files[0].FsID) {
++		t.Fatalf("a click chose %d, want the first row", l.sel.Len())
+ 	}
+-	if !l.dragOn || l.dragRect.W <= 0 || l.dragRect.H <= 0 {
+-		t.Fatalf("no marquee from blank space: on=%v rect=%v", l.dragOn, l.dragRect)
++	top2 := l.rowRects[l.files[n-2].FsID].Y + 2
++	l.pressMods = ui.Cmd
++	l.pressAt = ui.Point{X: x0, Y: y0}
++	a.pressBegin(l, l.pressAt)
++	if !l.dragOn || !l.dragAdd {
++		t.Fatalf("a Cmd press gave dragOn=%v dragAdd=%v", l.dragOn, l.dragAdd)
+ 	}
+-	save(t, tt, "marquee")
+-	tt.Release(bx+36, by-198)
+-	tt.Frame()
+-	if l.dragOn || l.dragRect != (ui.Rect{}) {
+-		t.Errorf("marquee stayed after the blank drag: on=%v rect=%v", l.dragOn, l.dragRect)
++	a.listMarquee(l, marqueeRect(ui.Point{X: x0, Y: y0}, ui.Point{X: x1, Y: top2}, l.dragArea))
++	if l.sel.Len() != 3 {
++		t.Fatalf("Cmd drag chose %d, want the first and the last two", l.sel.Len())
+ 	}
++	if !l.sel.Has(l.files[0].FsID) || !l.sel.Has(l.files[n-2].FsID) || !l.sel.Has(l.files[n-1].FsID) {
++		t.Errorf("Cmd drag did not add to the choice: %d chosen", l.sel.Len())
++	}
++	a.endDrag(l)
++	tt.Frame()
+ }
+ 
+ // TestMarqueeHidden says the rectangle stays away while a dialog owns the

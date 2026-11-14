@@ -1,0 +1,1257 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 17:17:08 +0800
+Subject: [PATCH] Add update checks with a pluggable feed and a DeepSeek+GLM
+ patch notice, since this community build should say what it is and keep an
+ eye on releases without yet having a signed update channel.
+
+---
+ AGENTS.md                        |   2 +
+ CHANGELOG.md                     |   2 +
+ CLAUDE.md                        |   2 +
+ README.md                        |   2 +
+ app/app.go                       |   4 +
+ app/settings.go                  |  26 +++
+ app/settings_page.go             | 252 ++++++++++++++++++++++++++++
+ app/updates_test.go              | 217 ++++++++++++++++++++++++
+ docs/UPDATES.md                  |  66 ++++++++
+ internal/updates/updates.go      | 279 +++++++++++++++++++++++++++++++
+ internal/updates/updates_test.go | 227 +++++++++++++++++++++++++
+ 11 files changed, 1079 insertions(+)
+ create mode 100644 app/updates_test.go
+ create mode 100644 docs/UPDATES.md
+ create mode 100644 internal/updates/updates.go
+ create mode 100644 internal/updates/updates_test.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 445730e..c3ffc98 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -63,6 +63,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Membership and auto-tuning.** loginStatus's `vip_type` uses its own scheme (22 for an annual SVIP). The membership level comes from `/rest/2.0/xpan/nas?method=uinfo` (0/1/2), and the expiry from `/rest/2.0/membership/user`. `internal/tune` probes one setting after another, each with the best of those before it: the download host (`DownloadURLs` returns every host LocateDownload offers, `Client.SetHosts` ranks them for `DownloadURL`), connections per file, request (block) size, files at once (a second large file alongside), and upload connections (`ProbeUpload`: random parts to a precreated upload that is never joined, so nothing is kept). `Recommend` picks the fewest within 90% of the fastest (never-refused samples only), the block size nearest 4 MB within 5%, and derives how many connections players and previews read with (`Ahead`, enough for 8 MB/s). Defaults by level come from `ForVIP`. The app measures once per membership level per week (`app/tuning.go`, stored in `settings.Tune`; a result whose `Version` is older than `tune.Version` is measured again). `settings.Manual` overrides only the counts (threads, files, upload); host, block and read-ahead stay measured. `useSettings` pushes the result into the transfer manager (`Threads`, `Upload`, `Parallel`, `Block`; a resumed download keeps the block size in its `.bngdl.json`), the client's host ranking, `remote.Parallel` and the stream server. fakepan serves downloads on two hosts (a mirror port, listed by `/locatedownload`) and discards `/upload?probe`.
+ 
++**Update checks (`internal/updates`).** The settings page's 更新 section asks a feed URL for the newest version and downloads its package to the download folder for the user to install by hand — nothing is installed or signature-checked, because MyGo's own updater needs a feed and a signing key baked in at build time. The feed is plain JSON (`version`, `notes`, `url` keyed `GOOS-GOARCH`, or one string for all platforms; format and hand-over notes for the future GitHub Actions release channel in `docs/UPDATES.md`). The address comes from `settings.UpdateURL`, else the build-time `-ldflags "-X …internal/updates.defaultFeed=…"`; with neither, the section shows a 待配置 state and the network is never touched. `settings.AutoUpdate` (nil = on) gates the launch's one silent check (`App.maybeCheckUpdates`, called from `Attach`), and `app/settings_page.go`'s `updatesNow`/`updatesDownload` variables stand in for the two calls in tests.
++
+ **Sign-in sources.** The saved session (`internal/auth`) comes first. If there is none, or it has expired, the app migrates the login of another client on this computer (`internal/migrate`): Baidu's own Linux client first (its Electron cookie store, read with a small pure-Go SQLite reader), then BaiduPCS-Go's active account (`internal/pcsimport`, reading `pcs_config.json`). It skips this when the user signed out on purpose (`settings.SkipImport`). The login screen also offers it as a link. Every sign-in is saved at once, and saved again when `Client.Credentials` changes (the uid found, cookies the netdisk rotated; `Client.OnChange`) and on quit.
+ 
+ **One keyring key for every build.** `mygo.Secrets` names its service after the build (`<identifier>.dev` under `mygo dev`, the app name under `go run`, the identifier when packaged), so `OpenStore` pins the key to `com.pengstem.baidunetgo`. `auth.Store.Older` lists the old services: `Load` tries their keys and saves the session again under the pinned one.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d0adab9..74d342e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,8 @@
+ 
+ ### 新增
+ 
++- 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录并提示手动安装（当前构建未内置更新签名密钥，不做自动安装）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
++- 设置页「关于」新增社区修复版声明：本版本基于上游 pengstem/baidunetgo，由 DeepSeek 与 GLM 协作修复与增强；README 顶部也加了同样的说明。
+ - 文件操作撤销：`Cmd+Z`（macOS 为 ⌘Z、其它平台为 Ctrl+Z）撤销上一步文件操作——移动（含剪切粘贴、拖拽移动）把文件移回原处和原名，复制删除这次复制出的副本，重命名改回原名，新建文件夹移入回收站，删除到回收站则从回收站还原，回收站的还原会再次删除；替换过的同名文件在撤销时一并恢复。撤销栈只在内存里、按会话保留（最多 50 步，重启不保留、注销清空），只撤最后一步；撤销失败（如原处已有同名项目）会报错并保留该步以便重试，上传完成与清空回收站 / 彻底删除不记入撤销。
+ - 界面字体族与字号新增「跟随本机 fontconfig」：默认读取 `fc-match sans-serif` 解析出的字体（字号按 1pt ≈ 4/3 DIP 换算并限幅 11–17），可在设置页「外观」里关闭改用内置字体；`BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖，没有 fontconfig 时静默回落。
+ - 查重结果行新增右键菜单：打开预览（同一重复组的图片可在预览里用左右键翻页）、在文件夹中显示、复制路径。
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 97e5dcb..59daadd 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -63,6 +63,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Membership and auto-tuning.** loginStatus's `vip_type` uses its own scheme (22 for an annual SVIP). The membership level comes from `/rest/2.0/xpan/nas?method=uinfo` (0/1/2), and the expiry from `/rest/2.0/membership/user`. `internal/tune` probes one setting after another, each with the best of those before it: the download host (`DownloadURLs` returns every host LocateDownload offers, `Client.SetHosts` ranks them for `DownloadURL`), connections per file, request (block) size, files at once (a second large file alongside), and upload connections (`ProbeUpload`: random parts to a precreated upload that is never joined, so nothing is kept). `Recommend` picks the fewest within 90% of the fastest (never-refused samples only), the block size nearest 4 MB within 5%, and derives how many connections players and previews read with (`Ahead`, enough for 8 MB/s). Defaults by level come from `ForVIP`. The app measures once per membership level per week (`app/tuning.go`, stored in `settings.Tune`; a result whose `Version` is older than `tune.Version` is measured again). `settings.Manual` overrides only the counts (threads, files, upload); host, block and read-ahead stay measured. `useSettings` pushes the result into the transfer manager (`Threads`, `Upload`, `Parallel`, `Block`; a resumed download keeps the block size in its `.bngdl.json`), the client's host ranking, `remote.Parallel` and the stream server. fakepan serves downloads on two hosts (a mirror port, listed by `/locatedownload`) and discards `/upload?probe`.
+ 
++**Update checks (`internal/updates`).** The settings page's 更新 section asks a feed URL for the newest version and downloads its package to the download folder for the user to install by hand — nothing is installed or signature-checked, because MyGo's own updater needs a feed and a signing key baked in at build time. The feed is plain JSON (`version`, `notes`, `url` keyed `GOOS-GOARCH`, or one string for all platforms; format and hand-over notes for the future GitHub Actions release channel in `docs/UPDATES.md`). The address comes from `settings.UpdateURL`, else the build-time `-ldflags "-X …internal/updates.defaultFeed=…"`; with neither, the section shows a 待配置 state and the network is never touched. `settings.AutoUpdate` (nil = on) gates the launch's one silent check (`App.maybeCheckUpdates`, called from `Attach`), and `app/settings_page.go`'s `updatesNow`/`updatesDownload` variables stand in for the two calls in tests.
++
+ **Sign-in sources.** The saved session (`internal/auth`) comes first. If there is none, or it has expired, the app migrates the login of another client on this computer (`internal/migrate`): Baidu's own Linux client first (its Electron cookie store, read with a small pure-Go SQLite reader), then BaiduPCS-Go's active account (`internal/pcsimport`, reading `pcs_config.json`). It skips this when the user signed out on purpose (`settings.SkipImport`). The login screen also offers it as a link. Every sign-in is saved at once, and saved again when `Client.Credentials` changes (the uid found, cookies the netdisk rotated; `Client.OnChange`) and on quit.
+ 
+ **One keyring key for every build.** `mygo.Secrets` names its service after the build (`<identifier>.dev` under `mygo dev`, the app name under `go run`, the identifier when packaged), so `OpenStore` pins the key to `com.pengstem.baidunetgo`. `auth.Store.Older` lists the old services: `Load` tries their keys and saves the session again under the pinned one.
+diff --git a/README.md b/README.md
+index ab81ed1..b2a4568 100644
+--- a/README.md
++++ b/README.md
+@@ -2,6 +2,8 @@
+ 
+ 一个用纯 Go 写的百度网盘桌面客户端：界面由 [MyGo](https://github.com/egoist/mygo) 的原生 `ui` 包在 GPU 上绘制（没有 WebView、没有 cgo），网盘能力来自把 [BaiduPCS-Go](https://github.com/qjfoidnh/BaiduPCS-Go) 当作库使用。外观照 macOS 原生应用来做：侧边栏透出窗口材质、彩色图标块、条纹列表、圆角分组。
+ 
++> **关于本版本**：这是基于上游 [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) 的本地补丁构建（社区修复版），由 DeepSeek 与 GLM 协作完成修复与增强——查重、文件快捷键、拖动移动与框选、撤销、窗口自适应、字体跟随等；非官方发布，与上游的关系是补丁而非分支产品。更新检查见 [docs/UPDATES.md](docs/UPDATES.md)。
++
+ ![网格浏览](docs/screenshots/grid.png)
+ 
+ | | |
+diff --git a/app/app.go b/app/app.go
+index 4322c3e..b4f03c8 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -68,6 +68,7 @@ type App struct {
+ 	recycleDirty bool
+ 	found        searchState
+ 	xfer         *transfer.Manager
++	updates      updateState // the settings page's 更新 section
+ 	stream       *stream.Server
+ 	tuning       bool   // measuring download speeds
+ 	tuneErr      string // why the last measurement failed
+@@ -157,6 +158,9 @@ func (a *App) Attach(win *mygo.Window) {
+ 		}
+ 	})
+ 	a.boot()
++	// The launch's one automatic update check, quiet and off the UI
++	// thread; it skips itself while no feed address is set.
++	a.maybeCheckUpdates()
+ }
+ 
+ // askToQuit reports whether quitting must wait for the user, who is asked
+diff --git a/app/settings.go b/app/settings.go
+index 7a8dd55..43cf18c 100644
+--- a/app/settings.go
++++ b/app/settings.go
+@@ -8,6 +8,7 @@ import (
+ 	"github.com/egoist/mygo"
+ 
+ 	"github.com/pengstem/baidunetgo/internal/tune"
++	"github.com/pengstem/baidunetgo/internal/updates"
+ )
+ 
+ // settings are the user's choices, kept as JSON in the app's data
+@@ -36,6 +37,16 @@ type settings struct {
+ 	// fontconfig default sans-serif. nil means yes, so it is on by default
+ 	// and can be turned off; false keeps the built-in 13 DIP font.
+ 	FollowSystemFont *bool `json:"follow_system_font,omitempty"`
++	// AutoUpdate makes the app check the update feed when it starts.
++	// nil means yes, so it is on by default and can be turned off.
++	AutoUpdate *bool `json:"auto_update,omitempty"`
++	// UpdateURL is the update feed's address, empty until the release
++	// channel exists; then updates.defaultFeed, set at build time, is
++	// used, which the settings' own address replaces.
++	UpdateURL string `json:"update_url,omitempty"`
++	// UpdateChannel is which releases to follow, stable or beta; empty
++	// means stable. No feed publishes channels yet, so nothing reads it.
++	UpdateChannel string `json:"update_channel,omitempty"`
+ }
+ 
+ // followSystemFont reports whether the interface follows fontconfig's
+@@ -44,6 +55,21 @@ func (s settings) followSystemFont() bool {
+ 	return s.FollowSystemFont == nil || *s.FollowSystemFont
+ }
+ 
++// autoUpdate reports whether the app checks the update feed by itself;
++// unset, as a fresh install is, means it does.
++func (s settings) autoUpdate() bool {
++	return s.AutoUpdate == nil || *s.AutoUpdate
++}
++
++// updateURL is the feed to check: the address set in the settings, else
++// the one built into this app, else none.
++func (s settings) updateURL() string {
++	if s.UpdateURL != "" {
++		return s.UpdateURL
++	}
++	return updates.DefaultFeed()
++}
++
+ type tuneRecord struct {
+ 	VIP    int          `json:"vip"`
+ 	Result *tune.Result `json:"result"`
+diff --git a/app/settings_page.go b/app/settings_page.go
+index 4bce35d..0f9d25f 100644
+--- a/app/settings_page.go
++++ b/app/settings_page.go
+@@ -1,14 +1,44 @@
+ package app
+ 
+ import (
++	"context"
+ 	"math"
++	"net/url"
++	"path/filepath"
++	"strings"
++	"time"
+ 
+ 	"github.com/egoist/mygo"
+ 	"github.com/egoist/mygo/ui"
+ 
+ 	"github.com/pengstem/baidunetgo/internal/player"
++	"github.com/pengstem/baidunetgo/internal/updates"
+ )
+ 
++// updatesNow and updatesDownload do the checking and the fetching; they
++// are variables so tests can stand in for them.
++var (
++	updatesNow      = updates.Check
++	updatesDownload = updates.Download
++)
++
++// updateState is what the settings page's 更新 section shows: whether a
++// check or a download runs now and what the last ones found. It survives
++// a sign-out, so a result found before it is not lost.
++type updateState struct {
++	checking    bool          // a check runs now
++	lastCheck   time.Time     // when the last check finished
++	lastResult  string        // what it said, as a short summary
++	found       *updates.Info // a newer version the last check brought
++	downloading bool          // the found version's package downloads now
++	progress    float32       // how far that download went, 0 to 1
++	lastPath    string        // where the last package landed
++	err         string        // why the last check or download failed
++	editing     bool          // the 更新地址 dialog is open
++	draft       string        // what that dialog edits
++	autoDone    bool          // this launch's automatic check ran
++}
++
+ // version is the app's version, which mygo build links in from mygo.json.
+ // Builds run with go run or mygo dev have none.
+ func version() string {
+@@ -44,6 +74,218 @@ func (a *App) useSettings() {
+ 	}
+ }
+ 
++// checkUpdates asks the update feed whether a newer version is out, on a
++// goroutine, writing what it finds back through a.update. auto marks the
++// launch's own check, which stays quiet: no toast, so a failure waits in
++// the settings page instead of interrupting.
++func (a *App) checkUpdates(auto bool) {
++	st := &a.updates
++	if st.checking || st.downloading {
++		return
++	}
++	feed := a.settings.updateURL()
++	if feed == "" {
++		st.autoDone = true
++		st.lastCheck, st.found, st.lastResult = time.Now(), nil, ""
++		st.err = "更新地址未配置：等待发布通道就绪后填入"
++		return
++	}
++	cur := version()
++	st.checking, st.err, st.found, st.autoDone = true, "", nil, true
++	go func() {
++		info, err := updatesNow(context.Background(), feed, mygo.App.Version())
++		a.update(func() {
++			st := &a.updates
++			st.checking = false
++			st.lastCheck = time.Now()
++			if err != nil {
++				st.found, st.lastResult = nil, ""
++				st.err = err.Error()
++				return
++			}
++			st.err, st.lastPath = "", ""
++			st.found = info
++			if info.Newer {
++				st.lastResult = "发现新版本 " + info.Version
++				if !auto {
++					a.toast("发现新版本 "+info.Version, "success")
++				}
++			} else {
++				st.lastResult = "已是最新版本（" + cur + "）"
++			}
++		})
++	}()
++}
++
++// maybeCheckUpdates runs the launch's one automatic check, once the app
++// is signed in, when the user left it on and a feed is set. Called on the
++// UI thread; the request goes on checkUpdates's goroutine.
++func (a *App) maybeCheckUpdates() {
++	if a.updates.autoDone {
++		return
++	}
++	if !a.settings.autoUpdate() || a.settings.updateURL() == "" {
++		a.updates.autoDone = true
++		return
++	}
++	a.checkUpdates(true)
++}
++
++// downloadUpdate fetches the found version's package into the download
++// folder on a goroutine, reporting the progress into the settings page.
++// It does not install anything: this build carries no update signing key,
++// so the package waits for the user to install it (docs/UPDATES.md).
++func (a *App) downloadUpdate() {
++	st := &a.updates
++	if st.found == nil || st.downloading || st.checking {
++		return
++	}
++	info := *st.found
++	dest := a.settings.downloadDir()
++	st.downloading, st.progress, st.err = true, 0, ""
++	go func() {
++		p, err := updatesDownload(context.Background(), &info, dest, func(done, total int64) {
++			if total <= 0 {
++				return
++			}
++			frac := float32(done) / float32(total)
++			a.update(func() { a.updates.progress = frac })
++		})
++		a.update(func() {
++			st := &a.updates
++			st.downloading = false
++			if err != nil {
++				st.err = err.Error()
++				return
++			}
++			st.progress, st.lastPath = 1, p
++			st.lastResult = "已下载：" + filepath.Base(p)
++			a.toast("已下载到 "+p, "success")
++		})
++	}()
++}
++
++// saveUpdateURL keeps the 更新地址 dialog's address, forgetting the last
++// check's result, which answered the old address.
++func (a *App) saveUpdateURL() {
++	a.updates.editing = false
++	v := strings.TrimSpace(a.updates.draft)
++	if a.settings.UpdateURL == v {
++		return
++	}
++	a.settings.UpdateURL = v
++	a.updates.found, a.updates.lastResult, a.updates.err, a.updates.lastPath = nil, "", "", ""
++	a.updates.autoDone = false // a new address is worth a fresh check
++	a.applySettings()
++}
++
++// updateHost names a feed's host, for a detail line.
++func updateHost(feed string) string {
++	if u, err := url.Parse(feed); err == nil && u.Host != "" {
++		return u.Host
++	}
++	return feed
++}
++
++// updatesSection is the settings page's 更新 group: the switch, the check
++// itself and the feed's address.
++func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
++	s := &a.settings
++	st := &a.updates
++	section(c, t, p, "更新", func() {
++		on := s.autoUpdate()
++		detail := ""
++		if feed := s.updateURL(); feed != "" {
++			detail = "检查 " + updateHost(feed) + " 的更新"
++			if !st.lastCheck.IsZero() {
++				detail += " · 上次检查 " + st.lastCheck.Format("15:04")
++			}
++			if st.lastResult != "" {
++				detail += "：" + st.lastResult
++			}
++		} else {
++			detail = "更新地址未配置：等待发布通道就绪后填入"
++		}
++		settingRow(c, t, p, "自动检查更新", "", detail, func() {
++			if ui.Switch(c, &on).Label("自动检查更新").Changed() {
++				v := on
++				s.AutoUpdate = &v
++				a.applySettings()
++			}
++		})
++		checkDetail := "检查是否有新版本"
++		switch {
++		case st.checking:
++			checkDetail = "正在检查更新…"
++		case st.downloading:
++			checkDetail = "正在下载 " + st.found.Version + "：" + itoa(int(math.Round(float64(st.progress)*100))) + "%"
++		case st.err != "":
++			checkDetail = st.err
++		case st.lastPath != "":
++			checkDetail = "已下载：" + st.lastPath
++		case st.found != nil && st.found.Newer:
++			checkDetail = "发现新版本 " + st.found.Version
++			if st.found.Notes != "" {
++				checkDetail += "：" + st.found.Notes
++			}
++		case st.lastResult != "":
++			checkDetail = st.lastResult
++		case s.updateURL() == "":
++			checkDetail = "更新地址未配置：等待发布通道就绪后填入"
++		}
++		settingRow(c, t, p, "检查更新", "", checkDetail, func() {
++			if st.downloading {
++				ui.Spinner(c).Label("下载中")
++				return
++			}
++			if pill(c, t, p, "refresh-cw", "立即检查", false).Disabled(st.checking).Clicked() {
++				a.checkUpdates(false)
++			}
++			if st.found != nil && st.found.Newer {
++				if pill(c, t, p, "download", "下载", true).Clicked() {
++					a.downloadUpdate()
++				}
++			}
++		})
++		shown := s.UpdateURL
++		if shown == "" {
++			shown = "未设置"
++		} else if u, err := url.Parse(shown); err == nil && u.Host != "" {
++			shown = u.Host + u.Path
++		}
++		settingRow(c, t, p, "更新地址", "", shown, func() {
++			if pill(c, t, p, "pencil", "编辑…", false).Clicked() {
++				st.draft = s.UpdateURL
++				st.editing = true
++			}
++		})
++	})
++}
++
++// updateDialog asks for the feed's address in a small dialog of the
++// settings page's own, like the dedup page's pickers.
++func (a *App) updateDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	st := &a.updates
++	ui.Modal(c, &st.editing, func() {
++		dialogTitle(c, t, "更新地址", "发布通道的 feed 地址，留空表示未配置")
++		in := ui.TextInputBase(c.Key("update-url"), &st.draft).Label("更新地址").
++			Placeholder("https://example.com/update.json").Grow(1)
++		ui.Text(c, "留空时检查更新显示为待配置状态，不会请求网络；发布通道就绪后填入即可。").
++			FontSize(11).TextColor(t.TextMuted)
++		ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++			if pill(c, t, p, "", "取消", false).Clicked() {
++				st.editing = false
++			}
++			if pill(c, t, p, "", "保存", true).Clicked() {
++				a.saveUpdateURL()
++			}
++		})
++		if in.Submitted() {
++			a.saveUpdateURL()
++		}
++	})
++}
++
+ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	s := &a.settings
+ 	ui.Scroll(c).Grow(1).Padding(12, 24, 40).Children(func() {
+@@ -93,15 +335,25 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 					}
+ 				})
+ 			})
++			a.updatesSection(c, t, p)
+ 			section(c, t, p, "关于", func() {
+ 				settingRow(c, t, p, "BaiduNetGo", "", version()+" · 百度网盘的原生桌面客户端", func() {
+ 					if pill(c, t, p, "external-link", "项目主页", false).Clicked() {
+ 						c.OpenURL("https://github.com/pengstem/baidunetgo")
+ 					}
+ 				})
++				// 社区修复版的声明：谁改了什么。
++				ui.Row(c).MinHeight(48).Padding(8, 0).Gap(12).AlignItems(ui.Center).Children(func() {
++					ui.Column(c).Grow(1).Shrink(1).Gap(3).Children(func() {
++						ui.Text(c, "本版本为社区修复版")
++						ui.Text(c, "由 DeepSeek 与 GLM 协作修复与增强：查重、文件快捷键、拖动移动与框选、撤销、窗口自适应、字体跟随等；基于上游 pengstem/baidunetgo 的本地补丁构建，非官方发布。").
++							FontSize(11).TextColor(t.TextMuted)
++					})
++				})
+ 			})
+ 		})
+ 	})
++	a.updateDialog(c, t, p)
+ }
+ 
+ // section is a group of settings under its title: a rounded gray panel,
+diff --git a/app/updates_test.go b/app/updates_test.go
+new file mode 100644
+index 0000000..e052999
+--- /dev/null
++++ b/app/updates_test.go
+@@ -0,0 +1,217 @@
++package app
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"runtime"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++)
++
++// updateFeed serves a feed announcing version, with the package it names
++// on the same server.
++func updateFeed(t *testing.T, version string) *httptest.Server {
++	t.Helper()
++	var srv *httptest.Server
++	mux := http.NewServeMux()
++	mux.HandleFunc("/update.json", func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		w.Write([]byte(`{"version":"` + version + `","notes":"测试更新","url":{"` +
++			runtime.GOOS + `-` + runtime.GOARCH + `":"` + srv.URL + `/pkg.bin"}}`))
++	})
++	mux.HandleFunc("/pkg.bin", func(w http.ResponseWriter, r *http.Request) {
++		w.Write([]byte("假装是安装包"))
++	})
++	srv = httptest.NewServer(mux)
++	t.Cleanup(srv.Close)
++	return srv
++}
++
++func settingsView(t *testing.T, a *App, tt *ui.Tester) {
++	t.Helper()
++	a.router.Push("/settings")
++	waitFor(t, tt, "自动检查更新")
++	tt.Advance(time.Second)
++}
++
++// scrollToShow scrolls the settings page down until text shows whole, and
++// returns where it is.
++func scrollToShow(t *testing.T, tt *ui.Tester, text string) ui.Rect {
++	t.Helper()
++	const w, h = 1180, 760 // the tester's window
++	for i := 0; i < 40; i++ {
++		if r, ok := tt.Find(text); ok && r.H > 0 && r.W > 0 && r.Y >= 0 && r.Y+r.H <= h {
++			return r
++		}
++		tt.Wheel(w/2, h/2, 0, 240)
++		tt.Advance(80 * time.Millisecond)
++	}
++	t.Fatalf("%q never scrolled into view; texts %q", text, tt.Texts())
++	return ui.Rect{}
++}
++
++// TestSettingsUpdates checks the 更新 section's looks before any feed
++// exists: the switch on, the address 待配置, and the patch's declaration.
++func TestSettingsUpdates(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	settingsView(t, a, tt)
++	for _, want := range []string{
++		"更新地址未配置：等待发布通道就绪后填入",
++		"本版本为社区修复版",
++		"由 DeepSeek 与 GLM 协作修复与增强",
++	} {
++		if !tt.HasText(want) {
++			t.Errorf("%q missing; texts %q", want, tt.Texts())
++		}
++	}
++	if a.settings.AutoUpdate != nil || a.settings.UpdateURL != "" || a.settings.UpdateChannel != "" {
++		t.Errorf("update settings %+v, want the defaults", a.settings)
++	}
++}
++
++// TestSettingsAutoUpdateSwitch flips the switch and checks it is kept.
++func TestSettingsAutoUpdateSwitch(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	settingsView(t, a, tt)
++	toggle := func() bool {
++		t.Helper()
++		sw, ok := tt.AccessByRole(ui.RoleSwitch, "自动检查更新")
++		if !ok {
++			t.Fatalf("no switch; texts %q", tt.Texts())
++		}
++		scrollToShow(t, tt, "自动检查更新")
++		sw, ok = tt.AccessByRole(ui.RoleSwitch, "自动检查更新")
++		if !ok {
++			t.Fatal("the switch vanished while scrolling")
++		}
++		b := sw.Bounds
++		tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++		tt.Advance(300 * time.Millisecond)
++		return a.settings.autoUpdate()
++	}
++	if toggle() {
++		t.Fatal("the switch was on after the first click, which turns it off")
++	}
++	if a.settings.AutoUpdate == nil || *a.settings.AutoUpdate {
++		t.Errorf("AutoUpdate %+v, want false", a.settings.AutoUpdate)
++	}
++	if !toggle() {
++		t.Fatal("turning it back on did not take")
++	}
++}
++
++// TestCheckUpdatesNotConfigured presses 立即检查 with no address and
++// expects a 待配置 note, not a panic nor a network call.
++func TestCheckUpdatesNotConfigured(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	settingsView(t, a, tt)
++	scrollToShow(t, tt, "立即检查")
++	if err := tt.Click("立即检查"); err != nil {
++		t.Fatal(err)
++	}
++	waitFor(t, tt, "更新地址未配置")
++	if a.updates.checking || a.updates.err != "更新地址未配置：等待发布通道就绪后填入" {
++		t.Errorf("state %+v after the click", a.updates)
++	}
++}
++
++// TestCheckAndDownload finds a newer version on a local feed and downloads
++// its package into the download folder.
++func TestCheckAndDownload(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	srv := updateFeed(t, "9.9.9")
++	dest := t.TempDir()
++	a.settings.UpdateURL = srv.URL + "/update.json"
++	a.settings.DownloadDir = dest
++	settingsView(t, a, tt)
++	scrollToShow(t, tt, "立即检查")
++	if err := tt.Click("立即检查"); err != nil {
++		t.Fatal(err)
++	}
++	waitFor(t, tt, "发现新版本 9.9.9")
++	if a.updates.found == nil || !a.updates.found.Newer || a.updates.found.URL != srv.URL+"/pkg.bin" {
++		t.Fatalf("found %+v", a.updates.found)
++	}
++	scrollToShow(t, tt, "下载")
++	if err := tt.Click("下载"); err != nil {
++		t.Fatal(err)
++	}
++	waitFor(t, tt, "已下载：pkg.bin")
++	if a.updates.downloading || a.updates.lastPath == "" {
++		t.Fatalf("state after download: %+v", a.updates)
++	}
++	data, err := os.ReadFile(filepath.Join(dest, "pkg.bin"))
++	if err != nil || string(data) != "假装是安装包" {
++		t.Errorf("package not on disk as downloaded: %q, %v", data, err)
++	}
++	if _, err := os.Stat(filepath.Join(dest, "pkg.bin.part")); !os.IsNotExist(err) {
++		t.Errorf("a .part file survived: %v", err)
++	}
++	if !tt.HasText("已下载到 " + filepath.Join(dest, "pkg.bin")) {
++		t.Errorf("no toast with the path; texts %q", tt.Texts())
++	}
++}
++
++// TestAutoCheckQuiet runs the launch's automatic check: skipped with no
++// address, silent and working with one.
++func TestAutoCheckQuiet(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	a.maybeCheckUpdates()
++	// A skip says nothing: no check ran, no result appeared.
++	if !a.updates.autoDone || a.updates.checking || a.updates.err != "" ||
++		a.updates.found != nil || !a.updates.lastCheck.IsZero() {
++		t.Fatalf("state after the skipped check: %+v", a.updates)
++	}
++
++	// With an address, the automatic check runs and stays quiet.
++	srv := updateFeed(t, "9.9.9")
++	a.settings.UpdateURL = srv.URL + "/update.json"
++	a.updates.autoDone = false
++	a.maybeCheckUpdates()
++	if a.updates.checking != true {
++		t.Fatal("the automatic check did not start")
++	}
++	deadline := time.Now().Add(5 * time.Second)
++	for a.updates.found == nil {
++		if time.Now().After(deadline) {
++			t.Fatalf("the automatic check never came back; state %+v", a.updates)
++		}
++		time.Sleep(10 * time.Millisecond)
++		tt.Advance(50 * time.Millisecond)
++	}
++	if a.updates.err != "" {
++		t.Errorf("the automatic check errored: %q", a.updates.err)
++	}
++}
++
++// TestUpdateURLDialog edits the address in the settings page's dialog.
++func TestUpdateURLDialog(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	settingsView(t, a, tt)
++	scrollToShow(t, tt, "编辑…")
++	if err := tt.Click("编辑…"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(300 * time.Millisecond)
++	if !a.updates.editing {
++		t.Fatal("the dialog did not open")
++	}
++	tt.Type("https://feeds.example.com/update.json")
++	tt.Key(0, ui.KeyEnter)
++	waitFor(t, tt, "feeds.example.com")
++	if a.updates.editing {
++		t.Error("the dialog stayed open")
++	}
++	if a.settings.UpdateURL != "https://feeds.example.com/update.json" {
++		t.Errorf("UpdateURL %q", a.settings.UpdateURL)
++	}
++	if p := settingsPath(); p != "" {
++		if _, err := os.Stat(p); err != nil {
++			t.Errorf("settings not saved: %v", err)
++		}
++	}
++}
+diff --git a/docs/UPDATES.md b/docs/UPDATES.md
+new file mode 100644
+index 0000000..04b51f7
+--- /dev/null
++++ b/docs/UPDATES.md
+@@ -0,0 +1,66 @@
++# 更新检查（internal/updates）
++
++设置页的「更新」小节由 `internal/updates` 提供能力：向一个 feed 地址询问最新版本，发现新版本时把安装包下载到本机，由用户手动安装。本文是给下一个接手自动化发布的人的交接文档。
++
++## 现状
++
++- 设置里可以填「更新地址」（feed 的 URL），留空表示未配置；未配置时功能显示为「待配置」状态，不发任何网络请求、不报错、不崩溃。
++- 「自动检查更新」开关默认开（`settings.AutoUpdate`，nil 即开，写法同 `FollowSystemFont`）。应用启动并登录后静默检查一次（`App.maybeCheckUpdates`，在 `Attach` 里触发）；失败不打扰，结果只写进设置页。
++- 「立即检查」手动检查；发现新版本后出现「下载」按钮，把该平台（`GOOS-GOARCH`）的安装包下载到下载目录（`settings.downloadDir()`），先写 `.part` 再改名落盘；完成后 toast「已下载到 …」。
++- **不自动安装。** MyGo 内建的 `mygo.Updater` 需要在 `mygo build` 时注入 feed 与签名公钥（`mygo.config.ts` 的 `updates.enabled/feed/publicKey`，经 ldflags 进入构建）；本地未签名的构建即使接了 feed 也过不了签名校验。所以现阶段只下载、提示手动安装。
++- feed 地址的优先级：`settings.UpdateURL` 非空时用它；否则用构建时注入的 `updates.defaultFeed`（见下）；都为空即未配置。
++- 设置里还预留了 `UpdateChannel`（`stable`/`beta`，默认空），当前没有任何代码读它，供将来区分发布通道。
++
++## Feed JSON 格式
++
++Check 期望一个 JSON 文档（GET，10 秒超时，跟随系统代理；响应超过 1 MiB 截断）：
++
++```json
++{
++  "version": "0.8.4",
++  "notes": "修复了……",
++  "url": {
++    "linux-amd64":   "https://…/baidunetgo-0.8.4-linux-amd64.tar.gz",
++    "windows-amd64": "https://…/baidunetgo-0.8.4-windows-amd64.zip",
++    "darwin-universal": "https://…/BaiduNetGo-0.8.4.dmg"
++  }
++}
++```
++
++- `version` 必填；按数字段逐段比较（忽略前缀 `v`、忽略 `-beta` 之类的后缀），`0.8.10 > 0.8.9`。候选版本无法解析时报「无法解析更新信息」。
++- `url` 可以是按 `GOOS-GOARCH` 的表，也可以是一个对所有平台通用的字符串。缺本平台条目时下载会报「更新信息没有 linux-amd64 的下载地址」。
++- 未知字段一律忽略，解析是宽容的。
++- 检查（`updates.Check`）返回的 `Info.Newer` 已经比过当前版本；开发版（`mygo.App.Version()` 为空）采纳 feed 的说法。
++
++## defaultFeed 注入点
++
++`internal/updates.defaultFeed` 是包级变量，构建时注入：
++
++```bash
++go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFeed=https://example.com/updates/update.json"
++```
++
++`mygo build` 的场景可以在 `mygo.config.ts`（或打包脚本）里加对应 ldflags。feed 一旦固定，也可以直接把它作为默认值写进构建，用户零配置。
++
++## 手动安装
++
++下载得到的文件在系统下载目录（或设置里指定的位置）。Linux 上解包后把二进制放进 PATH；macOS 打开 dmg 拖进「应用程序」；Windows 运行 zip 里的安装器或直接替换 exe。应用不校验下载文件的签名——feed 本身要可信（HTTPS、域名可控）。
++
++## 接入 GitHub Actions 的交接清单
++
++发布通道建好后，按顺序做：
++
++1. **构建产物**：workflow 在 Linux/Windows/macOS 上各构建一次（可复用 `.github/workflows/release.yml` 的矩阵），产物命名带版本与平台，如 `baidunetgo-<version>-linux-amd64.tar.gz`、`baidunetgo-<version>-windows-amd64.zip`、`BaiduNetGo-<version>.dmg`，上传到 GitHub Release。
++2. **Feed 文件**：生成一份本文「Feed JSON 格式」的 JSON（或每平台一份 `update-<GOOS>-<GOARCH>.json`，只要 URL 指向它即可），指向该版本各平台的 Release 资产，提交到一个固定分支（如 `updates`）或以 Release 资产形式上传，得到稳定 URL，例如
++   `https://raw.githubusercontent.com/<owner>/<repo>/updates/update.json`。
++3. **填入地址**：把该 URL 填进设置页「更新地址」；或作为默认值打进构建（上面的 defaultFeed 注入点）。`mygo.json` 里**不要**手工加 `updates` 字段——那会激活 MyGo 内建更新器，在没有签名公钥时构建会失败或行为改变。
++4. **（可选）迁移到 MyGo 内建更新器**：如果以后想自动安装，需要
++   - `mygo.config.ts` 里配置 `updates.enabled/feed/publicKey`（feed 要求公开可访问的仓库），生成并保管好 minisign 私钥，每次发版用 `mygo build` 注入；
++   - 代码上把 `app/settings_page.go` 里 `checkUpdates`/`downloadUpdate` 对 `updatesNow`/`updatesDownload` 的调用整体替换为 `mygo.Updater.Check` / `Update.Install` / `mygo.App.Relaunch()`，`internal/updates` 的 `isNewer` 与 feed 解析即可废弃；
++   - 设置页的「更新地址」行改为只读展示或删除，`settings.UpdateURL` 保留做兼容。
++   - 迁移前注意：本实现的下载不校验签名，切换时旧的「下载目录里的安装包」流程直接消失，不影响已下载文件。
++
++## 测试
++
++- `go test ./internal/updates`：版本比较、feed 解析（宽容格式、缺字段、坏 JSON、非 200、超时）、下载（文件名、内容、`.part` 不残留、进度回调、失败清理、取消）。
++- `go test ./app -run 'TestSettingsUpdates|TestSettingsAutoUpdateSwitch|TestCheckUpdatesNotConfigured|TestCheckAndDownload|TestAutoCheckQuiet|TestUpdateURLDialog'`：设置页 UI 与状态机，feed 用 `httptest` 本地服务，不打真实网络。
+diff --git a/internal/updates/updates.go b/internal/updates/updates.go
+new file mode 100644
+index 0000000..fe0ce8a
+--- /dev/null
++++ b/internal/updates/updates.go
+@@ -0,0 +1,279 @@
++// Package updates checks a feed for a newer BaiduNetGo build and
++// downloads its package for this platform. This build signs nothing and
++// installs nothing: a newer version is fetched to the download folder for
++// the user to install by hand, until a feed run by the release workflow
++// takes over and MyGo's own updater replaces this package.
++package updates
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/egoist/mygo/netproxy"
++)
++
++// defaultFeed is the feed checked when the settings name none, meant to
++// be linked in at build time with
++// -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFeed=…".
++// Empty until the release workflow publishes one (docs/UPDATES.md).
++var defaultFeed string
++
++// DefaultFeed is the feed checked when the settings name none.
++func DefaultFeed() string { return defaultFeed }
++
++// checkTimeout bounds one feed request, downloadTimeout the whole
++// download. Variables so tests can shorten them.
++var (
++	checkTimeout    = 10 * time.Second
++	downloadTimeout = 10 * time.Minute
++)
++
++// ErrNotConfigured says no feed is set: the release channel is not up yet,
++// which is a state to show, not an error to crash on.
++var ErrNotConfigured = errors.New("更新地址未配置")
++
++// Info is what a feed offers for this platform.
++type Info struct {
++	Version string // the newest version, like 0.8.4
++	Notes   string // what it changes, shown as is
++	URL     string // where this platform's package is
++	Newer   bool   // whether it is newer than the running build
++}
++
++// feed is a feed document. URL holds one address for every platform,
++// keyed GOOS-GOARCH; a feed that publishes one package only may set it to
++// a plain string, which this accepts.
++type feed struct {
++	Version string          `json:"version"`
++	Notes   string          `json:"notes"`
++	URL     json.RawMessage `json:"url"`
++}
++
++// httpClient follows the system proxy, as the netdisk's calls do. The
++// download client has no timeout of its own: its request's context bounds
++// the whole download.
++var (
++	httpClient = &http.Client{
++		Transport: &http.Transport{Proxy: netproxy.Proxy, ForceAttemptHTTP2: true},
++		Timeout:   checkTimeout,
++	}
++	downloadClient = &http.Client{
++		Transport: &http.Transport{Proxy: netproxy.Proxy, ForceAttemptHTTP2: true},
++	}
++	// dlMu keeps downloads one at a time.
++	dlMu sync.Mutex
++)
++
++// Check asks feedURL what the newest version is and reports it, when it is
++// newer than current. An empty feedURL is ErrNotConfigured, current empty
++// (a development build) takes the feed's word.
++func Check(ctx context.Context, feedURL, current string) (*Info, error) {
++	if strings.TrimSpace(feedURL) == "" {
++		return nil, ErrNotConfigured
++	}
++	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
++	defer cancel()
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
++	if err != nil {
++		return nil, fmt.Errorf("更新地址无效：%v", err)
++	}
++	res, err := httpClient.Do(req)
++	if err != nil {
++		return nil, fmt.Errorf("无法连接更新地址：%v", err)
++	}
++	defer res.Body.Close()
++	if res.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("更新地址返回 %s", res.Status)
++	}
++	var f feed
++	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&f); err != nil {
++		return nil, fmt.Errorf("无法解析更新信息：%v", err)
++	}
++	info := &Info{Version: strings.TrimSpace(f.Version), Notes: f.Notes}
++	if info.URL, err = downloadURL(f.URL); err != nil {
++		return nil, err
++	}
++	if info.Version == "" {
++		return nil, errors.New("更新信息缺少版本号")
++	}
++	if _, err := parseVersion(info.Version); err != nil {
++		return nil, fmt.Errorf("无法解析更新信息：%v", err)
++	}
++	info.Newer, _ = isNewer(current, info.Version)
++	return info, nil
++}
++
++// downloadURL picks this platform's address out of the feed's url field:
++// an object keyed GOOS-GOARCH, or one plain address for every platform.
++func downloadURL(raw json.RawMessage) (string, error) {
++	if len(raw) == 0 || string(raw) == "null" {
++		return "", errors.New("更新信息缺少下载地址")
++	}
++	var s string
++	if err := json.Unmarshal(raw, &s); err == nil {
++		if strings.TrimSpace(s) == "" {
++			return "", errors.New("更新信息缺少下载地址")
++		}
++		return s, nil
++	}
++	var m map[string]string
++	if err := json.Unmarshal(raw, &m); err != nil {
++		return "", errors.New("无法解析更新信息：下载地址既不是字符串也不是按平台的表")
++	}
++	if u := m[runtime.GOOS+"-"+runtime.GOARCH]; u != "" {
++		return u, nil
++	}
++	return "", fmt.Errorf("更新信息没有 %s-%s 的下载地址", runtime.GOOS, runtime.GOARCH)
++}
++
++// Download fetches info's package into destDir, writing to a .part file
++// first and renaming it, so a half download is never mistaken for a whole
++// one. progress, when given, hears the bytes done and the total known.
++// It returns where the package landed.
++func Download(ctx context.Context, info *Info, destDir string, progress func(done, total int64)) (string, error) {
++	if info == nil || strings.TrimSpace(info.URL) == "" {
++		return "", errors.New("没有可下载的更新")
++	}
++	dlMu.Lock()
++	defer dlMu.Unlock()
++	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
++	defer cancel()
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.URL, nil)
++	if err != nil {
++		return "", fmt.Errorf("下载地址无效：%v", err)
++	}
++	res, err := downloadClient.Do(req)
++	if err != nil {
++		return "", fmt.Errorf("下载失败：%v", err)
++	}
++	defer res.Body.Close()
++	if res.StatusCode != http.StatusOK {
++		return "", fmt.Errorf("下载失败：服务器返回 %s", res.Status)
++	}
++
++	name := downloadName(info)
++	part := filepath.Join(destDir, name+".part")
++	final := filepath.Join(destDir, name)
++	if err := os.MkdirAll(destDir, 0o755); err != nil {
++		return "", fmt.Errorf("下载失败：无法创建下载目录：%v", err)
++	}
++	f, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
++	if err != nil {
++		return "", fmt.Errorf("下载失败：无法写入临时文件：%v", err)
++	}
++	if _, err := io.Copy(f, &counting{r: res.Body, total: contentLength(res), fn: progress}); err != nil {
++		f.Close()
++		os.Remove(part) // a failed download leaves nothing behind
++		return "", fmt.Errorf("下载失败：%v", err)
++	}
++	if err := f.Close(); err != nil {
++		os.Remove(part)
++		return "", fmt.Errorf("下载失败：%v", err)
++	}
++	if err := os.Rename(part, final); err != nil {
++		os.Remove(part)
++		return "", fmt.Errorf("下载失败：无法保存文件：%v", err)
++	}
++	return final, nil
++}
++
++// downloadName takes the package's name from its address's path, falling
++// back to a name made of the version and this platform.
++func downloadName(info *Info) string {
++	if u, err := url.Parse(info.URL); err == nil {
++		if base := filepath.Base(u.Path); base != "" && base != "/" && base != "." {
++			return base
++		}
++	}
++	return "baidunetgo-" + info.Version + "-" + runtime.GOOS + "-" + runtime.GOARCH + ".bin"
++}
++
++func contentLength(res *http.Response) int64 {
++	if n, err := strconv.ParseInt(res.Header.Get("Content-Length"), 10, 64); err == nil && n > 0 {
++		return n
++	}
++	return 0
++}
++
++// counting hears a copy's progress.
++type counting struct {
++	r     io.Reader
++	total int64
++	done  int64
++	fn    func(done, total int64)
++}
++
++func (c *counting) Read(p []byte) (int, error) {
++	n, err := c.r.Read(p)
++	if n > 0 && c.fn != nil {
++		c.done += int64(n)
++		c.fn(c.done, c.total)
++	}
++	return n, err
++}
++
++// isNewer reports whether candidate is a newer release than current. Both
++// lose a leading v; the numbers are compared part by part, so 0.8.10 beats
++// 0.8.9. A current of none is a development build, which takes the feed's
++// word. A candidate that parses badly is never newer.
++func isNewer(current, candidate string) (bool, error) {
++	cur, err := parseVersion(current)
++	if err != nil {
++		// A development build, or a version nobody parses: any valid
++		// candidate is worth showing.
++		cur = nil
++	}
++	cand, err := parseVersion(candidate)
++	if err != nil {
++		return false, fmt.Errorf("无法比较版本号 %q：%v", candidate, err)
++	}
++	if cand == nil {
++		return false, fmt.Errorf("无法比较版本号 %q：不是版本号", candidate)
++	}
++	if cur == nil {
++		return true, nil
++	}
++	for i := range cand {
++		if i >= len(cur) {
++			return cand[i] > 0, nil // 0.8 is older than 0.8.1
++		}
++		if cand[i] != cur[i] {
++			return cand[i] > cur[i], nil
++		}
++	}
++	return false, nil // equal, or a longer current like 0.8.3.1
++}
++
++// parseVersion reads a version like 0.8.3 or v1.0.0 into its numbers,
++// ignoring what follows them (0.8.3-beta). Empty is a development build.
++func parseVersion(v string) ([]int, error) {
++	v = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(v), "v"))
++	if v == "" {
++		return nil, nil // none, so nil slices apart from a real error
++	}
++	if i := strings.IndexAny(v, "-+"); i >= 0 {
++		v = v[:i]
++	}
++	parts := strings.Split(v, ".")
++	nums := make([]int, len(parts))
++	for i, p := range parts {
++		n, err := strconv.Atoi(p)
++		if err != nil || n < 0 {
++			return nil, fmt.Errorf("版本号 %q 不是数字版本", v)
++		}
++		nums[i] = n
++	}
++	return nums, nil
++}
+diff --git a/internal/updates/updates_test.go b/internal/updates/updates_test.go
+new file mode 100644
+index 0000000..0043890
+--- /dev/null
++++ b/internal/updates/updates_test.go
+@@ -0,0 +1,227 @@
++package updates
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestIsNewer(t *testing.T) {
++	cases := []struct {
++		current, candidate string
++		want               bool
++		wantErr            bool
++	}{
++		{"0.8.3", "0.9.0", true, false},
++		{"0.8.10", "0.8.9", false, false},
++		{"v0.8.3", "v1.0.0", true, false},
++		{"1.0.0", "1.0.0", false, false},
++		{"1.2.3", "1.2.2", false, false},
++		{"0.8.3", "0.8.3.1", true, false},
++		{"0.8.3.1", "0.8.3", false, false},
++		{"", "0.9.0", true, false},           // a development build takes the feed's word
++		{"0.8.3", "0.9.0-beta", true, false}, // a pre-release tag is ignored
++		{"0.8.3", "", false, true},
++		{"0.8.3", "最新", false, true},
++	}
++	for _, c := range cases {
++		got, err := isNewer(c.current, c.candidate)
++		if (err != nil) != c.wantErr {
++			t.Errorf("isNewer(%q, %q) err %v, wantErr %v", c.current, c.candidate, err, c.wantErr)
++			continue
++		}
++		if err == nil && got != c.want {
++			t.Errorf("isNewer(%q, %q) = %v, want %v", c.current, c.candidate, got, c.want)
++		}
++	}
++}
++
++// feedServing serves body at /update.json.
++func feedServing(t *testing.T, body string, code int) *httptest.Server {
++	t.Helper()
++	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/update.json" {
++			http.NotFound(w, r)
++			return
++		}
++		w.WriteHeader(code)
++		fmt.Fprint(w, body)
++	}))
++	t.Cleanup(s.Close)
++	return s
++}
++
++func TestCheckStandardFeed(t *testing.T) {
++	url := `{"linux-amd64": "https://example.com/baidunetgo-0.9.0-linux-amd64.tar.gz"}`
++	s := feedServing(t, `{"version": "0.9.0", "notes": "修复若干问题", "date": "2026-11-14", "url": `+url+`, "unknown": 42}`, 200)
++	info, err := Check(context.Background(), s.URL+"/update.json", "0.8.3")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if info.Version != "0.9.0" || info.Notes != "修复若干问题" {
++		t.Errorf("info %+v", info)
++	}
++	if !info.Newer {
++		t.Error("0.9.0 not reported newer than 0.8.3")
++	}
++	if info.URL != "https://example.com/baidunetgo-0.9.0-linux-amd64.tar.gz" {
++		t.Errorf("url %q", info.URL)
++	}
++}
++
++func TestCheckSimpleFeed(t *testing.T) {
++	s := feedServing(t, `{"version":"1.0.0","url":"https://example.com/pkg.tar.gz"}`, 200)
++	info, err := Check(context.Background(), s.URL+"/update.json", "1.0.0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if info.Newer {
++		t.Error("1.0.0 reported newer than 1.0.0")
++	}
++	if info.URL != "https://example.com/pkg.tar.gz" {
++		t.Errorf("url %q", info.URL)
++	}
++}
++
++func TestCheckMissingPlatform(t *testing.T) {
++	s := feedServing(t, `{"version":"1.0.0","url":{"windows-arm64":"https://example.com/p"}}`, 200)
++	_, err := Check(context.Background(), s.URL+"/update.json", "1.0.0")
++	if err == nil || !strings.Contains(err.Error(), "下载地址") {
++		t.Fatalf("err %v, want a missing-address note", err)
++	}
++}
++
++func TestCheckErrors(t *testing.T) {
++	if _, err := Check(context.Background(), "", "0.8.3"); !errors.Is(err, ErrNotConfigured) {
++		t.Fatalf("empty feed err %v, want ErrNotConfigured", err)
++	}
++	for _, c := range []struct {
++		name, body string
++		code       int
++		want       string
++	}{
++		{"bad json", "{", 200, "无法解析更新信息"},
++		{"no version", `{"url":"https://example.com/p"}`, 200, "版本号"},
++		{"bad version", `{"version":"最新","url":"https://example.com/p"}`, 200, "无法解析更新信息"},
++		{"no url", `{"version":"1.0.0"}`, 200, "下载地址"},
++		{"server error", "gone", 500, "更新地址返回"},
++	} {
++		s := feedServing(t, c.body, c.code)
++		if _, err := Check(context.Background(), s.URL+"/update.json", "0.8.3"); err == nil || !strings.Contains(err.Error(), c.want) {
++			t.Errorf("%s: err %v, want it to say %q", c.name, err, c.want)
++		}
++	}
++}
++
++func TestCheckTimeout(t *testing.T) {
++	old := checkTimeout
++	checkTimeout = 50 * time.Millisecond
++	t.Cleanup(func() { checkTimeout = old })
++	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		time.Sleep(300 * time.Millisecond)
++		fmt.Fprint(w, `{"version":"1.0.0","url":"https://example.com/p"}`)
++	}))
++	defer s.Close()
++	if _, err := Check(context.Background(), s.URL, "0.8.3"); err == nil || !strings.Contains(err.Error(), "无法连接更新地址") {
++		t.Fatalf("slow feed err %v, want a timeout note", err)
++	}
++}
++
++func TestDownload(t *testing.T) {
++	content := []byte(strings.Repeat("baidunetgo", 10000))
++	var srv *httptest.Server
++	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/pkg.tar.gz":
++			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
++			w.Write(content)
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	defer srv.Close()
++
++	dest := t.TempDir()
++	var calls int
++	var lastDone, lastTotal int64
++	info := &Info{Version: "1.0.0", URL: srv.URL + "/pkg.tar.gz"}
++	got, err := Download(context.Background(), info, dest, func(done, total int64) {
++		calls++
++		lastDone, lastTotal = done, total
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if filepath.Base(got) != "pkg.tar.gz" || got != filepath.Join(dest, "pkg.tar.gz") {
++		t.Errorf("path %q", got)
++	}
++	if data, err := os.ReadFile(got); err != nil || string(data) != string(content) {
++		t.Errorf("content %d bytes, err %v; want %d", len(data), err, len(content))
++	}
++	if calls == 0 || lastDone != int64(len(content)) || lastTotal != int64(len(content)) {
++		t.Errorf("progress %d calls, last %d/%d", calls, lastDone, lastTotal)
++	}
++	if _, err := os.Stat(got + ".part"); !os.IsNotExist(err) {
++		t.Errorf("a .part file survived: %v", err)
++	}
++}
++
++func TestDownloadName(t *testing.T) {
++	var srv *httptest.Server
++	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		fmt.Fprint(w, "x")
++	}))
++	defer srv.Close()
++	dest := t.TempDir()
++	got, err := Download(context.Background(), &Info{Version: "1.2.3", URL: srv.URL + "/"}, dest, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := "baidunetgo-1.2.3-" + runtimeOSArch() + ".bin"
++	if filepath.Base(got) != want {
++		t.Errorf("name %q, want %q", filepath.Base(got), want)
++	}
++}
++
++func TestDownloadErrors(t *testing.T) {
++	var srv *httptest.Server
++	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		http.Error(w, "no", http.StatusForbidden)
++	}))
++	defer srv.Close()
++	dest := t.TempDir()
++	if _, err := Download(context.Background(), nil, dest, nil); err == nil {
++		t.Error("nil info downloaded")
++	}
++	_, err := Download(context.Background(), &Info{Version: "1", URL: srv.URL + "/x"}, dest, nil)
++	if err == nil || !strings.Contains(err.Error(), "下载失败") {
++		t.Fatalf("err %v, want a 下载失败 note", err)
++	}
++	ents, _ := os.ReadDir(dest)
++	if len(ents) != 0 {
++		t.Errorf("a failed download left %v", ents)
++	}
++}
++
++func TestDownloadCancel(t *testing.T) {
++	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		time.Sleep(time.Second)
++	}))
++	defer s.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	_, err := Download(ctx, &Info{Version: "1", URL: s.URL + "/x"}, t.TempDir(), nil)
++	if err == nil || !strings.Contains(err.Error(), "下载失败") {
++		t.Fatalf("err %v, want a cancellation note", err)
++	}
++}
++
++func runtimeOSArch() string { return runtime.GOOS + "-" + runtime.GOARCH }

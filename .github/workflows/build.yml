@@ -2,9 +2,12 @@ name: Patchwork build
 
 on:
   schedule:
-    # Poll upstream every 15 minutes; scheduled runs are best-effort and can be
-    # delayed by GitHub under load. Nothing is built unless an upstream SHA changed.
-    - cron: '*/15 * * * *'
+    # One upstream window every 10 days. GitHub crons cannot express "every 10
+    # days" (a `*/10` day-of-month rule fires on the 1st, 11th, 21st and 31st),
+    # so this runs daily and the check job returns early while
+    # .watch-state.json's `android` timestamp is younger than 10 days. Scheduled
+    # runs are best-effort; a delayed day only shifts the window.
+    - cron: '17 4 * * *'
   workflow_dispatch:
     inputs:
       app:
@@ -32,6 +35,9 @@ concurrency:
   group: patchwork-build-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  WATCH_INTERVAL_DAYS: '10'
+
 jobs:
   check:
     name: Check upstream
@@ -40,16 +46,42 @@ jobs:
     outputs:
       matrix: ${{ steps.check.outputs.matrix }}
       any_changed: ${{ steps.check.outputs.any_changed }}
+      due: ${{ steps.gate.outputs.due }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
+      # Scheduled runs are gated on .watch-state.json so the upstream window is
+      # every 10 days; pushes and manual dispatches always check. The timestamp
+      # is advanced by the record-check job at the end of a clean run (see the
+      # rationale there).
+      - name: Respect the 10-day window
+        id: gate
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          days="${WATCH_INTERVAL_DAYS:-10}"
+          due=true
+          last="$(jq -r '.android // empty' .watch-state.json 2>/dev/null || true)"
+          if [[ -n "$last" ]]; then
+            if last_epoch="$(date -u -d "$last" +%s 2>/dev/null)"; then
+              age=$(( $(date -u +%s) - last_epoch ))
+              if (( age < days * 86400 )); then
+                due=false
+                echo "::notice::Last upstream window was ${age}s ago; the next one is due in $(( days * 86400 - age ))s."
+              fi
+            else
+              echo "::warning::Unreadable timestamp '$last' in .watch-state.json; checking upstream anyway."
+            fi
+          fi
+          echo "due=$due" >> "$GITHUB_OUTPUT"
+
       # Decide which apps to build:
       #  * push  -> only the apps whose apps/<app>/** paths changed in this push;
-      #            a change to scripts/** or a workflow rebuilds both;
-      #            unknown/forced pushes fall back to both for safety;
+      #            a change to scripts/** or a workflow rebuilds all of them;
+      #            unknown/forced pushes fall back to all of them for safety;
       #  * dispatch -> the selected app (or all with force);
       #  * schedule -> only apps whose upstream SHA changed.
       - name: Resolve build matrix
@@ -60,8 +92,16 @@ jobs:
           AFTER_SHA: ${{ github.event.after }}
           FORCE_INPUT: ${{ inputs.force }}
           APP_INPUT: ${{ inputs.app }}
+          DUE: ${{ steps.gate.outputs.due }}
         run: |
           set -euo pipefail
+          # A scheduled run outside the 10-day window does nothing: emit an
+          # empty matrix so the build/publish jobs are skipped cleanly.
+          if [[ "$EVENT" == "schedule" && "$DUE" == "false" ]]; then
+            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
+            echo "any_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # App list comes from apps/*/app.conf, so adding an app needs no
           # workflow edit.
           mapfile -t ALL_APPS < <(find apps -mindepth 2 -maxdepth 2 -name app.conf | LC_ALL=C sort | cut -d/ -f2)
@@ -433,6 +473,11 @@ jobs:
             fi
           done < <(jq -r '.include[]? | [.app, .sha] | @tsv' <<<"$MATRIX")
           printf 'Build state: %s\n' "$state"
+          expected="$(jq '.include | length' <<<"$MATRIX")"
+          recorded="$(jq 'keys | length' <<<"$state")"
+          if (( recorded < expected )); then
+            echo "::warning title=Incomplete build state::Recorded $recorded of $expected app(s); a fallback build or a missing APK keeps the previous state so the next upstream window retries it."
+          fi
           ./scripts/publish-fdroid.sh --apk-dir dist --state-json "$state"
 
       # Keep README.md / README.zh-CN.md in sync with what was actually built:
@@ -518,6 +563,69 @@ jobs:
             echo '- Fallback while Pages is off: https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  record-check:
+    name: Record the watch time
+    needs:
+      - check
+      - build
+      - publish
+    # Advance the 10-day window after a scheduled run that really checked and
+    # did not fail hard: either nothing changed, or the build and publish jobs
+    # both finished. A fallback (the queue did not apply to the head) counts as
+    # a finished run — F-Droid already keeps the old build state, so the next
+    # window retries the new head. Failed legs or a failed publish leave the
+    # timestamp alone, so the next daily run retries instead of waiting 10
+    # days. Pushes and manual dispatches never move the window.
+    if: >-
+      success() &&
+      github.event_name == 'schedule' &&
+      needs.check.result == 'success' &&
+      needs.check.outputs.due == 'true' &&
+      (needs.check.outputs.any_changed != 'true' ||
+       (needs.build.result == 'success' && needs.publish.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Update the watch state
+        run: |
+          set -euo pipefail
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          tmp="$(mktemp)"
+          jq --arg t "$now" '. + {android: $t}' .watch-state.json >"$tmp"
+          mv "$tmp" .watch-state.json
+          cat .watch-state.json
+
+      - name: Commit the state
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name "DeepSeek Harness"
+          git config user.email "noreply@deepseek.com"
+          git add .watch-state.json
+          if git diff --cached --quiet; then
+            echo "No state change to commit"
+            exit 0
+          fi
+          git commit -m "Record the upstream watch [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main \
+               && git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main; then
+              echo "::notice::Watch state pushed"
+              exit 0
+            fi
+            echo "    push attempt ${attempt}/3 failed; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::warning title=Watch state commit failed::Could not push .watch-state.json (often HTTP 403: set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions')."
+
   notify-failure:
     name: Report failure
     needs:
@@ -590,9 +698,8 @@ jobs:
               body = body.slice(0, 60000) + '\n\n(truncated)';
             }
 
-            // A broken queue is retried by the 15-minute schedule, so a
-            // comment per attempt turned this issue into 40+ copies of the same
-            // failure and buried the first, useful one. Keep one comment per
+            // A broken queue is retried by the next daily run, so a comment per
+            // attempt would bury the first, useful one. Keep one comment per
             // window; the run itself still exists for drill-down.
             const THROTTLE_MS = 6 * 60 * 60 * 1000;
 

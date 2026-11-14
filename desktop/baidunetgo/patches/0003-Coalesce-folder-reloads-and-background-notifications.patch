@@ -1,0 +1,290 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 09:32:43 +0800
+Subject: [PATCH] Coalesce folder reloads and background notifications for
+ finished transfers, and stop idle speed samples and unfocused auto-refreshes,
+ so bursts of small uploads cannot keep the main thread busy
+
+---
+ CHANGELOG.md          |  1 +
+ app/files.go          | 38 ++++++++++++++++++++-
+ app/session.go        |  1 +
+ app/transfers.go      | 78 +++++++++++++++++++++++++++++++++++++++++--
+ app/transfers_test.go | 53 +++++++++++++++++++++++++++++
+ 5 files changed, 167 insertions(+), 4 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0956612..70b2d8c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,6 +11,7 @@
+ ### 修复
+ 
+ - 不再在窗口获得焦点或登录时自动读取剪贴板，避免剪贴板所有者无响应时 GTK 的同步读取卡住主线程；分享链接改由文件工具栏的链接按钮或 Cmd-V 显式读取。
++- 上传大量小文件时，合并同一目录的完成刷新（约 500 毫秒内一次）与后台完成通知（2 秒内合成一条），并停止空闲时每秒重绘图表和失焦窗口的定时目录刷新，减少界面无响应。
+ 
+ ## [0.8.3] - 2026-11-09
+ 
+diff --git a/app/files.go b/app/files.go
+index 7f4464f..b8b4c07 100644
+--- a/app/files.go
++++ b/app/files.go
+@@ -57,6 +57,11 @@ const listingCacheSize = 40
+ // quietly, after it, and as soon as the window comes to the front.
+ const staleAfter = 2 * time.Minute
+ 
++// reloadDelay is how long a folder waits before it is read again after
++// transfers finished in it, so that a burst of finished files causes one
++// read, not one each.
++var reloadDelay = 500 * time.Millisecond
++
+ // filesRoute returns the router path showing dir.
+ func filesRoute(dir string) string {
+ 	dir = path.Clean("/" + dir)
+@@ -98,7 +103,9 @@ func (a *App) listingFor(dir string) *listing {
+ 		a.trimListings()
+ 	}
+ 	l.used = a.listingTick
+-	if l.loaded && !l.loading && time.Since(l.read) > staleAfter {
++	// A window in the background reads its folder again as it comes to the
++	// front (refocused), not every staleAfter: no one sees it change.
++	if l.loaded && !l.loading && time.Since(l.read) > staleAfter && (a.win == nil || a.win.IsFocused()) {
+ 		a.load(l)
+ 	}
+ 	return l
+@@ -169,6 +176,35 @@ func (a *App) reload(dir string) {
+ 	}
+ }
+ 
++// reloadSoon reads a directory again after reloadDelay, so that the many
++// files of an upload finishing one after another cause one read, not one
++// each. A folder not cached is not read.
++func (a *App) reloadSoon(dir string) {
++	if a.listings[dir] == nil {
++		return
++	}
++	if a.reloads == nil {
++		a.reloads = map[string]*time.Timer{}
++	}
++	if a.reloads[dir] != nil {
++		return
++	}
++	a.reloads[dir] = time.AfterFunc(reloadDelay, func() {
++		a.update(func() {
++			delete(a.reloads, dir)
++			a.reload(dir)
++		})
++	})
++}
++
++// stopReloads cancels the reads waiting to happen, as a session ends.
++func (a *App) stopReloads() {
++	for dir, timer := range a.reloads {
++		timer.Stop()
++		delete(a.reloads, dir)
++	}
++}
++
+ // sortFiles puts folders first, then sorts by the order asked.
+ func sortFiles(files []baidu.File, o baidu.Order) {
+ 	slices.SortStableFunc(files, func(x, y baidu.File) int {
+diff --git a/app/session.go b/app/session.go
+index c618137..a1770e6 100644
+--- a/app/session.go
++++ b/app/session.go
+@@ -264,6 +264,7 @@ func (a *App) onSignedOut() {
+ 		a.stream = nil
+ 	}
+ 	a.stopTransfers()
++	a.stopReloads()
+ 	a.shares, a.offline, a.recycle = sharesState{}, offlineState{}, recycleState{}
+ 	a.listings = nil
+ }
+diff --git a/app/transfers.go b/app/transfers.go
+index 474b945..dfb0936 100644
+--- a/app/transfers.go
++++ b/app/transfers.go
+@@ -24,6 +24,49 @@ type transfersState struct {
+ 	list    ui.ListState
+ 	speeds  []float64 // the total speed each second, the latest last
+ 	sampled time.Time // when speeds last took a sample
++	notice  finishedNotice
++}
++
++// noticeDelay is how long finished transfers are gathered while the window
++// is in the background: those within it make one notification.
++var noticeDelay = 2 * time.Second
++
++// finishedNotice gathers the transfers that finish while the window is in
++// the background, so that many small files make one notification, not one
++// each. It is changed on the main thread only.
++type finishedNotice struct {
++	n     int
++	verb  string // "上传" or "下载", of the first
++	id    string // the latest's, to open what it says
++	name  string // the first file's name
++	last  string // the latest file's name
++	timer *time.Timer
++}
++
++// add gathers another finished transfer.
++func (g *finishedNotice) add(verb, id, name string) {
++	if g.n == 0 {
++		g.verb, g.name = verb, name
++	}
++	g.n++
++	g.id, g.last = id, name
++}
++
++// message is what the gathered transfers say: one as it always did, else
++// how many finished, with the latest file's name and its ID.
++func (g *finishedNotice) message() (title, body, id string) {
++	if g.n <= 1 {
++		return g.verb + "完成", g.name, g.id
++	}
++	return itoa(g.n) + " 个文件传输完成", g.last, g.id
++}
++
++// reset forgets what gathered, and the notification waiting to show it.
++func (g *finishedNotice) reset() {
++	if g.timer != nil {
++		g.timer.Stop()
++	}
++	*g = finishedNotice{}
+ }
+ 
+ // startTransfers starts the queue of a session.
+@@ -65,6 +108,7 @@ func (a *App) stopTransfers() {
+ 		a.xfer.Close()
+ 		a.xfer = nil
+ 	}
++	a.transfers.notice.reset()
+ 	a.transfers = transfersState{}
+ 	a.gathers = nil
+ 	a.showTransfers(nil)
+@@ -73,7 +117,7 @@ func (a *App) stopTransfers() {
+ // finished tells of a task that ended.
+ func (a *App) finished(t transfer.Task) {
+ 	if t.Kind == transfer.Upload {
+-		a.reload(path.Dir(t.Remote))
++		a.reloadSoon(path.Dir(t.Remote))
+ 	}
+ 	if t.State == transfer.Failed {
+ 		a.toast("「"+t.Name+"」传输失败："+t.Err, "error")
+@@ -85,10 +129,34 @@ func (a *App) finished(t transfer.Task) {
+ 		verb, id = "上传", "dir:"+path.Dir(t.Remote)
+ 	}
+ 	if a.win != nil && !a.win.IsFocused() {
+-		mygo.NewNotification(mygo.NotificationOptions{ID: id, Title: verb + "完成", Body: t.Name, Group: "transfers"}).Show()
++		a.notifyFinished(verb, id, t.Name)
++	}
++}
++
++// notifyFinished gathers a finished transfer's notification, showing the
++// ones that finish together at once, noticeDelay later.
++func (a *App) notifyFinished(verb, id, name string) {
++	g := &a.transfers.notice
++	g.add(verb, id, name)
++	if g.timer == nil {
++		g.timer = time.AfterFunc(noticeDelay, func() {
++			a.update(a.flushNotice)
++		})
+ 	}
+ }
+ 
++// flushNotice shows what finished together, on the main thread: MyGo's
++// notifications are not safe to show from several goroutines.
++func (a *App) flushNotice() {
++	g := &a.transfers.notice
++	if g.n == 0 {
++		return
++	}
++	title, body, id := g.message()
++	g.reset()
++	mygo.NewNotification(mygo.NotificationOptions{ID: id, Title: title, Body: body, Group: "transfers"}).Show()
++}
++
+ // download queues files to download.
+ func (a *App) download(files []baidu.File) {
+ 	if a.xfer == nil || len(files) == 0 {
+@@ -239,7 +307,11 @@ func (a *App) sampleSpeed(c *ui.Context) {
+ 			x.speeds = nil // idle for the whole chart: start afresh next time
+ 		}
+ 	}
+-	c.After(time.Second)
++	// Only while something is going: an idle window keeps the chart's last
++	// frame rather than waking every second for a new one.
++	if a.activeTransfers() > 0 {
++		c.After(time.Second)
++	}
+ }
+ 
+ func (a *App) transfersPage(c *ui.Context, t *ui.Theme, p *palette) {
+diff --git a/app/transfers_test.go b/app/transfers_test.go
+index 51b6002..38ed0c8 100644
+--- a/app/transfers_test.go
++++ b/app/transfers_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/pengstem/baidunetgo/internal/fakepan"
+ 	"github.com/pengstem/baidunetgo/internal/transfer"
+ )
+ 
+@@ -109,3 +110,55 @@ func TestSpeedCard(t *testing.T) {
+ 	}
+ 	save(t, tt, "transfers-going")
+ }
++
++// TestFinishedNotice tells how the transfers that finish together are
++// gathered: one keeps its own title and ID, several say how many and name
++// the latest.
++func TestFinishedNotice(t *testing.T) {
++	var g finishedNotice
++	g.add("上传", "dir:/照片", "一.png")
++	if title, body, id := g.message(); title != "上传完成" || body != "一.png" || id != "dir:/照片" {
++		t.Errorf("one says %q, %q, %q", title, body, id)
++	}
++	g.add("下载", "file:/tmp/二.mkv", "二.mkv")
++	g.add("上传", "dir:/照片", "三.png")
++	if title, body, id := g.message(); title != "3 个文件传输完成" || body != "三.png" || id != "dir:/照片" {
++		t.Errorf("three say %q, %q, %q", title, body, id)
++	}
++	g.reset()
++	if g.n != 0 || g.timer != nil {
++		t.Errorf("reset left %+v", g)
++	}
++}
++
++// TestReloadSoonCoalesces reads a folder once for a burst of finished
++// transfers in it, reloadDelay later, and does not read one not cached.
++func TestReloadSoonCoalesces(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	old := reloadDelay
++	reloadDelay = 25 * time.Millisecond
++	t.Cleanup(func() { reloadDelay = old })
++
++	l := a.listings["/"]
++	loads := l.loads
++	srv.Add(fakepan.Node{Path: "/批量完成.txt", Data: []byte("hi")})
++	a.reloadSoon("/")
++	a.reloadSoon("/")
++	a.reloadSoon("/")
++	deadline := time.Now().Add(3 * time.Second)
++	for !tt.HasText("批量完成.txt") {
++		if time.Now().After(deadline) {
++			t.Fatalf("never read the folder again: %+v", a.transfers.tasks)
++		}
++		time.Sleep(10 * time.Millisecond)
++		tt.Advance(20 * time.Millisecond)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if got := l.loads; got != loads+1 {
++		t.Errorf("read the folder %d times, want once", got-loads)
++	}
++	a.reloadSoon("/没有缓存")
++	if len(a.reloads) != 0 {
++		t.Errorf("a folder not cached waits to be read: %v", a.reloads)
++	}
++}

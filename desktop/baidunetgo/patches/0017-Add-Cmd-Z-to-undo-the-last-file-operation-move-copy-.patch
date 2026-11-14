@@ -1,0 +1,882 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 16:25:26 +0800
+Subject: [PATCH] Add Cmd+Z to undo the last file operation (move, copy,
+ rename, new folder, delete, recycle restore) by running its reverse through
+ the netdisk client from an in-memory per-session stack, since a mistaken file
+ action otherwise has no way back.
+
+---
+ AGENTS.md        |   2 +
+ CHANGELOG.md     |   1 +
+ CLAUDE.md        |   2 +
+ README.md        |   8 ++
+ app/app.go       |  11 +-
+ app/dedup.go     |  18 +++
+ app/newfolder.go |  13 +-
+ app/ops.go       |  26 +++-
+ app/picker.go    |  23 +++-
+ app/recycle.go   |  11 ++
+ app/rename.go    |  17 ++-
+ app/session.go   |   4 +-
+ app/undo.go      | 187 +++++++++++++++++++++++++++
+ app/undo_test.go | 325 +++++++++++++++++++++++++++++++++++++++++++++++
+ 14 files changed, 639 insertions(+), 9 deletions(-)
+ create mode 100644 app/undo.go
+ create mode 100644 app/undo_test.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index c3a2e93..445730e 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -49,6 +49,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does. A held key acts once: auto-repeats of these file keys are ignored, and while an operation is busy the browser takes no file key, so a paste cannot start twice.
+ 
++**Undo (`app/undo.go`).** Cmd+Z (`ui.Cmd` + `ui.KeyZ`) runs `a.undoLast()`, which reverses the last recorded step: a move (picker, drag, a pasted cut) goes back to its original folder and name, a copy deletes only the copies it made (into the recycle bin), a rename renames back, a new folder goes to the recycle bin, a delete to the recycle bin is restored, and a recycle restore is deleted again; files an operation replaced are restored too. `App.undoStack` is an in-memory, per-session stack of `*undoEntry{label, run, dirs, after}` (limit 50, oldest dropped), pushed only on success by `a.pushUndo` (skipped while `a.undoing`) from `moveOrCopyAfter`, `renameTo`, `makeFolder`, `a.remove`, `deleteDedup` and `recycleAct`; `a.undoBusy` makes the browser's file keys yield while it runs. A successful undo pops the entry, calls `a.netdiskChanged()`, reloads `dirs`, runs `after` and toasts `已撤销：<label>`; a failed reverse keeps the entry and toasts the error, so it can be retried once the cause (a name taken meanwhile, say) is gone — the app never deletes the newcomer to force the move. Uploads finishing, emptying the recycle bin and purging are not recorded, as nothing reverses them.
++
+ **Netdisk client (`internal/baidu`).** `baidu.Open(creds)` builds a `baidupcs.BaiduPCS` from cookies and never touches BaiduPCS-Go's global config. It also turns TLS verification back on (the library disables it). Two code paths:
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 09c634d..1eff867 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,7 @@
+ 
+ ### 新增
+ 
++- 文件操作撤销：`Cmd+Z`（macOS 为 ⌘Z、其它平台为 Ctrl+Z）撤销上一步文件操作——移动（含剪切粘贴、拖拽移动）把文件移回原处和原名，复制删除这次复制出的副本，重命名改回原名，新建文件夹移入回收站，删除到回收站则从回收站还原，回收站的还原会再次删除；替换过的同名文件在撤销时一并恢复。撤销栈只在内存里、按会话保留（最多 50 步，重启不保留、注销清空），只撤最后一步；撤销失败（如原处已有同名项目）会报错并保留该步以便重试，上传完成与清空回收站 / 彻底删除不记入撤销。
+ - 界面字体族与字号新增「跟随本机 fontconfig」：默认读取 `fc-match sans-serif` 解析出的字体（字号按 1pt ≈ 4/3 DIP 换算并限幅 11–17），可在设置页「外观」里关闭改用内置字体；`BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖，没有 fontconfig 时静默回落。
+ - 查重结果行新增右键菜单：打开预览（同一重复组的图片可在预览里用左右键翻页）、在文件夹中显示、复制路径。
+ - 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。删除前会重新读取所在目录，核对 fs_id、大小和 MD5，并确保每组仍留有一份，过期或被替换的文件不会误删。
+diff --git a/CLAUDE.md b/CLAUDE.md
+index a3ac2fc..97e5dcb 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -49,6 +49,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **File clipboard and shortcuts.** The browser's keys are handled in `app/ops.go`'s `fileActions` once per `filesPage` frame, yielding while a dialog, the preview, a rename or a folder being named is open. Cmd-C/X put the chosen files in `a.fileClip` (`app/fileclip.go`), an in-memory `fileClipboard{files, from, cut, cutSet, gen}` — never the system clipboard, as a netdisk path means nothing elsewhere. A cut fills `cutSet` by path, so a row's `isCut` says in constant time whether it shows the `待移动` chip; `putFiles` bumps `App.fileClipGen`, and sign-out clears the clipboard. Cmd-V pastes that clipboard through the picker's `place`/`moveOrCopyAfter`, which asks about names a folder has exactly as `复制到…` does; only when the file clipboard is empty does it fall back to `openClipboardShare`, the share-link behavior it had before, while Cmd-Shift-V always opens a share link. Pasting runs on goroutines through `a.run`, and the `after` callback runs only when the netdisk operation succeeded: a cut then clears the clipboard only if `fileClip.gen` is still the one it pasted, so a cut made while the first is moving survives. Cmd-Shift-C copies paths to the system clipboard, Cmd-A selects every non-temporary row in both views, and F5 refreshes as Cmd-R does. A held key acts once: auto-repeats of these file keys are ignored, and while an operation is busy the browser takes no file key, so a paste cannot start twice.
+ 
++**Undo (`app/undo.go`).** Cmd+Z (`ui.Cmd` + `ui.KeyZ`) runs `a.undoLast()`, which reverses the last recorded step: a move (picker, drag, a pasted cut) goes back to its original folder and name, a copy deletes only the copies it made (into the recycle bin), a rename renames back, a new folder goes to the recycle bin, a delete to the recycle bin is restored, and a recycle restore is deleted again; files an operation replaced are restored too. `App.undoStack` is an in-memory, per-session stack of `*undoEntry{label, run, dirs, after}` (limit 50, oldest dropped), pushed only on success by `a.pushUndo` (skipped while `a.undoing`) from `moveOrCopyAfter`, `renameTo`, `makeFolder`, `a.remove`, `deleteDedup` and `recycleAct`; `a.undoBusy` makes the browser's file keys yield while it runs. A successful undo pops the entry, calls `a.netdiskChanged()`, reloads `dirs`, runs `after` and toasts `已撤销：<label>`; a failed reverse keeps the entry and toasts the error, so it can be retried once the cause (a name taken meanwhile, say) is gone — the app never deletes the newcomer to force the move. Uploads finishing, emptying the recycle bin and purging are not recorded, as nothing reverses them.
++
+ **Netdisk client (`internal/baidu`).** `baidu.Open(creds)` builds a `baidupcs.BaiduPCS` from cookies and never touches BaiduPCS-Go's global config. It also turns TLS verification back on (the library disables it). Two code paths:
+ - **Library calls** for `LocateDownload` (download links, which need the uid, fetched once from Tieba) and upload (`internal/pcsport`, ported from BaiduPCS-Go's `internal/` under Apache-2.0).
+ - **The pan.baidu.com web API**, called directly through `getJSON`/`postForm` against `c.base`, for everything else: list (with `web=1` for thumbnails), file manager ops, recycle bin, shares, `cloud_dl`. Writes carry a `bdstoken`, fetched from `/api/loginStatus`.
+diff --git a/README.md b/README.md
+index 3b5164a..e1aedaa 100644
+--- a/README.md
++++ b/README.md
+@@ -46,6 +46,7 @@ macOS 上是 ⌘（Command），其它平台上是 Ctrl；下表写作 Cmd。
+ | `Cmd+,` | 设置 |
+ | `F2` | 重命名（macOS 上 Enter 也可以） |
+ | `Delete` / `Cmd+Backspace` | 移到回收站，可在提示条里撤销 |
++| `Cmd+Z` | 撤销上一步文件操作（见下） |
+ | `Cmd+I` | 显示详情 |
+ | `Space` | 不落盘预览选中的文件 |
+ | `Cmd+Down` | 打开选中的文件或文件夹 |
+@@ -67,6 +68,13 @@ macOS 上是 ⌘（Command），其它平台上是 Ctrl；下表写作 Cmd。
+ - 注销或切换账号会清空文件剪贴板，避免旧账号的路径带到新会话。
+ - 被剪切的行在文件名列右侧标出“待移动”，状态栏显示“已复制 / 已剪切 N 项”，右键菜单里也有剪切、复制、粘贴和复制路径。
+ 
++撤销（`Cmd+Z`）：
++
++- 只撤销最后一步，按相反的操作还原：移动（含剪切后粘贴、拖拽移动）把文件移回原文件夹和原名，复制删掉这次复制出来的副本（进回收站），重命名改回原名，新建文件夹把它移到回收站，删除到回收站则从回收站还原，回收站里的还原会再次删除。若移动 / 复制时替换过同名项目，撤销时也会把被替换的那份从回收站恢复。
++- 撤销栈只在内存里、按会话保留，最多 50 步，重启后不保留，注销或切换账号会清空。没有可撤销的操作时会提示。
++- 撤销失败（比如原文件夹里已出现同名项目）时不会强制覆盖或删除它，而是报错并保留这一步，处理掉冲突后可以再按一次 `Cmd+Z`。
++- 上传完成、清空回收站、彻底删除不记录撤销：上传的源文件不在网盘里无法据此反向，后两者不可恢复。
++
+ ## 开发
+ 
+ ```bash
+diff --git a/app/app.go b/app/app.go
+index f1849d3..4322c3e 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -51,8 +51,15 @@ type App struct {
+ 	passed      time.Time          // when passTime last moved them on
+ 	gpu         bool               // the window draws on a GPU, so shaders draw at speed
+ 
+-	pv           *previewState
+-	dlg          dialog
++	pv  *previewState
++	dlg dialog
++	// undoStack holds the steps this session can undo, newest last; an
++	// undo running sets undoing so its reverse is not recorded, and
++	// undoBusy so the browser's file keys yield to it (undo.go).
++	undoStack []*undoEntry
++	undoing   bool
++	undoBusy  bool
++
+ 	renaming     *renaming          // a name edited in place (rename.go)
+ 	creating     *creating          // a folder named in the maker (newfolder.go)
+ 	flights      map[string]*flight // files on their way into folders (landing.go)
+diff --git a/app/dedup.go b/app/dedup.go
+index b4b3bac..07b7ec0 100644
+--- a/app/dedup.go
++++ b/app/dedup.go
+@@ -716,6 +716,24 @@ func (a *App) deleteDedup() {
+ 			d.scrollTop = true
+ 			a.recycleDirty = true
+ 			a.netdiskChanged()
++			// Undoing the dedup delete restores exactly the copies it
++			// removed, which can still be read out of the recycle bin.
++			ids := make([]int64, len(safe))
++			for i, f := range safe {
++				ids[i] = f.FsID
++			}
++			dirList := make([]string, 0, len(dirs))
++			for dir := range dirs {
++				dirList = append(dirList, dir)
++			}
++			a.pushUndo(&undoEntry{
++				label: "删除 " + itoa(len(safe)) + " 项",
++				run: func(ctx context.Context, c *baidu.Client) error {
++					return c.Restore(ctx, ids)
++				},
++				dirs:  dirList,
++				after: a.clearSel(dirList...),
++			})
+ 			if changed == 0 && !wasStale {
+ 				// What is left is the netdisk's: the page shows it at once
+ 				// when it comes back to, without scanning again.
+diff --git a/app/newfolder.go b/app/newfolder.go
+index d3a3808..56d4802 100644
+--- a/app/newfolder.go
++++ b/app/newfolder.go
+@@ -177,8 +177,9 @@ func (a *App) makeFolder(l *listing, enter bool) {
+ 	}
+ 	m.busy = true
+ 	dir := l.dir
++	newDir := path.Join(dir, name)
+ 	go func() {
+-		err := s.client.Mkdir(context.Background(), path.Join(dir, name))
++		err := s.client.Mkdir(context.Background(), newDir)
+ 		a.update(func() {
+ 			if a.creating != m {
+ 				return
+@@ -189,6 +190,16 @@ func (a *App) makeFolder(l *listing, enter bool) {
+ 				return
+ 			}
+ 			a.netdiskChanged()
++			// Undoing a new folder moves it to the recycle bin, not for
++			// good: anything the user put in it meanwhile can be restored.
++			a.pushUndo(&undoEntry{
++				label: "新建文件夹「" + name + "」",
++				run: func(ctx context.Context, c *baidu.Client) error {
++					return c.Delete(ctx, []string{newDir})
++				},
++				dirs:  []string{dir},
++				after: a.clearSel(dir),
++			})
+ 			m.made, m.loads = name, l.loads
+ 			a.reload(dir)
+ 		})
+diff --git a/app/ops.go b/app/ops.go
+index 7211729..bb03dc0 100644
+--- a/app/ops.go
++++ b/app/ops.go
+@@ -137,9 +137,24 @@ func (a *App) remove(dir string, files []baidu.File) {
+ 				return
+ 			}
+ 			a.netdiskChanged()
++			// The same deletion is one step, whether it is undone from
++			// the toast or with Cmd+Z: the toast takes its step off the
++			// stack first, so it is never undone twice.
++			e := &undoEntry{
++				label: "删除" + countLabel(files),
++				run: func(ctx context.Context, c *baidu.Client) error {
++					return c.Restore(ctx, ids)
++				},
++				dirs:  []string{dir},
++				after: a.clearSel(dir),
++			}
++			a.pushUndo(e)
+ 			a.pendingToasts = append(a.pendingToasts, ui.Toast{
+ 				Title: "已将" + countLabel(files) + "移到回收站", Type: "success", Action: "撤销", Timeout: undoToast,
+ 				OnAction: func() {
++					if !a.dropUndo(e) {
++						return // already undone with Cmd+Z
++					}
+ 					a.spare(ids)
+ 					// Restoring is another change, counted by a.run.
+ 					a.run(func(ctx context.Context, c *baidu.Client) error { return c.Restore(ctx, ids) }, []string{dir}, "已还原", nil)
+@@ -231,8 +246,9 @@ func (a *App) dialogButtons(c *ui.Context, t *ui.Theme, p *palette, label string
+ // fileActions handles the browser's keys on the files chosen.
+ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	// A paste, a move or a copy of the picker runs with its dialog closed
+-	// but busy: another key must not start a second one beside it.
+-	if a.dlg.open || a.dlg.busy || a.pv != nil || a.renaming != nil || a.creating != nil {
++	// but busy: another key must not start a second one beside it. An undo
++	// under way is the same: the keys yield to it.
++	if a.dlg.open || a.dlg.busy || a.undoBusy || a.pv != nil || a.renaming != nil || a.creating != nil {
+ 		return
+ 	}
+ 	files := l.chosen()
+@@ -246,6 +262,12 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	if c.Shortcut(ui.Cmd, ui.KeyR) || c.Shortcut(0, ui.KeyF5) {
+ 		a.reload(l.dir)
+ 	}
++	// Cmd+Z undoes the last step the app recorded: a move, copy, rename,
++	// new folder, deletion to the recycle bin, or recycle restore. Held
++	// keys repeat, and an undo is one action a press.
++	if c.Shortcut(ui.Cmd, ui.KeyZ) && !c.ShortcutRepeated() {
++		a.undoLast()
++	}
+ 	// Cmd-V pastes the files cut or copied in the browser when the file
+ 	// clipboard holds any; only when it is empty does it open a share link
+ 	// the system clipboard holds, as it always did.
+diff --git a/app/picker.go b/app/picker.go
+index eb1ed68..cacec78 100644
+--- a/app/picker.go
++++ b/app/picker.go
+@@ -106,9 +106,11 @@ func (a *App) moveOrCopyAfter(kind dialogKind, files []baidu.File, from, to stri
+ 	a.dlg.busy, a.dlg.err = true, ""
+ 	a.place(verb, to, names, paths(files), func(pl placement) {
+ 		var srcs, dests []string
++		var items []movedItem
+ 		for i, f := range files {
+ 			if pl.names[i] != "" {
+ 				srcs, dests = append(srcs, f.Path), append(dests, pl.names[i])
++				items = append(items, movedItem{destName: pl.names[i], name: f.Name})
+ 			}
+ 		}
+ 		if l := a.listings[from]; l != nil {
+@@ -119,6 +121,7 @@ func (a *App) moveOrCopyAfter(kind dialogKind, files []baidu.File, from, to stri
+ 			return
+ 		}
+ 		replaced := paths(pl.replaced)
++		replacedSel := replacedIDs(pl.replaced)
+ 		op := func(ctx context.Context, c *baidu.Client) error {
+ 			if err := c.Delete(ctx, replaced); err != nil {
+ 				return err
+@@ -131,7 +134,25 @@ func (a *App) moveOrCopyAfter(kind dialogKind, files []baidu.File, from, to stri
+ 		if len(replaced) > 0 {
+ 			a.recycleDirty = true
+ 		}
+-		a.run(op, []string{from, to}, "已"+verb+"到「"+dirLabel(to)+"」", after)
++		// The undo step is pushed only once the operation succeeded, and
++		// records the exact names it gave the files, so a copy's undo
++		// deletes only those copies and never another file.
++		u := &undoEntry{label: undoLabel(verb, items, to)}
++		if kind == dlgCopy {
++			u.run = copyBack(items, to, replacedSel)
++			u.dirs = []string{to}
++			u.after = a.clearSel(to)
++		} else {
++			u.run = moveBack(items, from, to, replacedSel)
++			u.dirs = []string{from, to}
++			u.after = a.clearSel(from, to)
++		}
++		a.run(op, []string{from, to}, "已"+verb+"到「"+dirLabel(to)+"」", func() {
++			a.pushUndo(u)
++			if after != nil {
++				after()
++			}
++		})
+ 	})
+ }
+ 
+diff --git a/app/recycle.go b/app/recycle.go
+index 483e923..b55752a 100644
+--- a/app/recycle.go
++++ b/app/recycle.go
+@@ -133,8 +133,19 @@ func (a *App) recycleAct(it baidu.Recycled, purge bool) {
+ 			a.netdiskChanged()
+ 			r.items = slices.DeleteFunc(r.items, func(x baidu.Recycled) bool { return x.FsID == it.FsID })
+ 			if purge {
++				// Purging is for good: nothing can bring it back, so it is
++				// not a step the app can undo.
+ 				a.toast("已彻底删除「"+it.Name+"」", "success")
+ 			} else {
++				// Undoing a restore deletes it again, to the recycle bin.
++				a.pushUndo(&undoEntry{
++					label: "还原「" + it.Name + "」",
++					run: func(ctx context.Context, c *baidu.Client) error {
++						return c.Delete(ctx, []string{it.Path})
++					},
++					dirs:  []string{path.Dir(it.Path)},
++					after: a.clearSel(path.Dir(it.Path)),
++				})
+ 				a.toast("已还原「"+it.Name+"」", "success")
+ 				a.reload(path.Dir(it.Path))
+ 			}
+diff --git a/app/rename.go b/app/rename.go
+index eba7597..a325169 100644
+--- a/app/rename.go
++++ b/app/rename.go
+@@ -194,7 +194,9 @@ func (a *App) renameTo(l *listing, id int64, name string) bool {
+ 	// The new name shows at once, sorted to its place; the reload
+ 	// confirms it, or brings the old one back.
+ 	f := l.files[i]
+-	l.files[i].Name, l.files[i].Path = name, path.Join(path.Dir(f.Path), name)
++	newPath := path.Join(path.Dir(f.Path), name)
++	oldPath, oldName := f.Path, f.Name
++	l.files[i].Name, l.files[i].Path = name, newPath
+ 	l.sorted = baidu.Order{}
+ 	s := a.sess
+ 	if s == nil {
+@@ -202,12 +204,23 @@ func (a *App) renameTo(l *listing, id int64, name string) bool {
+ 	}
+ 	dir := l.dir
+ 	go func() {
+-		err := s.client.Rename(context.Background(), f.Path, name)
++		err := s.client.Rename(context.Background(), oldPath, name)
+ 		a.update(func() {
+ 			if err != nil {
+ 				a.toast("无法重命名「"+f.Name+"」："+err.Error(), "error")
+ 			} else {
+ 				a.netdiskChanged()
++				// Undoing a rename is renaming it back; the entry names
++				// the path it has now, so a later undo of an earlier turn
++				// still finds it.
++				a.pushUndo(&undoEntry{
++					label: "重命名「" + oldName + "」为「" + name + "」",
++					run: func(ctx context.Context, c *baidu.Client) error {
++						return c.Rename(ctx, newPath, oldName)
++					},
++					dirs:  []string{dir},
++					after: a.clearSel(dir),
++				})
+ 			}
+ 			a.reload(dir)
+ 		})
+diff --git a/app/session.go b/app/session.go
+index 2241cc6..14f08af 100644
+--- a/app/session.go
++++ b/app/session.go
+@@ -276,7 +276,9 @@ func (a *App) onSignedOut() {
+ 	a.dedup = dedupState{}
+ 	a.shares, a.offline, a.recycle = sharesState{}, offlineState{}, recycleState{}
+ 	// The file clipboard names one account's paths: another account must
+-	// not paste them.
++	// not paste them. The undo stack is the same: its steps are of the
++	// account that made them.
+ 	a.fileClip = fileClipboard{}
++	a.undoStack, a.undoing, a.undoBusy = nil, false, false
+ 	a.listings = nil
+ }
+diff --git a/app/undo.go b/app/undo.go
+new file mode 100644
+index 0000000..3f3aad2
+--- /dev/null
++++ b/app/undo.go
+@@ -0,0 +1,187 @@
++package app
++
++import (
++	"context"
++	"path"
++
++	"github.com/pengstem/baidunetgo/internal/baidu"
++)
++
++// undoEntry is one step the app can undo: what it did, said in words
++// ("移动 3 项到「照片」"), the reverse operation to run, the folders to
++// read again once that succeeded, and an optional callback on the UI
++// thread for the rest (clearing the choice, refreshing the recycle bin).
++//
++// Entries live in App.undoStack, in memory only, for as long as the
++// session lasts: a netdisk path means nothing to a later run, so the
++// stack is not kept on disk. An entry is pushed only once the operation
++// it describes has succeeded, and undone entries leave the stack; an
++// entry whose reverse fails stays, so the user can try again.
++type undoEntry struct {
++	label string
++	run   func(ctx context.Context, c *baidu.Client) error
++	dirs  []string
++	after func()
++}
++
++// undoLimit is how many steps the stack keeps; the oldest falls off when
++// it overflows.
++const undoLimit = 50
++
++// pushUndo adds e to the undo stack, unless an undo itself is running,
++// whose reverse must not become another step. It runs on the UI thread.
++func (a *App) pushUndo(e *undoEntry) {
++	if a.undoing || e == nil {
++		return
++	}
++	a.undoStack = append(a.undoStack, e)
++	if len(a.undoStack) > undoLimit {
++		a.undoStack = a.undoStack[len(a.undoStack)-undoLimit:]
++	}
++}
++
++// dropUndo removes e from the stack, reporting whether it was there. It is
++// how a toast's own undo takes its step off the stack, so a later Cmd+Z
++// undoes the step before it, and so a step is never undone twice.
++func (a *App) dropUndo(e *undoEntry) bool {
++	for i, u := range a.undoStack {
++		if u == e {
++			a.undoStack = append(a.undoStack[:i:i], a.undoStack[i+1:]...)
++			return true
++		}
++	}
++	return false
++}
++
++// undoLast undoes the last step: it runs the reverse operation on a
++// goroutine and, on the UI thread, pops the entry, counts the change,
++// reads the folders again, runs after and says so. A failed reverse keeps
++// the entry and says why, so the user can try again once the cause (a
++// name taken meanwhile, say) is gone. It yields while another undo, a
++// dialog or a transfer is running.
++func (a *App) undoLast() {
++	if a.undoBusy || a.dlg.open || a.dlg.busy || a.pv != nil || a.renaming != nil || a.creating != nil {
++		return
++	}
++	n := len(a.undoStack)
++	if n == 0 {
++		a.toast("没有可撤销的操作", "")
++		return
++	}
++	s := a.sess
++	if s == nil {
++		return
++	}
++	e := a.undoStack[n-1]
++	a.undoBusy, a.undoing = true, true
++	go func() {
++		err := e.run(context.Background(), s.client)
++		a.update(func() {
++			a.undoBusy, a.undoing = false, false
++			if a.sess != s {
++				return
++			}
++			if err != nil {
++				a.toast("无法撤销「"+e.label+"」："+err.Error(), "error")
++				return
++			}
++			// Pop it, unless a toast's undo or another path already did.
++			a.dropUndo(e)
++			a.netdiskChanged()
++			for _, d := range e.dirs {
++				a.reload(d)
++			}
++			// Undoing usually adds to or takes from the recycle bin: the
++			// page reads it again when next shown.
++			a.recycleDirty = true
++			if e.after != nil {
++				e.after()
++			}
++			a.toast("已撤销："+e.label, "success")
++		})
++	}()
++}
++
++// clearSel is an undo entry's after: it clears the choice in dirs, which
++// a reload has just repopulated with files whose fs_ids may differ.
++func (a *App) clearSel(dirs ...string) func() {
++	ds := append([]string(nil), dirs...)
++	return func() {
++		for _, d := range ds {
++			if l := a.listings[d]; l != nil {
++				l.sel.Clear()
++			}
++		}
++	}
++}
++
++// movedItem is one file a move or a copy put somewhere, as undoing it
++// needs it: the name it has there now and the name it had, in fromDir.
++type movedItem struct {
++	destName string // the name at destDir, which a conflict may have changed
++	name     string // the name it had in fromDir
++}
++
++// moveBack moves the items an operation put in to back into from, under
++// the names they had, then restores the copies it replaced there. A name
++// taken in from meanwhile makes MoveAs fail, which keeps the undo entry:
++// the app never deletes the newcomer to force the move.
++func moveBack(items []movedItem, from, to string, replaced []int64) func(ctx context.Context, c *baidu.Client) error {
++	srcs := make([]string, len(items))
++	names := make([]string, len(items))
++	for i, m := range items {
++		srcs[i] = path.Join(to, m.destName)
++		names[i] = m.name
++	}
++	return func(ctx context.Context, c *baidu.Client) error {
++		if len(srcs) > 0 {
++			if err := c.MoveAs(ctx, srcs, names, from); err != nil {
++				return err
++			}
++		}
++		if len(replaced) > 0 {
++			return c.Restore(ctx, replaced)
++		}
++		return nil
++	}
++}
++
++// copyBack deletes the copies an operation put in to (into the recycle
++// bin) and restores whatever the copy replaced there. Only the copies the
++// operation recorded are touched, never another file of the user's.
++func copyBack(items []movedItem, to string, replaced []int64) func(ctx context.Context, c *baidu.Client) error {
++	srcs := make([]string, len(items))
++	for i, m := range items {
++		srcs[i] = path.Join(to, m.destName)
++	}
++	return func(ctx context.Context, c *baidu.Client) error {
++		if err := c.Delete(ctx, srcs); err != nil {
++			return err
++		}
++		if len(replaced) > 0 {
++			return c.Restore(ctx, replaced)
++		}
++		return nil
++	}
++}
++
++// undoLabel says what a step did, as its undo toast shows it.
++func undoLabel(verb string, items []movedItem, to string) string {
++	if len(items) == 1 {
++		return verb + "「" + items[0].name + "」到「" + dirLabel(to) + "」"
++	}
++	return verb + " " + itoa(len(items)) + " 项到「" + dirLabel(to) + "」"
++}
++
++// replacedIDs are the fs_ids of the copies an operation replaced, which
++// its undo restores.
++func replacedIDs(files []baidu.File) []int64 {
++	if len(files) == 0 {
++		return nil
++	}
++	ids := make([]int64, len(files))
++	for i, f := range files {
++		ids[i] = f.FsID
++	}
++	return ids
++}
+diff --git a/app/undo_test.go b/app/undo_test.go
+new file mode 100644
+index 0000000..8825797
+--- /dev/null
++++ b/app/undo_test.go
+@@ -0,0 +1,325 @@
++package app
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/fakepan"
++)
++
++// recycleNames lists what the fake netdisk's recycle bin holds.
++func recycleNames(t *testing.T, a *App) []string {
++	t.Helper()
++	items, err := a.sess.client.RecycleList(context.Background())
++	if err != nil {
++		t.Fatalf("recycle list: %v", err)
++	}
++	out := make([]string, len(items))
++	for i, it := range items {
++		out[i] = it.Name
++	}
++	return out
++}
++
++func hasName(names []string, name string) bool {
++	for _, n := range names {
++		if n == name {
++			return true
++		}
++	}
++	return false
++}
++
++// TestUndoCmdZCutPaste: cut, paste elsewhere (a move), then Cmd+Z puts the
++// file back, the target folder loses it, the netdisk change is counted,
++// the stack empties, and a second Cmd+Z finds nothing to undo.
++func TestUndoCmdZCutPaste(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "安装包.dmg")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the move", func() bool {
++		return !srv.Exists("/安装包.dmg") && srv.Exists("/代码/安装包.dmg")
++	})
++	settle(tt)
++	if len(a.undoStack) != 1 {
++		t.Fatalf("undo stack holds %d, want 1", len(a.undoStack))
++	}
++	if got, want := a.undoStack[0].label, "移动「安装包.dmg」到「代码」"; got != want {
++		t.Errorf("label %q, want %q", got, want)
++	}
++	gen := a.netdiskGen
++
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the undo", func() bool {
++		return srv.Exists("/安装包.dmg") && !srv.Exists("/代码/安装包.dmg")
++	})
++	settle(tt)
++	if a.netdiskGen != gen+1 {
++		t.Errorf("netdiskGen %d after undo, want %d", a.netdiskGen, gen+1)
++	}
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d after undo, want 0", len(a.undoStack))
++	}
++	if !tt.HasText("已撤销") {
++		t.Errorf("no undo toast: %q", tt.Texts())
++	}
++
++	tt.Key(ui.Cmd, ui.KeyZ)
++	settle(tt)
++	if !tt.HasText("没有可撤销的操作") {
++		t.Errorf("no empty-stack toast: %q", tt.Texts())
++	}
++}
++
++// TestUndoRename: renaming a file in place is undone by renaming it back.
++func TestUndoRename(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	l := a.listings["/"]
++	f := fileNamed(t, a, "/", "README.md")
++	l.sel.Clear()
++	l.sel.Add(f.FsID)
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(0, ui.KeyF2)
++	tt.Advance(300 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyA)
++	tt.Type("说明.md")
++	tt.Key(0, ui.KeyEnter)
++	waitUntil(t, tt, "the rename", func() bool {
++		return srv.Exists("/说明.md") && !srv.Exists("/README.md")
++	})
++	settle(tt)
++	if len(a.undoStack) != 1 {
++		t.Fatalf("undo stack holds %d, want 1", len(a.undoStack))
++	}
++
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the undo", func() bool {
++		return srv.Exists("/README.md") && !srv.Exists("/说明.md")
++	})
++	settle(tt)
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d after undo", len(a.undoStack))
++	}
++	if !tt.HasText("已撤销") {
++		t.Errorf("no undo toast: %q", tt.Texts())
++	}
++}
++
++// TestUndoNewFolder: a new folder is undone by moving it to the recycle
++// bin, not by deleting it for good.
++func TestUndoNewFolder(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	tt.Advance(time.Second)
++	tt.Key(ui.Cmd|ui.Shift, ui.KeyN)
++	tt.Advance(300 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyA)
++	tt.Type("相册")
++	tt.Key(0, ui.KeyEnter)
++	waitUntil(t, tt, "the folder", func() bool { return srv.Exists("/相册") })
++	settle(tt)
++	if len(a.undoStack) != 1 {
++		t.Fatalf("undo stack holds %d, want 1", len(a.undoStack))
++	}
++
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the undo", func() bool { return !srv.Exists("/相册") })
++	settle(tt)
++	if !hasName(recycleNames(t, a), "相册") {
++		t.Error("the undone folder is not in the recycle bin")
++	}
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d after undo", len(a.undoStack))
++	}
++	if !tt.HasText("已撤销") {
++		t.Errorf("no undo toast: %q", tt.Texts())
++	}
++}
++
++// TestUndoDelete: deleting to the recycle bin is undone by restoring.
++func TestUndoDelete(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(0, ui.KeyDelete)
++	waitUntil(t, tt, "the delete", func() bool { return !srv.Exists("/README.md") })
++	settle(tt)
++	if len(a.undoStack) != 1 {
++		t.Fatalf("undo stack holds %d, want 1", len(a.undoStack))
++	}
++	gen := a.netdiskGen
++
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the undo", func() bool { return srv.Exists("/README.md") })
++	settle(tt)
++	if a.netdiskGen != gen+1 {
++		t.Errorf("netdiskGen %d after undo, want %d", a.netdiskGen, gen+1)
++	}
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d after undo", len(a.undoStack))
++	}
++	if !tt.HasText("已撤销") {
++		t.Errorf("no undo toast: %q", tt.Texts())
++	}
++}
++
++// TestUndoCopy: undoing a copy deletes only the copy it made, and leaves
++// the original where it was.
++func TestUndoCopy(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "安装包.dmg")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyC)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the copy", func() bool { return srv.Exists("/代码/安装包.dmg") })
++	settle(tt)
++	if len(a.undoStack) != 1 {
++		t.Fatalf("undo stack holds %d, want 1", len(a.undoStack))
++	}
++
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the undo", func() bool { return !srv.Exists("/代码/安装包.dmg") })
++	settle(tt)
++	if !srv.Exists("/安装包.dmg") {
++		t.Error("undoing the copy removed the original")
++	}
++	if !hasName(recycleNames(t, a), "安装包.dmg") {
++		t.Error("the undone copy is not in the recycle bin")
++	}
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d after undo", len(a.undoStack))
++	}
++	if !tt.HasText("已撤销") {
++		t.Errorf("no undo toast: %q", tt.Texts())
++	}
++}
++
++// TestUndoEmptyStack: Cmd+Z with nothing to undo says so.
++func TestUndoEmptyStack(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(200 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyZ)
++	settle(tt)
++	if !tt.HasText("没有可撤销的操作") {
++		t.Errorf("no empty-stack toast: %q", tt.Texts())
++	}
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d", len(a.undoStack))
++	}
++}
++
++// TestUndoConflictKeepsEntry: when the folder a move came from holds the
++// name again, undoing the move fails, the entry stays to retry, and it
++// works once the newcomer is gone. The app never deletes the newcomer to
++// force the move.
++func TestUndoConflictKeepsEntry(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	chooseFiles(t, a, "/", "安装包.dmg")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the move", func() bool { return srv.Exists("/代码/安装包.dmg") })
++	settle(tt)
++
++	// A newcomer with the same name appears where the file came from.
++	srv.Add(fakepan.Node{Path: "/安装包.dmg", Data: []byte("新的")})
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the failed undo", func() bool { return tt.HasText("无法撤销") })
++	settle(tt)
++	if len(a.undoStack) != 1 {
++		t.Errorf("a failed undo dropped its entry; stack %d", len(a.undoStack))
++	}
++	if a.undoBusy {
++		t.Error("undoBusy stayed set after a failed undo")
++	}
++	if !srv.Exists("/代码/安装包.dmg") {
++		t.Error("the file left the target though the undo failed")
++	}
++	if string(srv.Data("/安装包.dmg")) != "新的" {
++		t.Error("the undo overwrote the newcomer")
++	}
++
++	// Clear the newcomer (to the recycle bin) and retry.
++	if err := a.sess.client.Delete(context.Background(), []string{"/安装包.dmg"}); err != nil {
++		t.Fatal(err)
++	}
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the retried undo", func() bool {
++		return srv.Exists("/安装包.dmg") && !srv.Exists("/代码/安装包.dmg")
++	})
++	settle(tt)
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d after the retried undo", len(a.undoStack))
++	}
++	if !tt.HasText("已撤销") {
++		t.Errorf("no undo toast: %q", tt.Texts())
++	}
++}
++
++// TestUndoChain: undoing two steps goes back in order, and an undo never
++// records a step of its own: the second Cmd+Z undoes the earlier move.
++func TestUndoChain(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	// Step one: move README.md into /代码.
++	chooseFiles(t, a, "/", "README.md")
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyX)
++	tt.Advance(100 * time.Millisecond)
++	a.router.Push(filesRoute("/代码"))
++	waitFor(t, tt, "main.go")
++	tt.Key(ui.Cmd, ui.KeyV)
++	waitUntil(t, tt, "the move", func() bool { return srv.Exists("/代码/README.md") })
++	settle(tt)
++	// Step two: rename main.go in place.
++	l := a.listings["/代码"]
++	f := fileNamed(t, a, "/代码", "main.go")
++	l.sel.Clear()
++	l.sel.Add(f.FsID)
++	tt.Advance(100 * time.Millisecond)
++	tt.Key(0, ui.KeyF2)
++	tt.Advance(300 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyA)
++	tt.Type("app.go")
++	tt.Key(0, ui.KeyEnter)
++	waitUntil(t, tt, "the rename", func() bool { return srv.Exists("/代码/app.go") })
++	settle(tt)
++	if len(a.undoStack) != 2 {
++		t.Fatalf("undo stack holds %d, want 2", len(a.undoStack))
++	}
++
++	// Undo the rename first.
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the rename undone", func() bool {
++		return srv.Exists("/代码/main.go") && !srv.Exists("/代码/app.go")
++	})
++	settle(tt)
++	if len(a.undoStack) != 1 {
++		t.Fatalf("stack holds %d after one undo, want 1", len(a.undoStack))
++	}
++	if !srv.Exists("/代码/README.md") {
++		t.Error("undoing the rename disturbed the earlier move")
++	}
++
++	// Then undo the move.
++	tt.Key(ui.Cmd, ui.KeyZ)
++	waitUntil(t, tt, "the move undone", func() bool {
++		return srv.Exists("/README.md") && !srv.Exists("/代码/README.md")
++	})
++	settle(tt)
++	if len(a.undoStack) != 0 {
++		t.Errorf("stack holds %d after the chain, want 0", len(a.undoStack))
++	}
++}

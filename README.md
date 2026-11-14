@@ -6,26 +6,30 @@
 
 # Software-Repo — Patchwork build overlay
 
-A personal, patch-based build overlay for three Android apps: **ScreenTime**,
-**RecurringExpenseTracker** and **Fcitx5 for Android**. No application source is
-vendored here. The repository keeps an ordered patch queue, plus the CI that
-applies it to current upstream code and publishes signed APKs through a signed
-F-Droid repository.
+A personal, patch-based build overlay for three Android apps — **ScreenTime**,
+**RecurringExpenseTracker** and **Fcitx5 for Android** — plus **BaiduNetGo**, a
+desktop Netdisk client that is built here but is *not* an Android/F-Droid app.
+No application source is vendored here. The repository keeps ordered patch
+queues, plus the CI that applies them to current upstream code: signed APKs are
+published through a signed F-Droid repository, and the desktop app's x86
+installers are published as workflow artifacts.
 
 > Personal project, not affiliated with or endorsed by the upstream authors
-> (Dennis Bauer, Atharok, the Fcitx5 for Android contributors).
+> (Dennis Bauer, Atharok, the Fcitx5 for Android contributors, pengstem).
 
 ## What this is
 
 A *patchwork overlay* monorepo that stores two things and no app source:
 
-1. **Patch queues** — `apps/<app>/patches/*.patch`, ordered changes that apply
-   on top of the upstream branch with `git am -3`. The monitored branches are
-   expenses `main`, screentime `main` and fcitx5 `master` (fcitx5-android's real
-   default branch; the URL is the same either way).
-2. **Build and publish automation** — CI fetches the current upstream `main`,
-   applies the queue, rewrites the version, builds signed APKs, and updates the
-   signed F-Droid repository.
+1. **Patch queues** — `apps/<app>/patches/*.patch` for the Android apps and
+   `desktop/baidunetgo/patches/*.patch` for the desktop one: ordered changes
+   that apply on top of the upstream branch with `git am -3`. The monitored
+   branches are expenses `main`, screentime `main`, fcitx5 `master`
+   (fcitx5-android's real default branch) and baidunetgo `main`.
+2. **Build and publish automation** — CI fetches the current upstream head,
+   applies the queue, rewrites the version, builds signed APKs and updates the
+   signed F-Droid repository; separately, `baidunetgo.yml` builds the patched
+   desktop app for x86 only and uploads the installers as artifacts.
 
 Re-applying the queue to the latest upstream commit on every build lets upstream
 fixes and features flow in without maintaining a diverged fork. A patch that no
@@ -37,8 +41,13 @@ code.
 | App | Upstream (branch) | Upstream revision | Patches | Built version |
 | --- | --- | --- | --- | --- |
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `effbf0d` | 18 | `0.21.4-patchwork-fallback-effbf0d` (6806) |
-| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1303, arm64-v8a) |
+| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1303) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 4 | `0.1.3-patchwork` (11202, arm64-v8a) |
+| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 19 | `0.8.3` (linux/windows x86) |
+
+The three Android apps are published in F-Droid. **BaiduNetGo is not**: it is a
+Go/MyGo desktop program, built on its own 10-day schedule and uploaded as a
+workflow artifact (`baidunetgo-x86-<sha>`), never as an APK.
 
 **ScreenTime** — daily usage history persisted in a local SQLite database, a new
 analysis screen backed by that history (durations count up from zero while the
@@ -78,6 +87,21 @@ are unaffected. Only `arm64-v8a` is published (upstream produces per-ABI APKs
 and no universal APK), and the APK is
 about 52 MB.
 
+**BaiduNetGo (desktop, not F-Droid)** — the community-fixed build of pengstem's
+pure-Go Baidu Netdisk client: a duplicate finder, an in-app file clipboard with
+undo, Finder-style marquee selection and drag-to-move, window/font adaptation,
+and a pluggable update-check feed, on top of MyGo's native GPU UI. Built from
+`desktop/baidunetgo/patches` for **x86 only** (`linux/amd64`, `windows/amd64`)
+by `scripts/build-baidunetgo.sh`, which reapplies the queue with `git am -3`
+(the exported-commit form of rebasing) to every new upstream head. Its installers
+are workflow artifacts, never F-Droid packages.
+
+Both Android apps with prebuilt native dependencies (RecurringExpenseTracker and
+ScreenTime) are compiled **ARM only**: `KEEP_ABIS="arm64-v8a armeabi-v7a"`
+in their `app.conf` makes `build-app.sh` strip `lib/x86/` and `lib/x86_64/` after
+Gradle, then realign to 16 KB pages and re-sign the APK (v2/v3). Fcitx5's
+`arm64-v8a` build is unchanged.
+
 ## F-Droid repository
 
 Repository (custom domain, served and TLS-terminated in front of GitHub Pages;
@@ -88,9 +112,8 @@ https://software.sparkzh.top/repo
 ```
 
 The index returns HTTP 200, and `index-v2.json` lists
-`de.dbauer.expensetracker` **6804**, `com.atharok.screentime` **1303** and
-`org.fcitx.fcitx5.android` **11201**. (The committed expenses APK predates the
-latest patch-queue commit; the next build publishes 6805.)
+`de.dbauer.expensetracker` **6806**, `com.atharok.screentime` **1303** and
+`org.fcitx.fcitx5.android` **11202**.
 Landing page: <https://software.sparkzh.top/>. The GitHub Pages URL
 <https://pilihu2022.github.io/Software-Repo/repo> redirects to this domain.
 
@@ -124,24 +147,24 @@ mismatch when the raw URL is used; the content is identical.
 
 ## How automation works
 
-`build.yml` polls the upstream repositories every 15 minutes (`*/15 * * * *`)
-and builds only the app(s) whose upstream SHA differs from
-`fdroid/.build-state.json`. It also runs on pushes to `main` touching `apps/**`,
-`scripts/**` or the workflow itself, and on manual dispatch (optional `app` /
-`force` inputs). GitHub treats schedules as best-effort and may delay a run under
-load, so the effective latency can be longer than 15 minutes. A push that
-changes the patch queues under `apps/*/patches/` is an ordinary `apps/**` push: it triggers a build immediately
-(no need to wait for the schedule) and the patch-queue commit bumps
-`versionCode` as described below.
+`build.yml` checks the upstream repositories once every 10 days and builds only
+the app(s) whose upstream SHA differs from `fdroid/.build-state.json`. GitHub
+crons cannot express "every 10 days" (a `*/10` day-of-month rule would fire on
+the 1st, 11th, 21st and 31st), so the workflow runs daily (`17 4 * * *`) and the
+check job exits early while `.watch-state.json`'s `android` timestamp is younger
+than 10 days. It also runs on pushes to `main` touching `apps/**`, `scripts/**`
+or the workflow itself, and on manual dispatch (optional `app` / `force`
+inputs). A push that changes a patch queue or an `app.conf` triggers a build
+immediately and that commit bumps `versionCode` as described below.
 
-`upstream-watch.yml` complements that schedule: GitHub delays `*/15` on this
-repository by hours, so the watcher opens a one-hour polling window every 12
-hours (`7 */12 * * *`) that checks every upstream branch every 15 minutes and
-dispatches `build.yml` as soon as an upstream SHA changes. A window never
-outlives 60 minutes. `watchdog.yml` guards the windows: hourly it checks that
-one is queued or running and, when the previous window started more than 12
-hours ago or died early (a hosted runner can be reclaimed mid-job, as on
-2026-10-28), dispatches a fresh one.
+The old 15-minute poller (`upstream-watch.yml`), its hourly watchdog and their
+one-hour polling windows were removed with the 10-day cadence: a daily gated run
+is simpler, a delayed or missed day only shifts the window by a day, and the
+gate only advances after a scheduled run that finished, so a hard failure is
+retried the next day instead of waiting another 10. When the queue no longer
+applies to the head, the build falls back to the last successful upstream commit
+and the next window retries the new head. The Windows/Linux x86 desktop build is
+the separate `baidunetgo.yml` (see below).
 
 Builds are per app: a push rebuilds only the apps whose `apps/<app>/**` paths
 changed (a `scripts/**` or workflow change rebuilds all three; an unknown/forced
@@ -154,17 +177,31 @@ NDK 28.0.13004108, CMake 3.31.6 and build-tools 36.1.0 SDK packages, and has a
 
 1. **check** — `scripts/check-upstream.sh` compares the upstream branch SHAs
    (`main` for expenses/screentime, `master` for fcitx5) with
-   `fdroid/.build-state.json` and emits the build matrix;
+   `fdroid/.build-state.json` and emits the build matrix, after the 10-day gate;
 2. **build** — one matrix leg per changed app (`fail-fast: false`): mirror clone
    in `.cache/mirror/<app>.git`, fresh checkout, optional recursive submodule
    update (fcitx5), `git am -3` over the queue, version handling, Gradle release
-   build, keystore signing, then `apksigner` / `aapt` verification;
+   build, keystore signing, an ARM ABI strip plus 16 KB realign and re-sign when
+   `KEEP_ABIS` is set, then `apksigner` / `aapt` verification;
 3. **publish** — `publish-fdroid.sh` keeps at most 3 APKs per package, dedupes by
    `(package, versionCode)`, signs the index with fdroidserver (`fdroid update`),
    commits `fdroid/repo` and `.build-state.json` with `[skip ci]`, and deploys
-   Pages. Failed legs keep their old state so the next run retries them;
+   Pages. Failed legs keep their old state so the next run retries them, and
+   `record-check` advances the 10-day window only when the scheduled run
+   finished (a fallback build counts: its app keeps the old recorded head, so
+   the next window retries the new upstream);
 4. **failure** — opens or comments on a **“Patchwork build failed”** issue with
    the run link and a local reproduction command.
+
+`baidunetgo.yml` is the desktop counterpart: it runs daily (`43 4 * * *`), gates
+on `.watch-state.json`'s `baidunetgo` timestamp, resolves `pengstem/baidunetgo`
+`main` with `git ls-remote`, and when the SHA differs from
+`desktop/.build-state.json` replays `desktop/baidunetgo/patches` onto it
+(`git am -3`, with one retry on the last built commit when the queue no longer
+applies), builds `linux/amd64,windows/amd64` with `go tool mygo build`, and
+uploads the installers as the `baidunetgo-x86-<sha>` artifact. A fallback build
+keeps the recorded head, so the next 10-day window retries the new upstream.
+Nothing in it touches `fdroid/`.
 
 The last full build
 ([run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167))
@@ -186,16 +223,16 @@ versionName = "<upstream versionName>-patchwork"
 ```
 
 `PATCHWORK_REVISION` defaults to the number of commits on `HEAD` touching
-`apps/<app>/patches` (max 99, overridable via the `PATCHWORK_REVISION`
-environment variable). This is what makes patch-only releases upgradeable in
-F-Droid: a patch-queue commit bumps `versionCode` even when upstream did not
-change.
+`apps/<app>` (max 99, overridable via the `PATCHWORK_REVISION` environment
+variable). Counting the whole app directory — not only its patch queue — is
+what lets a non-patch change such as `KEEP_ABIS` ship a new installable build:
+every downstream commit bumps `versionCode` even when upstream did not change.
 
-| App | Upstream versionCode / versionName | Patch-queue commits | Result |
+| App | Upstream versionCode / versionName | App-dir commits | Result |
 | --- | --- | --- | --- |
-| ScreenTime | `13` / `"1.4.1"` | 3 | `1303` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 5 | `6805` / `"0.21.4-patchwork"` |
-| Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 1 | `11201` / `"0.1.3-patchwork"` |
+| ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 8 | `6808` / `"0.21.4-patchwork"` |
+| Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 2 | `11202` / `"0.1.3-patchwork"` |
 
 For fcitx5 the upstream code is itself ABI-dependent
 (`baseVersionCode × 10 + ABI id`, where arm64-v8a is 2), so the full formula is:
@@ -221,11 +258,16 @@ with the arm64 build.
 ├── README.zh-CN.md            # Simplified Chinese
 ├── LICENSE                    # GPL-3.0-only
 ├── apps/
-│   ├── expenses/{app.conf,patches/}     # 0001..0018
-│   ├── screentime/{app.conf,patches/}   # 0001..0011
+│   ├── expenses/{app.conf,patches/}     # 0001..0018, KEEP_ABIS=ARM
+│   ├── screentime/{app.conf,patches/}   # 0001..0011, KEEP_ABIS=ARM
 │   └── fcitx5/{app.conf,patches/}       # 0001..0003
+├── desktop/
+│   ├── baidunetgo/{app.conf,patches/}   # 0001..0019, x86 desktop build
+│   └── .build-state.json                # last upstream commit built
+├── .watch-state.json          # last android/baidunetgo 10-day check
 ├── scripts/
 │   ├── build-app.sh           # fetch, patch, version, build, verify
+│   ├── build-baidunetgo.sh    # fetch, rebase queue, x86 desktop build
 │   ├── check-upstream.sh      # upstream SHA diff -> CI matrix
 │   ├── publish-fdroid.sh      # APKs + signed index
 │   ├── test-publish-fdroid.sh # publisher regression test
@@ -237,14 +279,18 @@ with the arm64 build.
 │   └── .build-state.json
 ├── signing/patchwork-test.jks # deliberately public test key
 ├── docs/design/               # calendar spec, Expenses architecture
-└── .github/workflows/{build,deploy-pages,upstream-watch,watchdog}.yml
+└── .github/workflows/{build,baidunetgo,deploy-pages}.yml
 ```
 
 ## Build locally
 
-Prerequisites for expenses/screentime: bash, Git, JDK 21, Android SDK 37
-(preview platform and build-tools) and `fdroidserver` for publishing. They need
-no NDK.
+Prerequisites for the Android apps: bash, Git, JDK 21, Android SDK 37 (preview
+platform and build-tools); expenses/screentime also need `zip` to strip the
+non-ARM ABIs. They need no NDK.
+
+The desktop app needs Go (the version in the upstream `go.mod`), `zip` and, for
+the Windows installers, NSIS (`makensis`). MyGo needs no cgo, so `linux/amd64`
+and `windows/amd64` are both built on any machine:
 
 Fcitx5 for Android needs more: Android SDK packages `platforms;android-36`,
 `build-tools;36.1.0`, `cmake;3.31.6`, `ndk;28.0.13004108`, the host packages
@@ -267,17 +313,27 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-app.sh expenses --no-build    # fetch + patch + rewrite version
 ./scripts/build-app.sh expenses              # full build into dist/
 ./scripts/build-app.sh screentime --out dist
-./scripts/build-app.sh fcitx5 --no-build     # fetch + patches, no submodules (11201)
+./scripts/build-app.sh fcitx5 --no-build     # fetch + patches, no submodules (11202)
 ./scripts/build-app.sh fcitx5 --out ../.toolchain/tmp/fcitx5-dist
 ./scripts/check-upstream.sh                  # JSON status; --all/--apps select apps
 ./scripts/publish-fdroid.sh --apk-dir dist   # rebuild fdroid/repo + index
 ./scripts/sync-patches.sh --check            # compare queues with the clones
 ./scripts/test-publish-fdroid.sh dist/RecurringExpenseTracker-0.21.4-patchwork.apk
+
+# Desktop app (x86 only): --prepare fetches and rebases the queue, --build then
+# compiles. --out defaults to dist/baidunetgo.
+./scripts/build-baidunetgo.sh --prepare
+./scripts/build-baidunetgo.sh --build
+PATCHWORK_PLATFORMS=linux/amd64 ./scripts/build-baidunetgo.sh   # skip NSIS locally
 ```
 
 `dist/build-info.txt` records `upstream_commit`, `patch_count`, `version_code`,
 `version_name`, `variant`, `built_at`, `apk`, `apk_size` and `sha256`, plus
-`abi` for per-ABI builds such as fcitx5. Build caches (`.cache/`) and outputs
+`abi` for per-ABI builds such as fcitx5 and `abis` for the ARM-only apps. The
+desktop build writes the same kind of file under `dist/baidunetgo/` (or
+`--out`): `upstream_head`, `upstream_commit`, `upstream_fallback`,
+`patch_count`, `version`, `platforms`, `built_at` and one `file=` line per
+installer with its size and SHA-256. Build caches (`.cache/`) and outputs
 (`dist/`) are gitignored.
 
 If the GitHub HTTPS clone stalls (a broken local proxy, for example), rewrite
@@ -293,11 +349,13 @@ GIT_SSH_COMMAND='ssh -F /dev/null -o BatchMode=yes' \
 
 ## Updating the patches
 
-Patches are authored in three separate app clones; this repository only
-consumes the exported files. Expenses and ScreenTime keep their queue in
+Patches are authored in four separate app clones; this repository only consumes
+the exported files. Expenses and ScreenTime keep their queue in
 `.patchwork/patches/` (or on a `patchwork` branch); fcitx5-android keeps it on
 the `feat/rime-sync-manager` branch, exported with
-`git format-patch master..feat/rime-sync-manager`.
+`git format-patch master..feat/rime-sync-manager`; BaiduNetGo keeps its queue
+folded into `main` (upstream plus the community commits), exported relative to
+`origin/main`.
 
 ```bash
 # 1. Develop on a feature branch in the app clone
@@ -317,6 +375,26 @@ git add apps/screentime/patches
 git commit -m "Update ScreenTime patch queue"
 git push origin main
 ```
+
+BaiduNetGo's queue is exported from its authoring clone's `main`, which is the
+upstream branch plus the community commits (no `.patchwork/` directory):
+
+```bash
+cd ../baidunetgo
+git fetch origin
+rm -f ../Software-Repo/desktop/baidunetgo/patches/*.patch
+git format-patch --no-signature --zero-commit --no-numbered \
+  origin/main..main -o ../Software-Repo/desktop/baidunetgo/patches
+
+cd ../Software-Repo
+git add desktop/baidunetgo/patches
+git commit -m "Update the BaiduNetGo patch queue"
+git push origin main
+```
+
+`sync-patches.sh` only knows the three Android clones; the desktop queue is
+exported by hand as above (the workflow rebuilds it within 10 days, or run
+`baidunetgo.yml` manually with `force`).
 
 `./scripts/sync-patches.sh --check` reports differences only (exit code 1 when
 out of sync) and is suitable for CI or a local pre-commit check. For expenses

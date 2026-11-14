@@ -1,0 +1,571 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 15:04:22 +0800
+Subject: [PATCH] Move new-folder and upload into a toolbar on the folder's
+ path bar, with sort, view, link and refresh, since the actions belong at the
+ folder's path rather than under its files; the list's maker row becomes a
+ drop-only hint, the grid's last tile a whole new-folder tile, and an empty
+ folder keeps its own labelled upload.
+
+---
+ AGENTS.md           |   1 +
+ CHANGELOG.md        |   1 +
+ CLAUDE.md           |   2 +-
+ README.md           |   4 +-
+ app/browser.go      |  42 +++++++++----
+ app/newfolder.go    | 113 ++++++++++++++--------------------
+ app/ops_test.go     |  27 +++++---
+ app/toolbar_test.go | 147 ++++++++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 244 insertions(+), 93 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 3cdcb2b..12b2c86 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -85,6 +85,7 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - Names are renamed in place (`app/rename.go`), not with `ui.EditableText`: in a `List` it takes the row a click chooses for one chosen before the click, so a plain click on a row starts editing it half a second later. Asking a row's text `Clicked()` (or `Pressed`/`DoubleClicked`) makes it the click's target and the list stops choosing the row; `ObserveInput` watches presses without becoming their target.
+ - Virtualized `List` rows get no enter/exit transitions. Staggered entrances use `Keyframes` inside the row (`entering` in `browser.go`).
+ - The grid view is not `ui.GridView`: GridView builds each line as an element, so a tile that a resize moves to another line is built anew and jumps. `app/grid.go` positions tiles itself, all under one parent keyed by fsid (percent `Left`/`Width`, so the width never lags), and on a cell change `Jump`s the slot's offset to where it showed and `AnimateTo`s it back to 0. Element `Transition`s don't help here: MyGo skips layout transitions on frames where the window resized.
++- The folder's actions live in a toolbar on the path bar (`app/browser.go`'s `filesToolbar`): a new folder (`folder-plus`), the sort menu, the view switch, the clipboard-link button, refresh, and the upload pill at the end; the folder's own name and search sit before them, and the button's box is where a folder made from it flies from (`listing.makerAt`). The maker (`app/newfolder.go`) is no longer a place for buttons: the grid's last tile is a whole "新建" tile that makes a folder on a click (a plus, or an upload while files are dragged over the window, `listing.over`), and the list's maker row is only the drop hint, in the accent color saying where dropped files will go, built only while files are dragged so it takes no room at the foot of a full folder. An empty folder says "这里还空着" and offers one upload of its own, labelled apart from the toolbar's. A new folder is named in a draft row at the top (`draftID`, put back each frame by `placeDraft`); a click away with its name untouched gives up. Cmd-Shift-N starts it from the toolbar's button box.
+ - Theme: the look is a native macOS app's, modeled on Pulse (egoist's MyGo app): the sidebar draws no background so the window's `VibrancySidebar` material shows (`main.go`: `TitleBarHiddenInset`, 52 px title bar), pages marked by white glyphs on colored tiles, the chosen one on a solid accent backdrop, a value at each row's end (`navValue`); the pane is white with a title over a subtitle (`pageTitle`), round gray tool buttons (`toolButton`), capsule segmented controls (`segmented`/`segmentedOf`), which fold into pop-up buttons (`choice`/`popUp`) when the title bar is narrower than `compactBar` (`a.compact`, from its last width; in a folder the tools fold instead whenever its whole path would not fit beside them open, `foldTools`, so the path never folds while they could give way, and the folder's title bar has no subtitle, the status bar counting its items), striped 28 px list rows (`stripe`), rounded gray `group` panels for settings and summaries, and the system typeface (no embedded fonts; `figure` sets tabular digits). Waits that fill a page or stand for a task use `plugins/loading` (a folder's `Ring`, the speed test's `Radar`; the boot screen shows no wait, only the bare window); small ones in buttons, rows and dialogs keep AppKit's `ui.Spinner`. `applyTheme` swaps in the app's light/dark `ui.Theme` each frame. Extra colors are in `palette`. Motion is one curve and three lengths (`motionHover` 120 ms, `motionFade` 160 ms, `motionPanel` 180 ms), plus `popIn` and `rowEnter`, all in `app/theme.go`; no springs or bounce.
+ - Shaders (`ui/shader`, sources in `app/shaders/*.kage`, wiring in `app/effects.go`): each shader draw, effect layer or gradient with stops is a "general" GPU instance that the window does not batch, so dozens of them cost frames. Measure with `MYGO_FRAME_STATS=all` (it counts instances by class); draw many small things as plain fills, and keep a shader's per-pixel loop short (`specks.kage` searches only the cells whose specks can reach the pixel, from one hash each, and returns at once outside their reach). Shaders and `Element.Effect` run interpreted on the CPU in `ui.Tester`, so the app uses them only when `a.gpu` (`p.Accelerated()`), with plain fallbacks the tests see.
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 7eb7eb6..a8ac894 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -12,6 +12,7 @@
+ 
+ ### 改进
+ 
++- 文件夹页的路径栏新增一条工具栏，把新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传放在路径与搜索之后；窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏。列表底部不再重复新建文件夹与上传两个按钮，拖拽时整行提示投放位置、不拖拽时不占高度；网格最后一格改为整块「新建」磁贴，点击即新建文件夹；空文件夹保留「这里还空着」并只给一个专属的上传入口，避免与工具栏按钮同名；新建文件夹的飞入动画改从工具栏按钮出发。
+ - 查重结果会缓存到用户数据目录（`dedup.json`，默认 7 天内有效）：网盘文件没有变动时，再次进入查重页立即显示上次结果，不再整盘重扫；删除、移动 / 复制、重命名、新建文件夹、还原或清空回收站、上传完成、离线下载完成等改动会记一次变更，使缓存失效并在进入页面时自动重扫；扫描期间有改动则不写缓存，并在页头提示重新扫描。
+ 
+ ### 修复
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0a05b2e..fa8c729 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -83,7 +83,7 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - `ui.List` row selection paints the accent color itself (`Selected()`). The browser covers it with an opaque `selectionFill`.
+ - Dialogs focus their first focusable element. A focused button keeps Enter, so main buttons use `AutoFocus` (only in dialogs without a text field).
+ - Names are renamed in place (`app/rename.go`), not with `ui.EditableText`: in a `List` it takes the row a click chooses for one chosen before the click, so a plain click on a row starts editing it half a second later. Asking a row's text `Clicked()` (or `Pressed`/`DoubleClicked`) makes it the click's target and the list stops choosing the row; `HandleInput` returning false watches presses without taking them.
+-- There is no new-folder button or dialog: the maker (`app/newfolder.go`), an accent row after the list's files (a `Header` row, so it is never chosen) or the grid's last tile (`makerID`), makes folders and picks uploads, and lights up while files are dragged over the window (`listing.over`, which scrolls it into view). A new folder is named in a draft row at the top (`draftID`, put back each frame by `placeDraft`); a click away with its name untouched gives up. Cmd-Shift-N starts it.
++- The folder's actions live in a toolbar on the path bar (`app/browser.go`'s `filesToolbar`): a new folder (`folder-plus`), the sort menu, the view switch, the clipboard-link button, refresh, and the upload pill at the end; the folder's own name and search sit before them, and a button's box is where a folder made from it flies from (`listing.makerAt`). The maker (`app/newfolder.go`) is no longer a place for buttons: the grid's last tile is a whole "新建" tile that makes a folder on a click (a plus, or an upload while files are dragged over the window, `listing.over`), and the list's maker row is only the drop hint, in the accent color saying where dropped files will go, built only while files are dragged so it takes no room at the foot of a full folder. An empty folder says "这里还空着" and offers one upload of its own, labelled apart from the toolbar's. A new folder is named in a draft row at the top (`draftID`, put back each frame by `placeDraft`); a click away with its name untouched gives up. Cmd-Shift-N starts it from the toolbar's button box.
+ - Things coming into a folder fly in (`app/landing.go`): rows glide to make room (`glideRow`, the listing holding the glide: `AnimateTo`/`Jump` on a list row take its name's clicks), then a card over the page (`flight`) goes from where the thing was put (drop point, button, draft row) to the row, which stays hidden until it lands. A `Transition` `Match` cannot do it: a list clips its rows to their slots, so a row coming from elsewhere shows only once it is there. A row the list chooses paints the accent under itself even while hidden, so the folder made is chosen once it lands (`chooseLanded`).
+ - Virtualized `List` rows get no enter/exit transitions. Staggered entrances use `Keyframes` inside the row (`entering` in `browser.go`).
+ - The grid view is not `ui.GridView`: GridView builds each line as an element, so a tile that a resize moves to another line is built anew and jumps. `app/grid.go` positions tiles itself, all under one parent keyed by fsid (percent `Left`/`Width`, so the width never lags), and on a cell change `Jump`s the slot's offset to where it showed and `AnimateTo`s it back to 0. Element `Transition`s don't help here: MyGo skips layout transitions on frames where the window resized.
+diff --git a/README.md b/README.md
+index 188b552..c6d1e08 100644
+--- a/README.md
++++ b/README.md
+@@ -12,14 +12,14 @@
+ ## 特性
+ 
+ - **登录**：百度网盘 App 扫码，或粘贴 Cookie / BDUSS+STOKEN；也能直接沿用本机百度网盘 Linux 客户端或 BaiduPCS-Go 的登录。凭据用 AES-GCM 加密保存，密钥放在系统钥匙串
+-- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；窗口变窄时标题栏的分段控件收成弹出菜单
++- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；路径栏右侧是一条工具栏，放着新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传，窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏再把上层文件夹收进「…」
+ - **不落盘预览**：文件只读进内存
+   - 图片：支持 SVG 矢量和 GIF 动画，从缩略图"长"出来的共享元素动画，滚轮缩放、拖拽平移、←/→ 切换；可复制图片（按 EXIF 方向摆正，SVG 转 PNG，GIF 取首帧）
+   - 文本与代码（语法高亮，UTF-8 / GB18030 自动识别）、Markdown 渲染，可一键复制全文
+   - PDF：PDFium 编译成 WebAssembly 在 wazero 中运行，逐页渲染，全平台无依赖
+   - 音频：MP3 / OGG / WAV 边下边播
+   - 视频（及其它音频）：交给 **mpv**，经本地回环服务按块读取网盘直链
+-- **文件操作**：新建文件夹、重命名、移动 / 复制（文件夹选择器）、删除（无需确认，提示条里可撤销）、回收站
++- **文件操作**：新建文件夹、重命名、移动 / 复制（文件夹选择器）、删除（无需确认，提示条里可撤销）、回收站；新建文件夹与上传在路径栏的工具栏里，网格最后一格整块「新建」磁贴也能新建文件夹，文件拖到窗口上会自动上传到当前文件夹
+ - **查重**：按网盘列表里的 MD5 与文件大小，在整个网盘或选定的文件夹里递归找出重复文件；按可释放空间分组，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；删除前会再次核对文件是否仍是扫描时的那一份
+   - 结果会缓存（默认 7 天内有效）：文件没变动时再次进入立即显示上次结果，不必重扫；在应用里删除、移动 / 复制、重命名、新建文件夹、还原或清空回收站、上传完成、离线下载完成等改动会自动让缓存失效，进入页面时重扫，“重新扫描”按钮随时可以强制全盘重扫
+   - 结果行右键可以打开预览（同组里的图片在预览里用 ←/→ 翻页）、在文件夹中显示、复制路径
+diff --git a/app/browser.go b/app/browser.go
+index 5455998..2613279 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -142,7 +142,13 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 		l.glides = map[int64]rowGlide{}
+ 	}
+ 	a.listHeader(c, t, p, cols)
+-	list := ui.List(c, &l.list, len(l.files)+1).Grow(1).Padding(0, 10, 16)
++	// The maker is a row after the files only while files are dragged over
++	// the window, a hint that takes no room otherwise.
++	rows := len(l.files)
++	if l.over {
++		rows++
++	}
++	list := ui.List(c, &l.list, rows).Grow(1).Padding(0, 10, 16)
+ 	outer, enter := c, false
+ 	list.Rows(func(row ui.ListRow) {
+ 		if enterRenames && !enter {
+@@ -155,9 +161,9 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 			}
+ 		}
+ 		c := row.Context
+-		if row.Index == len(l.files) {
++		if l.over && row.Index == len(l.files) {
+ 			ui.Column(c).Padding(6, 0, 0).Children(func() {
+-				m := a.makerRow(c, t, p, l, false)
++				m := a.makerRow(c, t, l)
+ 				if in := entering(m, l, row.Index, now, rowStagger); in < 1 {
+ 					m.Opacity(in).Translate(0, (1-in)*10)
+ 				}
+@@ -791,7 +797,9 @@ func fitCrumbs(c *ui.Context, widths []float32, room float32) (from int, root bo
+ 	return last, false
+ }
+ 
+-// filesToolbar is the title bar's controls while browsing.
++// filesToolbar is the title bar's controls while browsing: the history,
++// the path and the search first, then the folder's tools, which are the
++// actions a folder wants at hand rather than at the foot of its files.
+ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	ui.Row(c).Gap(0).Children(func() {
+ 		if iconButton(c, t, p, "chevron-left", "后退").Disabled(!a.router.CanGoBack()).Clicked() {
+@@ -803,12 +811,9 @@ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	})
+ 	a.breadcrumbs(c, t, p, dir)
+ 	a.searchField(c, t, p)
+-	if a.gridView {
+-		a.sortMenu(c, t, p)
+-	}
+ 	// Those that fold, together so that their width, open and folded,
+ 	// tells foldTools what opening them takes from the path.
+-	tools := ui.Row(c.Key("folding-tools")).Gap(8).AlignItems(ui.Center).Shrink(0)
++	tools := ui.Row(c.Key("folding-tools")).Gap(6).AlignItems(ui.Center).Shrink(0)
+ 	if w := tools.Bounds().W; w > 0 {
+ 		folded := 0
+ 		if a.toolsFolded {
+@@ -818,6 +823,19 @@ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	}
+ 	a.toolsFolded = a.compact
+ 	tools.Children(func() {
++		// A new folder is named at the top, its card flying from this
++		// button; its box stays the maker's place, where Cmd-Shift-N
++		// makes one from too.
++		l := a.listings[dir]
++		nb := toolButton(c, t, p, "folder-plus", "新建文件夹")
++		nb.Tooltip("新建文件夹（⌘⇧N）")
++		if b := nb.Bounds(); b.W > 0 && l != nil {
++			l.makerAt = b
++		}
++		if nb.Clicked() && l != nil {
++			a.newFolder(l, nb.Bounds())
++		}
++		a.sortMenu(c, t, p)
+ 		a.viewSwitch(c, t, p)
+ 		// The clipboard is read only when asked, here or with Cmd-V: its
+ 		// owner can make the read wait.
+@@ -830,7 +848,7 @@ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 			a.reload(dir)
+ 		}
+ 		if up := pillOf(c, t, p, "upload", "上传", true, a.compact); up.Clicked() {
+-			a.pickUpload(dir, up.Bounds())
++			a.askUpload(dir, up.Bounds())
+ 		}
+ 	})
+ }
+@@ -838,8 +856,8 @@ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ // sortOrders are what the browser sorts by, as the list's columns.
+ var sortOrders = []struct{ by, label string }{{"name", "名称"}, {"size", "大小"}, {"time", "修改日期"}}
+ 
+-// sortMenu is the grid's button choosing the order, which the list
+-// chooses by its columns: what to sort by, then which way.
++// sortMenu is the button choosing the order, in the list and the grid: the
++// list also sorts by its columns, this does so wherever.
+ func (a *App) sortMenu(c *ui.Context, t *ui.Theme, p *palette) {
+ 	toolButton(c, t, p, "arrow-down-wide-narrow", "排序方式").Menu(func(m *ui.Menu) {
+ 		for _, o := range sortOrders {
+@@ -865,7 +883,7 @@ func (a *App) viewSwitch(c *ui.Context, t *ui.Theme, p *palette) {
+ 	}
+ 	labels, icons := []string{"列表", "网格"}, []string{"list", "layout-grid"}
+ 	if a.compact {
+-		popUp(c, t, p, &chosen, labels, icons).Label("视图")
++		popUp(c, t, p, &chosen, labels, icons).Label("视图").Tooltip("视图")
+ 	} else {
+ 		segmentedOf(c, t, p, &chosen, 2, func(i int, s ui.Element) {
+ 			s.Width(34).Label(labels[i])
+diff --git a/app/newfolder.go b/app/newfolder.go
+index 77bb414..d3a3808 100644
+--- a/app/newfolder.go
++++ b/app/newfolder.go
+@@ -13,14 +13,16 @@ import (
+ 	"github.com/pengstem/baidunetgo/internal/baidu"
+ )
+ 
+-// The maker is the row that ends a folder's files, or its last tile in
+-// the grid, where what the folder holds is made: a folder, or files
+-// uploaded, picked or dragged onto the window, which light it up while
+-// they are over it. It takes the place of a button for each in the title
+-// bar.
++// The maker is the grid's last tile, and the row an empty folder shows
++// while files are dragged over it: what the folder holds is made from the
++// toolbar above (a new folder, upload) or by dragging files onto the
++// window, which light the maker up while they are over it. The maker's
++// row at the foot of a list is only the drop hint, saying where files will
++// go; it takes no room when nothing is dragged. It takes the place of a
++// button for each in the title bar.
+ //
+ // A new folder is named where folders are, at the top: the rows make room
+-// for it, and it comes from the maker's button into the gap (landing.go).
++// for it, and it comes from the toolbar's button into the gap (landing.go).
+ // Once made, it goes from there to its place among the folders.
+ 
+ // makerID keys the maker's tile among the grid's, and draftID the folder
+@@ -230,78 +232,54 @@ func (a *App) makerField(c *ui.Context, t *ui.Theme, l *listing, center bool) {
+ 	}
+ }
+ 
+-// makerButton is one of the maker's actions: its icon white on an accent
+-// disc, its label in the accent, as Reminders' new item.
+-func makerButton(c *ui.Context, t *ui.Theme, ic, label string) ui.Element {
+-	b := ui.ButtonBase(c).Label(label).Height(28).PaddingX(8).Gap(8).AlignItems(ui.Center).Radius(7).
+-		TextColor(t.Accent).FontWeight(500)
+-	hover := t.Accent.Alpha(0)
+-	if b.Hovered() {
+-		hover = t.Accent.Alpha(0.1)
+-	}
+-	b.Background(b.AnimateColor("hover", hover, motionHover))
+-	b.Children(func() {
+-		ui.Box(c).Size(18, 18).Radius(9).Center().Background(t.Accent).TextColor(t.AccentText).Children(func() {
+-			ui.Icon(c, icon(ic)).FontSize(12)
+-		})
+-		ui.Text(c, label).SingleLine()
+-	})
+-	return b
+-}
++// askUpload asks for files to upload into dir, which come into it from the
++// box in the window that asked. The picker is a native dialog, so a test
++// swaps pickUploadHook to see a control take the upload path without one.
++var pickUploadHook func(*App, string, ui.Rect)
+ 
+-// newFolderButton is the maker's button making a folder, the folder being
+-// named coming from it.
+-func (a *App) newFolderButton(c *ui.Context, t *ui.Theme, l *listing) ui.Element {
+-	b := makerButton(c, t, "plus", "新建文件夹")
+-	if b.Clicked() {
+-		a.newFolder(l, b.Bounds())
++func (a *App) askUpload(dir string, from ui.Rect) {
++	if pickUploadHook != nil {
++		pickUploadHook(a, dir, from)
++		return
+ 	}
+-	return b
++	a.pickUpload(dir, from)
+ }
+ 
+-// makerRow is the maker as the row ending the list, or the empty
+-// folder's.
+-func (a *App) makerRow(c *ui.Context, t *ui.Theme, p *palette, l *listing, center bool) ui.Element {
+-	row := ui.Row(c.Key("maker")).Height(rowHeight + 4).PaddingX(2).Gap(4).AlignItems(ui.Center).Radius(8)
+-	if center {
+-		row.Justify(ui.Center)
+-	}
+-	fill := t.Accent.Alpha(0)
+-	if l.over {
+-		fill = t.Accent
+-	}
+-	row.Background(row.AnimateColor("fill", fill, motionFade))
+-	if b := row.Bounds(); b.W > 0 {
+-		l.makerAt = b
+-	}
++// makerRow is the maker as the row ending the list while files are dragged
++// over the window: the whole row in the accent color, saying where they
++// will go. It is not built at all when nothing is dragged, so it takes no
++// room at the foot of a folder.
++func (a *App) makerRow(c *ui.Context, t *ui.Theme, l *listing) ui.Element {
++	row := ui.Row(c.Key("maker")).Height(rowHeight + 4).PaddingX(2).Gap(8).AlignItems(ui.Center).Radius(8).
++		Background(t.Accent)
++	row.Background(row.AnimateColor("fill", t.Accent, motionFade))
+ 	row.Children(func() {
+-		if l.over {
+-			ui.Row(c).Grow(1).Gap(8).AlignItems(ui.Center).Justify(ui.Center).TextColor(t.AccentText).Children(func() {
+-				ui.Icon(c, icon("upload")).FontSize(14)
+-				ui.Text(c, "松开以上传到「"+dirLabel(l.dir)+"」").FontWeight(600).SingleLine()
+-			})
+-			return
+-		}
+-		a.newFolderButton(c, t, l)
+-		up := makerButton(c, t, "upload", "上传文件")
+-		if up.Clicked() {
+-			a.pickUpload(l.dir, up.Bounds())
+-		}
++		ui.Row(c).Grow(1).Gap(8).AlignItems(ui.Center).Justify(ui.Center).TextColor(t.AccentText).Children(func() {
++			ui.Icon(c, icon("upload")).FontSize(14)
++			ui.Text(c, "松开以上传到「"+dirLabel(l.dir)+"」").FontWeight(600).SingleLine()
++		})
+ 	})
+ 	return row
+ }
+ 
+-// makerTile is the maker as the grid's last tile.
++// makerTile is the grid's last tile: the whole of it makes a new folder,
++// coming from it, and while files are dragged over the window it turns
++// into an upload and says where they go.
+ func (a *App) makerTile(c *ui.Context, t *ui.Theme, p *palette, l *listing, e ui.Element) {
+ 	e.Padding(10).Gap(8).AlignItems(ui.Center).Radius(t.Radius).Label("新建")
+ 	fill := t.Background.Mix(t.Accent, 0)
+ 	if l.over {
+ 		fill = t.Background.Mix(t.Accent, 0.16)
++	} else if e.Hovered() {
++		fill = t.Background.Mix(t.Text, 0.05)
+ 	}
+ 	e.Background(e.AnimateColor("fill", fill, motionFade))
+ 	if b := e.Bounds(); b.W > 0 {
+ 		l.makerAt = b
+ 	}
++	if e.Clicked() && !l.over {
++		a.newFolder(l, e.Bounds())
++	}
+ 	e.Children(func() {
+ 		box := ui.Box(c).Width(124).Height(112).Radius(12).Center().Background(p.Group)
+ 		box.Children(func() {
+@@ -317,17 +295,14 @@ func (a *App) makerTile(c *ui.Context, t *ui.Theme, p *palette, l *listing, e ui
+ 			ui.Text(c, "松开以上传").TextColor(t.Accent).FontWeight(600)
+ 			return
+ 		}
+-		ui.Column(c).Gap(0).AlignItems(ui.Center).Children(func() {
+-			a.newFolderButton(c, t, l)
+-			up := makerButton(c, t, "upload", "上传文件")
+-			if up.Clicked() {
+-				a.pickUpload(l.dir, up.Bounds())
+-			}
+-		})
++		ui.Text(c, "新建").FontSize(12).TextColor(t.TextMuted)
+ 	})
+ }
+ 
+-// emptyFolder is a folder with nothing in it, the maker under the words.
++// emptyFolder is a folder with nothing in it: the words, and an upload of
++// its own under them. The toolbar above already holds a new folder and the
++// upload, so this one carries a label of its own, never a second button of
++// the same name.
+ func (a *App) emptyFolder(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 	ui.Column(c).Grow(1).Center().Gap(6).Padding(40).Transition(popIn).Children(func() {
+ 		ui.Box(c).Size(52, 52).Radius(14).Center().Background(p.Group).Margin(0, 0, 8).Children(func() {
+@@ -335,6 +310,8 @@ func (a *App) emptyFolder(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 		})
+ 		ui.Text(c, "这里还空着").FontSize(15).FontWeight(600)
+ 		ui.Text(c, "新建一个文件夹，或把文件拖进窗口上传").TextColor(t.TextMuted).TextAlign(ui.Center).MaxWidth(360)
+-		a.makerRow(c, t, p, l, true).FillWidth().MaxWidth(320).Margin(14, 0, 0)
++		if b := pill(c, t, p, "upload", "上传文件到此处", true).Margin(14, 0, 0); b.Clicked() {
++			a.askUpload(l.dir, b.Bounds())
++		}
+ 	})
+ }
+diff --git a/app/ops_test.go b/app/ops_test.go
+index 19dadbd..0098734 100644
+--- a/app/ops_test.go
++++ b/app/ops_test.go
+@@ -18,9 +18,9 @@ func settle(tt *ui.Tester) {
+ 	}
+ }
+ 
+-// TestNewFolderInPlace: the maker ending the files names a new folder in
+-// place, Cmd-Shift-N or its button starting it; Escape gives up, Enter
+-// makes it, and the folder made is chosen.
++// TestNewFolderInPlace: the toolbar's new folder in the path bar names a
++// folder in place, Cmd-Shift-N or its button starting it; Escape gives up,
++// Enter makes it, and the folder made is chosen.
+ func TestNewFolderInPlace(t *testing.T) {
+ 	a, tt, srv := signedIn(t)
+ 	editing := func() bool { on, _ := tt.TextInputActive(); return on }
+@@ -75,18 +75,20 @@ func TestNewFolderInPlace(t *testing.T) {
+ 	}
+ }
+ 
+-// TestMakerInGridAndEmpty: the grid's last tile is the maker, naming a
+-// folder where it shows, and an empty folder offers it under its words.
++// TestMakerInGridAndEmpty: the grid's last tile is the maker, a whole tile
++// that makes a folder where it shows, and an empty folder shows its words
++// with an upload of its own under them.
+ func TestMakerInGridAndEmpty(t *testing.T) {
+ 	a, tt, srv := signedIn(t)
+ 	a.gridView = true
+ 	tt.Advance(time.Second)
+-	if err := tt.Click("新建文件夹"); err != nil {
+-		t.Fatal(err)
++	// The whole tile is the new folder's target now, not buttons inside it.
++	if err := tt.Click("新建"); err != nil {
++		t.Fatalf("%v; %q", err, tt.Texts())
+ 	}
+ 	tt.Advance(300 * time.Millisecond)
+ 	if on, _ := tt.TextInputActive(); !on || a.creating == nil {
+-		t.Fatal("the grid's maker did not name a folder")
++		t.Fatal("the grid's maker tile did not name a folder")
+ 	}
+ 	save(t, tt, "maker-grid")
+ 	tt.Key(0, ui.KeyEnter)
+@@ -95,11 +97,16 @@ func TestMakerInGridAndEmpty(t *testing.T) {
+ 		t.Fatal("the folder was not made")
+ 	}
+ 	a.gridView = false
+-	a.router.Push(filesRoute("/新建文件夹"))
++	a.router.Push(filesRoute("/空文件夹"))
+ 	settle(tt)
+-	if !tt.HasText("这里还空着") || !tt.HasText("上传文件") {
++	if !tt.HasText("这里还空着") {
+ 		t.Fatalf("texts %q", tt.Texts())
+ 	}
++	// The empty state has an entry of its own, named apart from the
++	// toolbar's upload.
++	if _, ok := tt.Find("上传文件到此处"); !ok {
++		t.Fatalf("no empty-folder upload; texts %q", tt.Texts())
++	}
+ 	save(t, tt, "maker-empty")
+ }
+ 
+diff --git a/app/toolbar_test.go b/app/toolbar_test.go
+index 1300663..0000485 100644
+--- a/app/toolbar_test.go
++++ b/app/toolbar_test.go
+@@ -88,6 +88,153 @@ func TestCompactToolbar(t *testing.T) {
+ 	}
+ }
+ 
++// TestFolderToolbarActions: the path bar's toolbar holds a new folder and
++// the upload, each acting: the new folder names one, the upload asks for
++// files through pickUpload.
++func TestFolderToolbarActions(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	if _, ok := tt.Find("新建文件夹"); !ok {
++		t.Fatalf("no new folder in the toolbar; texts %q", tt.Texts())
++	}
++	if _, ok := tt.Find("上传"); !ok {
++		t.Fatalf("no upload in the toolbar; texts %q", tt.Texts())
++	}
++	// The upload goes through pickUpload, which a test sees without the
++	// native dialog.
++	var got string
++	old := pickUploadHook
++	pickUploadHook = func(_ *App, dir string, _ ui.Rect) { got = dir }
++	defer func() { pickUploadHook = old }()
++	if err := tt.Click("上传"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if got != "/" {
++		t.Errorf("the upload asked for %q, want /", got)
++	}
++	if err := tt.Click("新建文件夹"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(300 * time.Millisecond)
++	if on, _ := tt.TextInputActive(); !on || a.creating == nil {
++		t.Fatal("the toolbar's new folder did not name one")
++	}
++	save(t, tt, "toolbar-new-folder")
++	tt.Key(0, ui.KeyEscape)
++	tt.Advance(100 * time.Millisecond)
++}
++
++// TestListBottomHasNoDuplicateButtons keeps the folder's actions in the
++// toolbar alone: a full list ends with its files, and the one new-folder
++// and one upload labels are those in the title bar.
++func TestListBottomHasNoDuplicateButtons(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	count := func(s string) (n int) {
++		for _, x := range tt.Texts() {
++			if x == s {
++				n++
++			}
++		}
++		return n
++	}
++	if n := count("新建文件夹"); n != 1 {
++		t.Errorf("新建文件夹 shows %d times; texts %q", n, tt.Texts())
++	}
++	if n := count("上传文件"); n != 0 {
++		t.Errorf("the old maker's 上传文件 is still there (%d); texts %q", n, tt.Texts())
++	}
++	// Nothing below the last file: the maker row takes no room when no
++	// files are dragged.
++	l := a.listings["/"]
++	last := l.files[len(l.files)-1]
++	if r, ok := tt.Find(last.Name); ok && r.Y > 0 {
++		if _, ok := tt.Find("上传文件"); ok {
++			t.Error("a maker button under the last row")
++		}
++	}
++	save(t, tt, "list-no-maker-row")
++}
++
++// TestEmptyFolderEntry: an empty folder says it is empty and offers an
++// upload of its own, named apart from the toolbar's, while a new folder
++// stays a click away in the title bar.
++func TestEmptyFolderEntry(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	a.router.Push(filesRoute("/空文件夹"))
++	waitFor(t, tt, "这里还空着")
++	r, ok := tt.Find("上传文件到此处")
++	if !ok || r.W <= 0 {
++		t.Fatalf("no empty-folder upload; texts %q", tt.Texts())
++	}
++	var got string
++	old := pickUploadHook
++	pickUploadHook = func(_ *App, dir string, _ ui.Rect) { got = dir }
++	defer func() { pickUploadHook = old }()
++	if err := tt.Click("上传文件到此处"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if got != "/空文件夹" {
++		t.Errorf("the empty upload asked for %q", got)
++	}
++	if err := tt.Click("新建文件夹"); err != nil {
++		t.Fatalf("no new folder in an empty folder: %v", err)
++	}
++	tt.Advance(300 * time.Millisecond)
++	if a.creating == nil {
++		t.Fatal("the toolbar's new folder did not name one in an empty folder")
++	}
++	save(t, tt, "empty-folder")
++}
++
++// TestMakerRowDropHint draws the list's drop hint while files are dragged
++// over the window, in the accent color with where they will go.
++func TestMakerRowDropHint(t *testing.T) {
++	a := New()
++	l := &listing{dir: "/文档"}
++	tt := ui.NewTester(func(c *ui.Context) {
++		to, _ := applyTheme(c)
++		a.makerRow(c, to, l)
++	}, 420, 120)
++	tt.SetLocale("zh-Hans")
++	tt.Advance(time.Second)
++	if !tt.HasText("松开以上传到「文档」") {
++		t.Fatalf("no drop hint; texts %q", tt.Texts())
++	}
++	save(t, tt, "maker-drop-hint")
++}
++
++// TestFolderToolbarFitsNarrow keeps the folder's toolbar whole in the
++// narrowest window: folded to icons, no tool off the window, and the new
++// folder and the upload still there to be clicked.
++func TestFolderToolbarFitsNarrow(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	save(t, tt, "toolbar-wide")
++	for _, sz := range [][2]int{{456, 760}, {420, 300}} {
++		tt.SetSize(sz[0], sz[1])
++		tt.Advance(500 * time.Millisecond)
++		if !a.sidebarCollapsed {
++			t.Errorf("%dx%d: the sidebar still shows", sz[0], sz[1])
++		}
++		if !a.compact {
++			t.Errorf("%dx%d: the toolbar did not fold", sz[0], sz[1])
++		}
++		for _, s := range []string{"新建文件夹", "排序方式", "上传"} {
++			r, ok := tt.Find(s)
++			if !ok {
++				t.Fatalf("%dx%d: no %q; texts %q", sz[0], sz[1], s, tt.Texts())
++			}
++			if r.W <= 0 || r.X < 0 || r.X+r.W > float32(sz[0]) || r.Y < 0 || r.Y+r.H > 60 {
++				t.Errorf("%dx%d: %q at %v is outside the title bar", sz[0], sz[1], s, r)
++			}
++		}
++		save(t, tt, "toolbar-"+itoa(sz[0])+"x"+itoa(sz[1]))
++	}
++}
++
+ // pathWide is a window the folder's path and tools both fit in, whatever
+ // the font; pathNarrowest is a window narrow enough that the title bar
+ // must fold, above the width at which the sidebar hides itself, so the

@@ -1,0 +1,507 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 15:35:16 +0800
+Subject: [PATCH] Show a Finder-style rubber-band selection while dragging over
+ the file browser, since the list's drag gave no visual feedback and the grid
+ had no drag selection at all.
+
+---
+ AGENTS.md           |   1 +
+ CHANGELOG.md        |   1 +
+ CLAUDE.md           |   1 +
+ README.md           |   2 +-
+ app/browser.go      | 139 +++++++++++++++++++++++++++++++-
+ app/files.go        |  21 +++++
+ app/grid.go         |  16 +++-
+ app/marquee_test.go | 187 ++++++++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 363 insertions(+), 5 deletions(-)
+ create mode 100644 app/marquee_test.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 3870b72..6dd4e2e 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -95,3 +95,4 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+ - Sidebar icons are drawn in code (`app/navicons.go`) so their parts can move; `navGlyph` takes the time into the gesture. A page's icon plays once when the page opens (`a.navRun`).
++- The browser's rubber-band selection (`marquee` in `app/browser.go`): pressing the primary button in the list or grid and dragging paints a rounded rectangle from the press point to the pointer with `page.DrawOver` — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke — clipped to the list's or grid's viewport (`l.dragArea`). The press comes from the page's `ObserveInput`, so a drag begun in a row's blank space counts too and the box ends on the release; the list's rows are still chosen by MyGo's `ListState.DragSelecting` (`DragSelect`), which the rectangle only mirrors, while the grid chooses the tiles whose `gridSpot.rect` the rectangle intersects. It is hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index bbf731f..9f12605 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -10,6 +10,7 @@
+ - 查重结果行新增右键菜单：打开预览（同一重复组的图片可在预览里用左右键翻页）、在文件夹中显示、复制路径。
+ - 查重：按网盘 MD5 与文件大小，在整个网盘或选定文件夹中递归比对；按可释放空间分组展示，默认每组保留修改时间最早的一份，可全选 / 全不选后批量移入回收站；缺少 MD5 的文件会跳过并注明。删除前会重新读取所在目录，核对 fs_id、大小和 MD5，并确保每组仍留有一份，过期或被替换的文件不会误删。
+ - 文件浏览器新增剪切 / 复制 / 粘贴（Cmd+X / Cmd+C / Cmd+V）：文件剪贴板只在应用内，跨文件夹移动或复制沿用“复制到…”的同名冲突处理（跳过 / 替换 / 保留两者）；剪切成功后才清空剪贴板，失败、取消或全部跳过时保留可重试，复制则可连续粘贴；剪切到原文件夹、把文件夹粘进自身或子目录会被拒绝，注销时清空。另有 Cmd+A 全选、Cmd+Shift+C 复制网盘路径、Cmd+Shift+V 始终打开系统剪贴板里的分享链接（Cmd+V 在文件剪贴板为空时才这么做）、F5 刷新；右键菜单与状态栏显示剪贴板状态，被剪切的行标出“待移动”，README 增补了快捷键说明。
++- 列表与网格视图按住左键拖动时显示选择框（弹力框）：从按下点拉到指针位置，半透明强调色填充加 1 像素边框、圆角，列表行仍由原有拖选选择，网格会选中与矩形相交的瓦片；预览、对话框、重命名 / 新建文件夹输入中以及把外部文件拖进窗口时不显示。
+ 
+ ### 改进
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 99f9d94..caebef3 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -96,3 +96,4 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+ - Sidebar icons are drawn in code (`app/navicons.go`) so their parts can move; `navGlyph` takes the time into the gesture. A page's icon plays once when the page opens (`a.navRun`).
++- The browser's rubber-band selection (`marquee` in `app/browser.go`): pressing the primary button in the list or grid and dragging paints a rounded rectangle from the press point to the pointer with `page.DrawOver` — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke — clipped to the list's or grid's viewport (`l.dragArea`). The press comes from the page's `ObserveInput`, so a drag begun in a row's blank space counts too and the box ends on the release; the list's rows are still chosen by MyGo's `ListState.DragSelecting` (`DragSelect`), which the rectangle only mirrors, while the grid chooses the tiles whose `gridSpot.rect` the rectangle intersects. It is hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
+diff --git a/README.md b/README.md
+index b623055..a1d65bf 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,7 @@
+ ## 特性
+ 
+ - **登录**：百度网盘 App 扫码，或粘贴 Cookie / BDUSS+STOKEN；也能直接沿用本机百度网盘 Linux 客户端或 BaiduPCS-Go 的登录。凭据用 AES-GCM 加密保存，密钥放在系统钥匙串
+-- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；路径栏右侧是一条工具栏，放着新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传，窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏再把上层文件夹收进「…」
++- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；按住左键拖动时显示选择框（弹力框）；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；路径栏右侧是一条工具栏，放着新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传，窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏再把上层文件夹收进「…」
+ - **不落盘预览**：文件只读进内存
+   - 图片：支持 SVG 矢量和 GIF 动画，从缩略图"长"出来的共享元素动画，滚轮缩放、拖拽平移、←/→ 切换；可复制图片（按 EXIF 方向摆正，SVG 转 PNG，GIF 取首帧）
+   - 文本与代码（语法高亮，UTF-8 / GB18030 自动识别）、Markdown 渲染，可一键复制全文
+diff --git a/app/browser.go b/app/browser.go
+index 2613279..98a84e6 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -45,7 +45,29 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	}
+ 	a.fileActions(c, l)
+ 	a.slowRename(c, l)
+-	page := ui.Column(c).Key("files:" + dir).Grow(1)
++	// A new frame's views say where a rubber band clips; a press the last
++	// frame saw is looked at below.
++	l.dragTileHit = false
++	l.dragArea = ui.Rect{}
++	var pageBox ui.Rect // where the page showed last frame, to read a press
++	page := ui.Column(c).Key("files:" + dir).Grow(1).ObserveInput(func(ev ui.InputEvent) {
++		// The page sees every pointer press and release in it, whatever
++		// takes it, so a drag from the rows' blank space or a tile's gap
++		// counts too, and the release can end the rubber band.
++		switch ev.Kind {
++		case ui.InputPointerDown:
++			if ev.Button == 0 {
++				l.pressDown, l.pressNew = true, true
++				l.pressAt = ui.Point{X: pageBox.X + ev.X, Y: pageBox.Y + ev.Y}
++			}
++		case ui.InputPointerUp:
++			if ev.Button == 0 {
++				l.pressDown, l.pressNew = false, false
++				l.dragOn, l.dragRows, l.dragGrid = false, false, false
++				l.dragRect = ui.Rect{}
++			}
++		}
++	})
+ 	// Files dragged over the window light the maker, brought into view.
+ 	if over := page.FileDragOver(); over != l.over {
+ 		if l.over = over; over && l.loaded {
+@@ -85,6 +107,8 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 		a.selectionBar(c, t, p, l, page.Bounds().W)
+ 		a.flightCards(c, t, p, l, page.Bounds())
+ 	})
++	pageBox = page.Bounds()
++	a.marquee(c, t, l, page)
+ 	l.sole = 0
+ 	if files := l.chosen(); len(files) == 1 {
+ 		l.sole = files[0].FsID
+@@ -246,6 +270,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 		}
+ 	})
+ 	l.rowsShown = l.rowsBuilt
++	l.dragArea = list.Bounds() // the rubber band clips to the rows' viewport
+ 	if l.refocus {
+ 		l.refocus = false
+ 		l.list.Focus(c)
+@@ -255,6 +280,118 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 	}
+ }
+ 
++// The rubber band: from the press point to the pointer, in the accent
++// color, with a faint fill and a 1px edge, rounded a little.
++const (
++	marqueeRadius = 3
++	marqueeSlop   = 3 // DIPs the pointer must move before the box shows
++)
++
++// marqueeBlocked says a rubber band must not show: the preview or a
++// dialog owns the pointer, a name is being edited, a folder is being
++// named, or files from another app are dragged in.
++func (a *App) marqueeBlocked(l *listing) bool {
++	return a.pv != nil || a.dlg.open || a.dlg.busy || a.renaming != nil || a.creating != nil || l.over
++}
++
++// marquee moves the rubber band along with the pointer and paints it over
++// the page, above the rows or the tiles. The selection itself stays as it
++// was: the list's rows are still chosen by MyGo's DragSelect, and the grid
++// chooses the tiles the box covers.
++func (a *App) marquee(c *ui.Context, t *ui.Theme, l *listing, page ui.Element) {
++	if a.marqueeBlocked(l) || !l.pressDown {
++		l.dragOn, l.dragRows, l.dragGrid = false, false, false
++		l.dragRect = ui.Rect{}
++		return
++	}
++	if l.pressNew {
++		l.pressNew = false
++		// A press in the viewport starts a box; a tile in the grid choosing
++		// itself, or a press on the header or the status bar, does not.
++		if l.dragArea.W > 0 && l.dragArea.Contains(l.pressAt.X, l.pressAt.Y) &&
++			!(a.gridView && l.dragTileHit) {
++			l.dragOn, l.dragFrom, l.dragGrid = true, l.pressAt, a.gridView
++			l.dragRows, l.dragLast = false, ui.Rect{}
++		}
++	}
++	if !l.dragOn {
++		return
++	}
++	if !l.dragGrid {
++		if l.list.DragSelecting() {
++			l.dragRows = true // MyGo's own drag began choosing rows
++		} else if l.dragRows {
++			// It ended, even if the release came outside the window.
++			l.dragOn, l.dragRows = false, false
++			l.dragRect = ui.Rect{}
++			return
++		}
++	}
++	b := page.Bounds()
++	x, y, _ := page.PointerPosition()
++	to := ui.Point{X: b.X + x, Y: b.Y + y}
++	rect := marqueeRect(l.dragFrom, to, l.dragArea)
++	if rect.W < marqueeSlop && rect.H < marqueeSlop && !l.list.DragSelecting() {
++		l.dragRect = ui.Rect{} // a click, not yet a drag
++		return
++	}
++	l.dragRect = rect
++	page.DrawOver(func(p *ui.Painter, r ui.Rect) {
++		rr := l.dragRect
++		if rr.W <= 0 && rr.H <= 0 {
++			return
++		}
++		// A drag straight up, down or across is a 1px line, not nothing.
++		if rr.W < 1 {
++			rr.W = 1
++		}
++		if rr.H < 1 {
++			rr.H = 1
++		}
++		p.Fill(rr, t.Accent.Alpha(0.12), marqueeRadius)
++		p.Stroke(rr, t.Accent, marqueeRadius, 1)
++	})
++	if l.dragGrid {
++		a.gridMarquee(l, rect)
++	}
++}
++
++// marqueeRect is the rectangle from a to b, clipped to area.
++func marqueeRect(a, b ui.Point, area ui.Rect) ui.Rect {
++	x0, x1 := min(a.X, b.X), max(a.X, b.X)
++	y0, y1 := min(a.Y, b.Y), max(a.Y, b.Y)
++	x0, y0 = max(x0, area.X), max(y0, area.Y)
++	x1, y1 = min(x1, area.X+area.W), min(y1, area.Y+area.H)
++	if x1 < x0 {
++		x1 = x0
++	}
++	if y1 < y0 {
++		y1 = y0
++	}
++	return ui.Rect{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}
++}
++
++// gridMarquee chooses the grid's tiles the box covers. It is the grid's
++// own version of DragSelect, which the list has and the grid does not.
++func (a *App) gridMarquee(l *listing, rect ui.Rect) {
++	if rect == l.dragLast {
++		return
++	}
++	l.dragLast = rect
++	l.sel.Clear()
++	for id, spot := range l.grid.spots {
++		if id >= 0 && spot.rect.W > 0 && rectIntersects(rect, spot.rect) {
++			l.sel.Add(id)
++		}
++	}
++	l.selected = -1
++}
++
++// rectIntersects reports whether a and b share some area.
++func rectIntersects(a, b ui.Rect) bool {
++	return a.X < b.X+b.W && b.X < a.X+a.W && a.Y < b.Y+b.H && b.Y < a.Y+a.H
++}
++
+ // List columns, in the header and the rows.
+ const (
+ 	colType = 84
+diff --git a/app/files.go b/app/files.go
+index fb25d3d..3f9b7fa 100644
+--- a/app/files.go
++++ b/app/files.go
+@@ -38,6 +38,27 @@ type listing struct {
+ 	sole     int64 // the file chosen alone in the last frame, else 0
+ 	refocus  bool  // the files take the focus back, from a name edited
+ 	over     bool  // files dragged over the window, which light the maker
++	// The rubber band: pressing the primary button in the list or the grid
++	// and dragging shows a rectangle from the press point to the pointer.
++	// The press comes from ObserveInput (so a drag from the rows' blank
++	// space counts too), the viewport it is clipped to from the view
++	// built this frame, both in window coordinates.
++	pressDown bool // the primary button is down over the page
++	pressNew  bool // a press has not been looked at yet, to start a drag
++	pressAt   ui.Point
++	dragOn    bool // the rubber band is showing
++	dragFrom  ui.Point
++	dragRect  ui.Rect // the rectangle drawn this frame, in window coordinates
++	dragArea  ui.Rect // the viewport it is clipped to: the list or the grid
++	// dragRows says MyGo's own DragSelect began choosing rows, so its end
++	// (the release) tells the rectangle to go even if the release is not
++	// seen (outside the window); dragGrid says the drag began in the grid,
++	// dragTileHit that the press landed on a tile there and so is no rubber
++	// band, and dragLast is the rectangle the grid chose tiles by.
++	dragRows    bool
++	dragGrid    bool
++	dragTileHit bool
++	dragLast    ui.Rect
+ 	// rowsShown are where the list's rows of the last frame showed, by
+ 	// file, and rowsBuilt those of this frame (glideRow).
+ 	rowsShown, rowsBuilt map[int64]float32
+diff --git a/app/grid.go b/app/grid.go
+index a16176e..701f41b 100644
+--- a/app/grid.go
++++ b/app/grid.go
+@@ -35,11 +35,13 @@ type gridState struct {
+ 	spots, built map[int64]gridSpot
+ }
+ 
+-// gridSpot is the place of a tile: its cell, and where it showed, in the
+-// grid's viewport, glide included.
++// gridSpot is the place of a tile: its cell, where it showed in the
++// grid's viewport (glide included), and its box in the window, which the
++// rubber band tests it against.
+ type gridSpot struct {
+ 	col, row int
+ 	x, y     float32
++	rect     ui.Rect
+ }
+ 
+ // gridCols is how many columns tiles take in a grid w wide.
+@@ -117,9 +119,14 @@ func (a *App) tileGrid(c *ui.Context, l *listing, maker func(e ui.Element), tile
+ 					slot.Translate(dx, dy)
+ 				}
+ 				spot.x, spot.y = spot.x+dx, spot.y+dy
+-				g.built[id] = spot
++				// A press on a cell is no rubber band: it chooses its tile.
++				if slot.PressedInside() {
++					l.dragTileHit = true
++				}
+ 				if i == n {
+ 					slot.Children(func() { maker(ui.Column(c).Grow(1)) })
++					spot.rect = slot.Bounds()
++					g.built[id] = spot
+ 					continue
+ 				}
+ 				f := &l.files[i]
+@@ -136,9 +143,12 @@ func (a *App) tileGrid(c *ui.Context, l *listing, maker func(e ui.Element), tile
+ 					}
+ 					tile(i, e)
+ 				})
++				spot.rect = slot.Bounds()
++				g.built[id] = spot
+ 			}
+ 		})
+ 	})
++	l.dragArea = grid.Bounds()
+ 	g.spots, g.built = g.built, g.spots
+ 	clear(g.built)
+ 	if to, extend, ok := g.keys(grid, l, n); ok {
+diff --git a/app/marquee_test.go b/app/marquee_test.go
+new file mode 100644
+index 0000000..ad5a6e6
+--- /dev/null
++++ b/app/marquee_test.go
+@@ -0,0 +1,187 @@
++package app
++
++import (
++	"fmt"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/fakepan"
++)
++
++// TestMarqueeDragSelect drags over the rows: MyGo's DragSelect still
++// chooses the three rows, and a rubber-band rectangle follows the pointer
++// from where it went down, then goes at the release. A second drag from
++// the rows' blank space shows the box too, without changing the choice.
++func TestMarqueeDragSelect(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	from, _ := tt.Find(l.files[0].Name)
++	to, _ := tt.Find(l.files[2].Name)
++	x, y0 := from.X+5, from.Y+5
++	y1 := to.Y + 5
++
++	tt.Press(x, y0)
++	tt.Frame()
++	tallest := ui.Rect{}
++	steps := int((y1 - y0) / 6)
++	for i := 1; i <= steps; i++ {
++		tt.Move(x+float32(i)*4, y0+float32(i)*6)
++		tt.Frame()
++		if l.dragOn && l.dragRect.H > tallest.H {
++			tallest = l.dragRect
++		}
++	}
++	if !l.dragOn {
++		t.Fatalf("no marquee while dragging; press %v rect %v", l.dragFrom, l.dragRect)
++	}
++	if tallest.W <= 0 || tallest.H <= 0 {
++		t.Fatalf("marquee has no size: %v", tallest)
++	}
++	// It starts at the press, not snapped to a row, and keeps inside the
++	// list's viewport.
++	if d := l.dragFrom.Y - y0; d < -1 || d > 1 {
++		t.Errorf("marquee starts at y=%.0f, press at %.0f", l.dragFrom.Y, y0)
++	}
++	if r := tallest; r.Y < l.dragArea.Y-1 || r.Y+r.H > l.dragArea.Y+l.dragArea.H+1 {
++		t.Errorf("marquee %v outside the list %v", r, l.dragArea)
++	}
++
++	tt.Release(x+float32(steps)*4, y0+float32(steps)*6)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("marquee stayed after release: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	if l.sel.Len() != 3 || !l.sel.Has(l.files[0].FsID) || !l.sel.Has(l.files[2].FsID) {
++		t.Fatalf("drag chose %d, not the three rows", l.sel.Len())
++	}
++
++	// A drag begun in the rows' blank space shows the box as well; the
++	// choice is still MyGo's DragSelect's, which a blank press does not
++	// begin, so the three rows stay chosen.
++	last, _ := tt.Find(l.files[len(l.files)-1].Name)
++	bx, by := last.X+30, last.Y+80
++	tt.Press(bx, by)
++	tt.Frame()
++	for i := 1; i <= 18; i++ {
++		tt.Move(bx+float32(i)*2, by-float32(i)*11)
++		tt.Frame()
++	}
++	if !l.dragOn || l.dragRect.W <= 0 || l.dragRect.H <= 0 {
++		t.Fatalf("no marquee from blank space: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	save(t, tt, "marquee")
++	tt.Release(bx+36, by-198)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("marquee stayed after the blank drag: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++}
++
++// TestMarqueeHidden says the rectangle stays away while a dialog owns the
++// pointer, a name is edited, a folder is named, the preview shows, or files
++// from another app are dragged in.
++func TestMarqueeHidden(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	l := a.listings["/"]
++	if a.marqueeBlocked(l) {
++		t.Fatal("no overlay open, yet a rubber band is blocked")
++	}
++	cases := []struct {
++		name string
++		set  func()
++		undo func()
++	}{
++		{"dialog", func() { a.dlg = dialog{open: true} }, func() { a.dlg = dialog{} }},
++		{"renaming", func() { a.renaming = &renaming{} }, func() { a.renaming = nil }},
++		{"creating", func() { a.creating = &creating{} }, func() { a.creating = nil }},
++		{"preview", func() { a.pv = &previewState{} }, func() { a.pv = nil }},
++		{"files over", func() { l.over = true }, func() { l.over = false }},
++	}
++	for _, c := range cases {
++		c.set()
++		if !a.marqueeBlocked(l) {
++			t.Errorf("%s did not block the rubber band", c.name)
++		}
++		c.undo()
++	}
++
++	// A real drag with a dialog open shows no box, though the pointer moves
++	// over the rows.
++	a.dlg = dialog{open: true}
++	from, _ := tt.Find(l.files[0].Name)
++	tt.Press(from.X+5, from.Y+5)
++	for y := from.Y + 5; y < from.Y+80; y += 8 {
++		tt.Move(from.X+5, y)
++		tt.Frame()
++	}
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("marquee showed with a dialog open: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	tt.Release(from.X+5, from.Y+80)
++	a.dlg = dialog{}
++	tt.Frame()
++}
++
++// TestMarqueeGridDrags a blank part of the grid: the box selects the tiles
++// it covers, and it goes at the release.
++func TestMarqueeGridDrags(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	for i := 1; i <= 3; i++ {
++		srv.Add(fakepan.Node{Path: fmt.Sprintf("/剧集/E%02d.mkv", i), Category: 1, Size: 1 << 30})
++	}
++	a.gridView = true
++	a.router.Push(filesRoute("/剧集"))
++	waitFor(t, tt, "E01.mkv")
++	tt.Advance(time.Second)
++	l := a.listingFor("/剧集")
++	area := l.dragArea
++	if area.W <= 0 || area.H <= 0 {
++		t.Fatalf("no grid viewport: %v", area)
++	}
++	// Press below the single row of tiles, in blank space, and drag up over
++	// them.
++	x0 := area.X + 40
++	y0 := area.Y + area.H - 24
++	x1, y1 := x0+120, area.Y+24
++	tt.Press(x0, y0)
++	tt.Frame()
++	for i := 1; i <= 16; i++ {
++		f := float32(i) / 16
++		tt.Move(x0+(x1-x0)*f, y0+(y1-y0)*f)
++		tt.Frame()
++	}
++	if !l.dragOn || l.dragRect.W <= 0 || l.dragRect.H <= 0 {
++		t.Fatalf("no marquee in the grid: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	if l.sel.Len() == 0 {
++		t.Errorf("the box over the tiles chose none")
++	}
++	for id := range l.sel.All() {
++		if id < 0 {
++			t.Errorf("chose a temporary row %d", id)
++		}
++	}
++	save(t, tt, "marquee-grid")
++
++	tt.Release(x1, y1)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("marquee stayed after release: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++
++	// A press on a tile is no rubber band: it chooses the tile as before.
++	tile, _ := tt.Find(l.files[0].Name)
++	tt.Press(tile.X+5, tile.Y+5)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("marquee began on a tile: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	tt.Release(tile.X+5, tile.Y+5)
++	tt.Frame()
++	if l.sel.Len() != 1 || !l.sel.Has(l.files[0].FsID) {
++		t.Errorf("a click on a tile chose %d, want the tile", l.sel.Len())
++	}
++}
