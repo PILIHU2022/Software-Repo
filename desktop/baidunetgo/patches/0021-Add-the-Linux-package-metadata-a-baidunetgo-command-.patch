@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 00:19:30 +0800
+Subject: [PATCH] Add the Linux package metadata: a baidunetgo command, a
+ network category and no WebView, so the Arch and Debian packages link the
+ command and skip WebKitGTK.
+
+---
+ mygo.json | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/mygo.json b/mygo.json
+index b194d2b..b67c8ed 100644
+--- a/mygo.json
++++ b/mygo.json
+@@ -3,6 +3,12 @@
+   "identifier": "com.pengstem.baidunetgo",
+   "version": "0.8.3",
+   "out": "build",
++  "linux": {
++    "webview": false,
++    "command": ["baidunetgo"],
++    "comment": "百度网盘桌面客户端（社区修复版）",
++    "categories": ["Network"]
++  },
+   "macos": {
+     "entitlements": "entitlements.plist"
+   }

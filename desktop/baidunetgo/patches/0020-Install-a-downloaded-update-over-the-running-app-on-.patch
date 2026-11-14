@@ -1,0 +1,758 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 00:19:30 +0800
+Subject: [PATCH] Install a downloaded update over the running app on Linux and
+ restart it, since an app unpacked into the user's home can replace its own
+ binary in place, while Windows, macOS and package-manager installs still need
+ a manual one.
+
+---
+ CHANGELOG.md                     |   3 +-
+ app/settings_page.go             |  86 +++++++++-
+ docs/UPDATES.md                  |  24 ++-
+ internal/updates/install.go      | 275 +++++++++++++++++++++++++++++++
+ internal/updates/install_test.go | 245 +++++++++++++++++++++++++++
+ internal/updates/updates.go      |  10 +-
+ 6 files changed, 625 insertions(+), 18 deletions(-)
+ create mode 100644 internal/updates/install.go
+ create mode 100644 internal/updates/install_test.go
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 79dba51..cfb7875 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -8,3 +8,4 @@
+ 
+-- 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录并提示手动安装（当前构建未内置更新签名密钥，不做自动安装）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
++- 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录（构建未内置更新签名密钥，下载的包不做签名校验）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
++- Linux 上下载完的更新可就地安装并自动重启：设置页「更新」小节在下载后多出「安装并重启」按钮，把安装包里与正在运行的程序同名的二进制原子替换到运行路径上（先 `filepath.EvalSymlinks` 解析掉 `~/.local/bin` 之类的符号链接，替换的是真实文件，旧程序留作 `<exe>.old` 供回退），完成后 toast 并重启应用；由 pacman 或系统包管理器安装的程序（如 `/opt` 下，root 所有）目录不可写，会拒绝并提示改用包管理器更新，Windows/macOS 仍在下载后提示手动安装。Arch 用户也可以直接用 Software-Repo 发布的 `baidunetgo-<版本>-1-x86_64.pkg.tar.zst`（`sudo pacman -U …`）随包管理器更新，说明见 `docs/UPDATES.md`。
+ - 设置页「关于」新增社区修复版声明：本版本基于上游 pengstem/baidunetgo，由 DeepSeek 与 GLM 协作修复与增强；README 顶部也加了同样的说明。
+diff --git a/app/settings_page.go b/app/settings_page.go
+index 2670296..fa5ee61 100644
+--- a/app/settings_page.go
++++ b/app/settings_page.go
+@@ -17,4 +17,5 @@ import (
+ 
+-// updatesNow and updatesDownload do the checking and the fetching; they
+-// are variables so tests can stand in for them.
++// updatesNow, updatesDownload and updatesInstall do the checking, the
++// fetching and the installing; they are variables so tests can stand in for
++// them.
+ var (
+@@ -22,2 +23,3 @@ var (
+ 	updatesDownload = updates.Download
++	updatesInstall  = updates.Install
+ )
+@@ -35,2 +37,5 @@ type updateState struct {
+ 	lastPath    string        // where the last package landed
++	installing  bool          // the downloaded package installs now
++	installed   bool          // the package is installed and the app restarts
++	installErr  string        // why the last install failed
+ 	err         string        // why the last check or download failed
+@@ -89,2 +94,3 @@ func (a *App) checkUpdates(auto bool) {
+ 		st.lastCheck, st.found, st.lastResult = time.Now(), nil, ""
++		st.installing, st.installed, st.installErr = false, false, ""
+ 		st.err = "更新地址未配置：等待发布通道就绪后填入"
+@@ -94,2 +100,3 @@ func (a *App) checkUpdates(auto bool) {
+ 	st.checking, st.err, st.found, st.autoDone = true, "", nil, true
++	st.installing, st.installed, st.installErr = false, false, ""
+ 	go func() {
+@@ -106,2 +113,3 @@ func (a *App) checkUpdates(auto bool) {
+ 			st.err, st.lastPath = "", ""
++			st.installing, st.installed, st.installErr = false, false, ""
+ 			st.found = info
+@@ -134,8 +142,9 @@ func (a *App) maybeCheckUpdates() {
+ // downloadUpdate fetches the found version's package into the download
+-// folder on a goroutine, reporting the progress into the settings page.
+-// It does not install anything: this build carries no update signing key,
+-// so the package waits for the user to install it (docs/UPDATES.md).
++// folder on a goroutine, reporting the progress into the settings page. It
++// installs nothing itself: on Linux the downloaded package is then offered
++// for installUpdate, elsewhere it waits for the user to install it by hand
++// (docs/UPDATES.md).
+ func (a *App) downloadUpdate() {
+ 	st := &a.updates
+-	if st.found == nil || st.downloading || st.checking {
++	if st.found == nil || st.downloading || st.checking || st.installing {
+ 		return
+@@ -161,2 +170,3 @@ func (a *App) downloadUpdate() {
+ 			st.progress, st.lastPath = 1, p
++			st.installing, st.installed, st.installErr = false, false, ""
+ 			st.lastResult = "已下载：" + filepath.Base(p)
+@@ -167,2 +177,42 @@ func (a *App) downloadUpdate() {
+ 
++// installUpdate installs the downloaded package over the running app and
++// restarts it. The package holds the same binary the app runs, so it is
++// written in place, which keeps the user's install where it is; a package a
++// system package manager owns refuses that and says so (docs/UPDATES.md).
++// The install runs on a goroutine, and the restart waits for the update that
++// reports it, so the toast is queued before the window goes.
++func (a *App) installUpdate() {
++	st := &a.updates
++	if st.lastPath == "" || st.installing || st.installed || st.downloading || st.checking {
++		return
++	}
++	path := st.lastPath
++	ver := ""
++	if st.found != nil {
++		ver = st.found.Version
++	}
++	st.installing, st.installErr = true, ""
++	go func() {
++		_, err := updatesInstall(path)
++		a.update(func() {
++			st := &a.updates
++			st.installing = false
++			if err != nil {
++				// The package stays where it was downloaded, so the
++				// message's manual install is one step away.
++				st.installErr = err.Error()
++				a.toast("安装失败："+err.Error(), "error")
++				return
++			}
++			st.installed = true
++			msg := "已安装"
++			if ver != "" {
++				msg += " " + ver
++			}
++			a.toast(msg+"，正在重启…", "success")
++			a.update(func() { mygo.App.Relaunch() })
++		})
++	}()
++}
++
+ // saveUpdateURL keeps the 更新地址 dialog's address, forgetting the last
+@@ -177,2 +227,3 @@ func (a *App) saveUpdateURL() {
+ 	a.updates.found, a.updates.lastResult, a.updates.err, a.updates.lastPath = nil, "", "", ""
++	a.updates.installing, a.updates.installed, a.updates.installErr = false, false, ""
+ 	a.updates.autoDone = false // a new address is worth a fresh check
+@@ -221,2 +272,8 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			checkDetail = "正在下载 " + st.found.Version + "：" + itoa(int(math.Round(float64(st.progress)*100))) + "%"
++		case st.installing:
++			checkDetail = "正在安装 " + st.found.Version + "…"
++		case st.installed:
++			checkDetail = "已安装，正在重启…"
++		case st.installErr != "":
++			checkDetail = "安装失败：" + st.installErr + "；已下载的包仍在 " + st.lastPath
+ 		case st.err != "":
+@@ -225,2 +282,5 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			checkDetail = "已下载：" + st.lastPath
++			if !updates.CanInstall() {
++				checkDetail += "，请手动安装"
++			}
+ 		case st.found != nil && st.found.Newer:
+@@ -236,5 +296,12 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 		settingRow(c, t, p, "检查更新", "", checkDetail, func() {
+-			if st.downloading {
++			switch {
++			case st.downloading:
+ 				ui.Spinner(c).Label("下载中")
+ 				return
++			case st.installing:
++				ui.Spinner(c).Label("安装中")
++				return
++			case st.installed:
++				ui.Spinner(c).Label("重启中")
++				return
+ 			}
+@@ -248,2 +315,7 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			}
++			if st.lastPath != "" && updates.CanInstall() {
++				if pill(c, t, p, "circle-check", "安装并重启", true).Clicked() {
++					a.installUpdate()
++				}
++			}
+ 		})
+diff --git a/docs/UPDATES.md b/docs/UPDATES.md
+index 04b51f7..b8cdf51 100644
+--- a/docs/UPDATES.md
++++ b/docs/UPDATES.md
+@@ -2,3 +2,3 @@
+ 
+-设置页的「更新」小节由 `internal/updates` 提供能力：向一个 feed 地址询问最新版本，发现新版本时把安装包下载到本机，由用户手动安装。本文是给下一个接手自动化发布的人的交接文档。
++设置页的「更新」小节由 `internal/updates` 提供能力：向一个 feed 地址询问最新版本，发现新版本时把安装包下载到本机；Linux 上可以在设置页就地安装并自动重启，其它平台由用户手动安装。本文是给下一个接手自动化发布的人的交接文档。
+ 
+@@ -9,3 +9,4 @@
+ - 「立即检查」手动检查；发现新版本后出现「下载」按钮，把该平台（`GOOS-GOARCH`）的安装包下载到下载目录（`settings.downloadDir()`），先写 `.part` 再改名落盘；完成后 toast「已下载到 …」。
+-- **不自动安装。** MyGo 内建的 `mygo.Updater` 需要在 `mygo build` 时注入 feed 与签名公钥（`mygo.config.ts` 的 `updates.enabled/feed/publicKey`，经 ldflags 进入构建）；本地未签名的构建即使接了 feed 也过不了签名校验。所以现阶段只下载、提示手动安装。
++- 下载完成后，Linux 上出现「安装并重启」按钮，把该包装到正在运行的程序上并重启（见「自动安装（Linux）」）；Windows/macOS 没有这个按钮，下载完只提示手动安装。
++- **不走 MyGo 内建更新器。** MyGo 内建的 `mygo.Updater` 需要在 `mygo build` 时注入 feed 与签名公钥（`mygo.config.ts` 的 `updates.enabled/feed/publicKey`，经 ldflags 进入构建）；本地未签名的构建即使接了 feed 也过不了签名校验。所以自动安装由本仓库自己实现（`internal/updates/install.go`），不校验签名，只装 feed 给的包。
+ - feed 地址的优先级：`settings.UpdateURL` 非空时用它；否则用构建时注入的 `updates.defaultFeed`（见下）；都为空即未配置。
+@@ -44,5 +45,16 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+ 
+-## 手动安装
++## 自动安装（Linux）
+ 
+-下载得到的文件在系统下载目录（或设置里指定的位置）。Linux 上解包后把二进制放进 PATH；macOS 打开 dmg 拖进「应用程序」；Windows 运行 zip 里的安装器或直接替换 exe。应用不校验下载文件的签名——feed 本身要可信（HTTPS、域名可控）。
++Linux 上「下载」完成后，设置页的「检查更新」行会多出「安装并重启」按钮：点击即把下载的包就地装上，然后重启应用。做法（`internal/updates/install.go`）：
++
++- `updates.Install(archivePath)` 先取 `os.Executable()`，再用 `filepath.EvalSymlinks` 解析到真实文件——`~/.local/bin/baidunetgo` 这类命令是符号链接，指向 `~/.local/baidunetgo.app/baidunetgo`，替换的是后者，链接本身不动。
++- 按扩展名识别包：`.tar.gz` / `.tgz` 用 `archive/tar` + `compress/gzip`，`.zip` 用 `archive/zip`（feed 的 linux 条目是 mygo 打的 `baidunetgo-<版本>-linux-amd64.tar.gz`，里面有 app 目录与 `install.sh`）。`.dmg`、`.deb`、`.pkg.tar.zst`、`.exe` 等一律报「这个包需要手动安装」。
++- 在包里找基线名与正在运行的二进制同名的普通文件（跳过空文件），多个候选取路径层级最浅的。
++- 目标目录必须可写：先在二进制所在目录写临时文件（这同时就是可写性检查），写完 `Sync`、改 `0755`，尽力把旧文件复制成 `<exe>.old`，最后 `os.Rename` 原子替换。任何一步失败都删掉临时文件、旧程序原样保留。
++- 由 pacman / 系统包管理器安装的程序（如 `/opt/baidunetgo/baidunetgo`，root 所有）会被拒绝，并提示「请用包管理器更新，或手动安装下载的包」。
++- Windows 上正在运行的 exe 不能被替换，macOS 的 .app 包同理：`updates.CanInstall()` 只在 Linux 为真，其余平台下载完显示「已下载，请手动安装」。
++
++Arch 用户不必用应用内安装：Software-Repo 的发布里有 mygo 生成的 `baidunetgo-<版本>-1-x86_64.pkg.tar.zst`（`mygo.json` 的 `linux` 段给了 `/usr/bin/baidunetgo` 命令、`Network` 分类与 `linux.webview: false`，因原生 UI 不依赖 WebKitGTK），用 `sudo pacman -U baidunetgo-<版本>-1-x86_64.pkg.tar.zst` 安装，之后随包管理器更新。
++
++其余平台的包仍在系统下载目录（或设置里指定的位置）：macOS 打开 dmg 拖进「应用程序」；Windows 运行 zip 里的安装器或直接替换 exe。应用不校验下载文件的签名——feed 本身要可信（HTTPS、域名可控）。
+ 
+@@ -58,3 +70,3 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+    - `mygo.config.ts` 里配置 `updates.enabled/feed/publicKey`（feed 要求公开可访问的仓库），生成并保管好 minisign 私钥，每次发版用 `mygo build` 注入；
+-   - 代码上把 `app/settings_page.go` 里 `checkUpdates`/`downloadUpdate` 对 `updatesNow`/`updatesDownload` 的调用整体替换为 `mygo.Updater.Check` / `Update.Install` / `mygo.App.Relaunch()`，`internal/updates` 的 `isNewer` 与 feed 解析即可废弃；
++   - 代码上把 `app/settings_page.go` 里 `checkUpdates`/`downloadUpdate`/`installUpdate` 对 `updatesNow`/`updatesDownload`/`updatesInstall` 的调用整体替换为 `mygo.Updater.Check` / `Update.Install` / `mygo.App.Relaunch()`，`internal/updates` 的 `isNewer`、feed 解析与 `install.go` 即可废弃；
+    - 设置页的「更新地址」行改为只读展示或删除，`settings.UpdateURL` 保留做兼容。
+@@ -64,3 +76,3 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+ 
+-- `go test ./internal/updates`：版本比较、feed 解析（宽容格式、缺字段、坏 JSON、非 200、超时）、下载（文件名、内容、`.part` 不残留、进度回调、失败清理、取消）。
++- `go test ./internal/updates`：版本比较、feed 解析（宽容格式、缺字段、坏 JSON、非 200、超时）、下载（文件名、内容、`.part` 不残留、进度回调、失败清理、取消）、安装（tar.gz / zip 就地替换、`0755`、`.old` 备份、缺二进制、不支持的包、不可写目录、失败不残留、各平台 `canInstallOn`）。
+ - `go test ./app -run 'TestSettingsUpdates|TestSettingsAutoUpdateSwitch|TestCheckUpdatesNotConfigured|TestCheckAndDownload|TestAutoCheckQuiet|TestUpdateURLDialog'`：设置页 UI 与状态机，feed 用 `httptest` 本地服务，不打真实网络。
+diff --git a/internal/updates/install.go b/internal/updates/install.go
+new file mode 100644
+index 0000000..fd3d3ab
+--- /dev/null
++++ b/internal/updates/install.go
+@@ -0,0 +1,275 @@
++package updates
++
++import (
++	"archive/tar"
++	"archive/zip"
++	"compress/gzip"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++)
++
++// CanInstall reports whether this build may put a downloaded package over
++// the running app: only Linux, where an app unpacked into the user's home is
++// a plain file the user can write over, and never Windows or macOS, where
++// the program or bundle is replaced by its installer, not underneath itself.
++func CanInstall() bool { return canInstallOn(runtime.GOOS) }
++
++// canInstallOn is CanInstall for any GOOS, so a test can ask about the
++// platforms the one it runs on is not.
++func canInstallOn(goos string) bool { return goos == "linux" }
++
++// Install replaces the running app with the package at archivePath and
++// reports the binary it wrote. os.Executable may name a launcher's symbolic
++// link (a command in ~/.local/bin beside the app's own folder), and a link
++// must not be overwritten with a binary, so the real file is found first.
++func Install(archivePath string) (string, error) {
++	if !CanInstall() {
++		return "", errors.New("这个系统不支持在应用内安装更新，请手动安装下载的包")
++	}
++	exe, err := os.Executable()
++	if err != nil {
++		return "", fmt.Errorf("无法找到正在运行的程序：%v", err)
++	}
++	if real, err := filepath.EvalSymlinks(exe); err == nil {
++		exe = real
++	}
++	return installTo(archivePath, exe)
++}
++
++// installTo installs the package over exe and returns exe. It is apart from
++// Install so that a test can point it at a folder of its own instead of the
++// running program.
++func installTo(archivePath, exe string) (string, error) {
++	if runtime.GOOS == "windows" {
++		// Windows locks a running executable against being written or
++		// renamed over, so an app cannot replace itself while it runs.
++		return "", errors.New("正在运行的程序无法被替换：请退出应用后手动安装下载的包")
++	}
++	pkg, err := openPackage(archivePath)
++	if err != nil {
++		return "", err
++	}
++	defer pkg.close()
++	name, err := pickBinary(pkg.entries, filepath.Base(exe))
++	if err != nil {
++		return "", err
++	}
++
++	dir := filepath.Dir(exe)
++	// The package is written beside the running binary and then renamed over
++	// it, so a half-written file never stands for the app. Making that file is
++	// also the check that the folder is writable: a package installed by
++	// pacman lives in /opt, which only root may write.
++	tmp, err := os.CreateTemp(dir, "."+filepath.Base(exe)+".install-*")
++	if err != nil {
++		return "", fmt.Errorf("程序位于 %s，当前用户不能写入（可能由 pacman 或系统包管理器安装）：请用包管理器更新，或手动安装下载的包", dir)
++	}
++	installed := false
++	defer func() {
++		if installed {
++			return
++		}
++		tmp.Close()
++		os.Remove(tmp.Name()) // a failed install leaves nothing behind
++	}()
++	if err := pkg.read(name, tmp); err != nil {
++		return "", err
++	}
++	if err := tmp.Sync(); err != nil {
++		return "", fmt.Errorf("无法写入 %s：%v", exe, err)
++	}
++	if err := tmp.Close(); err != nil {
++		return "", fmt.Errorf("无法写入 %s：%v", exe, err)
++	}
++	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
++		return "", fmt.Errorf("无法设置 %s 的权限：%v", exe, err)
++	}
++	// The file being replaced is kept beside it, so a package that turns out
++	// wrong can be undone by hand; failing to keep it does not stop the
++	// install, which is already the newer version either way.
++	copyOld(exe)
++	if err := os.Rename(tmp.Name(), exe); err != nil {
++		return "", fmt.Errorf("无法替换 %s：%v", exe, err)
++	}
++	installed = true
++	return exe, nil
++}
++
++// copyOld writes the binary at exe to exe.old, best effort.
++func copyOld(exe string) {
++	src, err := os.Open(exe)
++	if err != nil {
++		return
++	}
++	defer src.Close()
++	dst, err := os.OpenFile(exe+".old", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
++	if err != nil {
++		return
++	}
++	if _, err := io.Copy(dst, src); err != nil {
++		dst.Close()
++		os.Remove(exe + ".old")
++		return
++	}
++	dst.Close()
++}
++
++// packageEntry is one regular file of a package, looked up before anything is
++// extracted.
++type packageEntry struct {
++	name string
++	size int64
++}
++
++// packageReader is a package opened for reading: the regular files it holds,
++// and a way to read one of them out.
++type packageReader struct {
++	entries []packageEntry
++	read    func(name string, w io.Writer) error
++	close   func()
++}
++
++// openPackage opens a package by its extension: the Linux feed serves the
++// mygo build's .tar.gz, while a .zip (Windows' package) may reach this code
++// when the user downloaded it by hand on Linux.
++func openPackage(path string) (*packageReader, error) {
++	lower := strings.ToLower(path)
++	switch {
++	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
++		return openTarGz(path)
++	case strings.HasSuffix(lower, ".zip"):
++		return openZip(path)
++	}
++	return nil, fmt.Errorf("不支持的安装包 %s：这个包需要手动安装", filepath.Base(path))
++}
++
++// openTarGz opens a gzipped tar package. gzip cannot seek, so the archive is
++// read once to list its files and opened again to extract the chosen one,
++// which keeps a large package out of memory.
++func openTarGz(path string) (*packageReader, error) {
++	list, err := tarGzEntries(path)
++	if err != nil {
++		return nil, err
++	}
++	read := func(name string, w io.Writer) error {
++		f, err := os.Open(path)
++		if err != nil {
++			return fmt.Errorf("无法读取安装包：%v", err)
++		}
++		defer f.Close()
++		gz, err := gzip.NewReader(f)
++		if err != nil {
++			return fmt.Errorf("无法解压安装包：%v", err)
++		}
++		defer gz.Close()
++		tr := tar.NewReader(gz)
++		for {
++			hdr, err := tr.Next()
++			if errors.Is(err, io.EOF) {
++				break
++			}
++			if err != nil {
++				return fmt.Errorf("无法解压安装包：%v", err)
++			}
++			if hdr.Name != name || !hdr.FileInfo().Mode().IsRegular() {
++				continue
++			}
++			if _, err := io.Copy(w, tr); err != nil {
++				return fmt.Errorf("无法解压安装包：%v", err)
++			}
++			return nil
++		}
++		return fmt.Errorf("安装包里没有 %s", name)
++	}
++	return &packageReader{entries: list, read: read, close: func() {}}, nil
++}
++
++// tarGzEntries lists a gzipped tar package's regular files.
++func tarGzEntries(path string) ([]packageEntry, error) {
++	f, err := os.Open(path)
++	if err != nil {
++		return nil, fmt.Errorf("无法读取安装包：%v", err)
++	}
++	defer f.Close()
++	gz, err := gzip.NewReader(f)
++	if err != nil {
++		return nil, fmt.Errorf("无法解压安装包：%v", err)
++	}
++	defer gz.Close()
++	tr := tar.NewReader(gz)
++	var out []packageEntry
++	for {
++		hdr, err := tr.Next()
++		if errors.Is(err, io.EOF) {
++			break
++		}
++		if err != nil {
++			return nil, fmt.Errorf("无法解压安装包：%v", err)
++		}
++		if !hdr.FileInfo().Mode().IsRegular() {
++			continue
++		}
++		out = append(out, packageEntry{name: hdr.Name, size: hdr.Size})
++	}
++	return out, nil
++}
++
++// openZip opens a zip package, which stays open for the extraction: a zip's
++// index lets it seek to the file picked.
++func openZip(path string) (*packageReader, error) {
++	rc, err := zip.OpenReader(path)
++	if err != nil {
++		return nil, fmt.Errorf("无法解压安装包：%v", err)
++	}
++	var list []packageEntry
++	for _, f := range rc.File {
++		if !f.FileInfo().Mode().IsRegular() {
++			continue
++		}
++		list = append(list, packageEntry{name: f.Name, size: int64(f.UncompressedSize64)})
++	}
++	read := func(name string, w io.Writer) error {
++		for _, f := range rc.File {
++			if f.Name != name {
++				continue
++			}
++			r, err := f.Open()
++			if err != nil {
++				return fmt.Errorf("无法解压安装包：%v", err)
++			}
++			defer r.Close()
++			if _, err := io.Copy(w, r); err != nil {
++				return fmt.Errorf("无法解压安装包：%v", err)
++			}
++			return nil
++		}
++		return fmt.Errorf("安装包里没有 %s", name)
++	}
++	return &packageReader{entries: list, read: read, close: func() { rc.Close() }}, nil
++}
++
++// pickBinary finds the package's copy of the app's binary by its name within
++// the package, the shallowest when several match (a package may hold the
++// app's folder and a copy of it elsewhere), and skips empty files, which are
++// no binary at all.
++func pickBinary(entries []packageEntry, want string) (string, error) {
++	best, bestDepth := "", -1
++	for _, e := range entries {
++		if filepath.Base(e.name) != want || e.size == 0 {
++			continue
++		}
++		depth := strings.Count(strings.Trim(e.name, "/"), "/")
++		if bestDepth < 0 || depth < bestDepth {
++			best, bestDepth = e.name, depth
++		}
++	}
++	if best == "" {
++		return "", fmt.Errorf("下载的包里没有 %s：请手动安装这个包", want)
++	}
++	return best, nil
++}
+diff --git a/internal/updates/install_test.go b/internal/updates/install_test.go
+new file mode 100644
+index 0000000..8ac943e
+--- /dev/null
++++ b/internal/updates/install_test.go
+@@ -0,0 +1,245 @@
++package updates
++
++import (
++	"archive/tar"
++	"archive/zip"
++	"bytes"
++	"compress/gzip"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// fakeBinary is what a package holds for the app: text, not a real binary,
++// as an install replaces the file's bytes without ever running them.
++const fakeBinary = "假装是新的二进制"
++
++// targetBinary is what the app's file holds before an install.
++const targetBinary = "旧的二进制"
++
++// writeTarGz writes a gzipped tar package holding files, keyed by their paths
++// in the package, at path.
++func writeTarGz(t *testing.T, path string, files map[string]string) {
++	t.Helper()
++	var buf bytes.Buffer
++	gz := gzip.NewWriter(&buf)
++	tw := tar.NewWriter(gz)
++	for name, body := range files {
++		hdr := &tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}
++		if err := tw.WriteHeader(hdr); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := tw.Write([]byte(body)); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := tw.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := gz.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
++		t.Fatal(err)
++	}
++}
++
++// writeZip writes a zip package holding files at path.
++func writeZip(t *testing.T, path string, files map[string]string) {
++	t.Helper()
++	var buf bytes.Buffer
++	zw := zip.NewWriter(&buf)
++	for name, body := range files {
++		f, err := zw.Create(name)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if _, err := f.Write([]byte(body)); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := zw.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
++		t.Fatal(err)
++	}
++}
++
++// installedApp makes a folder holding the app's binary as it runs now, and
++// returns the folder and the binary's path.
++func installedApp(t *testing.T) (dir, exe string) {
++	t.Helper()
++	dir = t.TempDir()
++	exe = filepath.Join(dir, "baidunetgo")
++	if err := os.WriteFile(exe, []byte(targetBinary), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	return dir, exe
++}
++
++// tempFiles lists dir's files whose name starts with start, to check that a
++// failed install left nothing behind.
++func tempFiles(t *testing.T, dir, start string) []string {
++	t.Helper()
++	entries, err := os.ReadDir(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var out []string
++	for _, e := range entries {
++		if strings.HasPrefix(e.Name(), start) {
++			out = append(out, e.Name())
++		}
++	}
++	return out
++}
++
++// checkInstalled checks the app's file now holds body at 0755, and that the
++// file it replaced is kept as .old.
++func checkInstalled(t *testing.T, dir, exe string) {
++	t.Helper()
++	data, err := os.ReadFile(exe)
++	if err != nil || string(data) != fakeBinary {
++		t.Errorf("binary %q, %v", data, err)
++	}
++	info, err := os.Stat(exe)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if perm := info.Mode().Perm(); perm != 0o755 {
++		t.Errorf("mode %v, want 0755", perm)
++	}
++	old, err := os.ReadFile(exe + ".old")
++	if err != nil || string(old) != targetBinary {
++		t.Errorf("old binary %q, %v", old, err)
++	}
++	if left := tempFiles(t, dir, ".baidunetgo.install-"); len(left) > 0 {
++		t.Errorf("temporary files left behind: %q", left)
++	}
++}
++
++// TestInstallToTarGz replaces the app with the binary from a tar.gz package
++// holding it in a folder, keeping the replaced file as .old.
++func TestInstallToTarGz(t *testing.T) {
++	dir, exe := installedApp(t)
++	// The app's folder in the package, plus a deeper copy of the same name,
++	// which the shallower one wins over.
++	archive := filepath.Join(t.TempDir(), "baidunetgo-9.9.9-linux-amd64.tar.gz")
++	writeTarGz(t, archive, map[string]string{
++		"baidunetgo/baidunetgo":       fakeBinary,
++		"baidunetgo/extra/baidunetgo": "不该被选中的二进制",
++		"baidunetgo/install.sh":       "#!/bin/sh\n",
++	})
++
++	got, err := installTo(archive, exe)
++	if err != nil {
++		t.Fatalf("installTo: %v", err)
++	}
++	if got != exe {
++		t.Errorf("installed to %q, want %q", got, exe)
++	}
++	checkInstalled(t, dir, exe)
++}
++
++// TestInstallToZip does the same with a zip package.
++func TestInstallToZip(t *testing.T) {
++	dir, exe := installedApp(t)
++	archive := filepath.Join(t.TempDir(), "BaiduNetGo-9.9.9-windows-amd64.zip")
++	writeZip(t, archive, map[string]string{
++		"BaiduNetGo/baidunetgo": fakeBinary,
++		"BaiduNetGo/readme.txt": "readme",
++	})
++
++	if _, err := installTo(archive, exe); err != nil {
++		t.Fatalf("installTo: %v", err)
++	}
++	checkInstalled(t, dir, exe)
++}
++
++// TestInstallToMissingBinary asks for a package that holds no file of the
++// app's name and expects an error saying which name it looked for.
++func TestInstallToMissingBinary(t *testing.T) {
++	dir, exe := installedApp(t)
++	archive := filepath.Join(t.TempDir(), "pkg.tar.gz")
++	writeTarGz(t, archive, map[string]string{"app/other": "不是它"})
++
++	_, err := installTo(archive, exe)
++	if err == nil {
++		t.Fatal("installTo succeeded without the app's binary")
++	}
++	if !strings.Contains(err.Error(), "baidunetgo") {
++		t.Errorf("error %q does not name the binary", err)
++	}
++	data, readErr := os.ReadFile(exe)
++	if readErr != nil || string(data) != targetBinary {
++		t.Errorf("the app was changed by a failed install: %q, %v", data, readErr)
++	}
++	if left := tempFiles(t, dir, ".baidunetgo.install-"); len(left) > 0 {
++		t.Errorf("temporary files left behind: %q", left)
++	}
++}
++
++// TestInstallToUnsupportedPackage refuses what this code cannot unpack, such
++// as a .dmg, and says it must be installed by hand.
++func TestInstallToUnsupportedPackage(t *testing.T) {
++	_, exe := installedApp(t)
++	archive := filepath.Join(t.TempDir(), "BaiduNetGo-9.9.9.dmg")
++	if err := os.WriteFile(archive, []byte("dmg"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	_, err := installTo(archive, exe)
++	if err == nil {
++		t.Fatal("installTo unpacked a dmg")
++	}
++	if !strings.Contains(err.Error(), "手动安装") {
++		t.Errorf("error %q does not send the user to a manual install", err)
++	}
++}
++
++// TestInstallToReadOnlyDir expects a folder the user cannot write, as a
++// package manager's install under /opt is, to be refused with a note about
++// the package manager rather than a partial write.
++func TestInstallToReadOnlyDir(t *testing.T) {
++	if os.Geteuid() == 0 {
++		t.Skip("root writes a read-only folder, so the check cannot fail")
++	}
++	dir, exe := installedApp(t)
++	archive := filepath.Join(t.TempDir(), "pkg.tar.gz")
++	writeTarGz(t, archive, map[string]string{"app/baidunetgo": fakeBinary})
++	if err := os.Chmod(dir, 0o500); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { os.Chmod(dir, 0o700) })
++
++	_, err := installTo(archive, exe)
++	if err == nil {
++		t.Fatal("installTo wrote into a folder it cannot write")
++	}
++	for _, want := range []string{"pacman", "包管理器"} {
++		if !strings.Contains(err.Error(), want) {
++			t.Errorf("error %q does not mention %q", err, want)
++		}
++	}
++	data, readErr := os.ReadFile(exe)
++	if readErr != nil || string(data) != targetBinary {
++		t.Errorf("the app was changed by a failed install: %q, %v", data, readErr)
++	}
++	if left := tempFiles(t, dir, ".baidunetgo.install-"); len(left) > 0 {
++		t.Errorf("temporary files left behind: %q", left)
++	}
++}
++
++// TestCanInstallOn checks which platforms may install in place.
++func TestCanInstallOn(t *testing.T) {
++	for goos, want := range map[string]bool{
++		"linux":   true,
++		"windows": false,
++		"darwin":  false,
++	} {
++		if got := canInstallOn(goos); got != want {
++			t.Errorf("canInstallOn(%q) = %v, want %v", goos, got, want)
++		}
++	}
++}
+diff --git a/internal/updates/updates.go b/internal/updates/updates.go
+index fe0ce8a..0b3a34b 100644
+--- a/internal/updates/updates.go
++++ b/internal/updates/updates.go
+@@ -1,6 +1,8 @@
+ // Package updates checks a feed for a newer BaiduNetGo build and
+-// downloads its package for this platform. This build signs nothing and
+-// installs nothing: a newer version is fetched to the download folder for
+-// the user to install by hand, until a feed run by the release workflow
+-// takes over and MyGo's own updater replaces this package.
++// downloads its package for this platform. This build signs nothing: a
++// newer version is fetched to the download folder, and on Linux the
++// package may then be installed over the running app in place (install.go),
++// while the other platforms leave it to the user to install by hand, until
++// a feed run by the release workflow takes over and MyGo's own updater
++// replaces this package.
+ package updates
