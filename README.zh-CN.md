@@ -41,11 +41,14 @@ issue，而不是继续发布过期代码。
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `11cc955` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 10 | `0.1.3-patchwork`（11203，arm64-v8a） |
-| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 19 | `0.8.3`（linux/windows x86；Release + feed） |
+| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 21 | `0.8.3`（linux/windows x86、Arch 包；Release + feed） |
 
 三个 Android 应用发布在 F-Droid。**BaiduNetGo 不发布**：它是 Go/MyGo 桌面程序，
-按自己的 10 天周期构建：安装包发布成 `baidunetgo-desktop-<version>-<short_sha>`
-的 Release，同时保留 `baidunetgo-x86-<sha>` artifact，每次构建还会提交更新 feed
+按自己的 10 天周期构建：安装包（`.deb`、`.tar.gz`、Arch Linux 的
+`.pkg.tar.zst`（用 `sudo pacman -U` 安装）、Windows 安装版/便携版 `.zip`）发布成
+`baidunetgo-desktop-<version>-<short_sha>` 的 Release，同时保留
+`baidunetgo-x86-<sha>` artifact；Linux 上下载更新后可以就地安装并重启，pacman
+装的副本则改为提示用 `pacman -U`。每次构建还会提交更新 feed
 `desktop/baidunetgo/update.json`（地址
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>，已内置进二进制），永远不会变成 APK。
 
@@ -83,9 +86,13 @@ Rime 配置」，也可用
 自适应，以及可配置的更新检查 feed；界面由 MyGo 原生 GPU 绘制。由
 `scripts/build-baidunetgo.sh` 从 `desktop/baidunetgo/patches` 构建，**只出 x86**
 （`linux/amd64`、`windows/amd64`），每次都把队列用 `git am -3`（导出成补丁的
-rebase 形式）重放到新的上游头上。安装包发布成带 tag 的 Release 并保留
-`baidunetgo-x86-<sha>` artifact，每次构建还提交 `desktop/baidunetgo/update.json`
-（应用在「设置 → 更新」里读的 feed，地址 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
+rebase 形式）重放到新的上游头上；另外 `scripts/build-baidunetgo-arch.sh` 会在
+`archlinux:base-devel` 容器里跑 makepkg，补上 Arch Linux 的 `.pkg.tar.zst`
+（`sudo pacman -U <文件>` 安装）。安装包发布成带 tag 的 Release 并保留
+`baidunetgo-x86-<sha>` artifact；Linux 上应用可以就地安装下载的更新并重启，
+pacman 装的副本会拒绝并提示用 `pacman -U`。每次构建还提交
+`desktop/baidunetgo/update.json`（应用在「设置 → 更新」里读的 feed，地址
+<https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 已内置进二进制），不进入 F-Droid。
 
 两个带预编译原生依赖的 Android 应用（RecurringExpenseTracker、ScreenTime）都只编译
@@ -179,7 +186,9 @@ build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 `desktop/baidunetgo/patches` 用 `git am -3` 重放到新 head（不适用时回退到上次成功
 构建的提交重试一次），用 `go tool mygo build` 构建 `linux/amd64,windows/amd64`，
 上传 `baidunetgo-x86-<sha>` artifact，同时把安装包发布到
-`baidunetgo-desktop-<version>-<short_sha>` 的 Release（不标 `latest`），并提交
+`baidunetgo-desktop-<version>-<short_sha>` 的 Release（`.deb`、`.tar.gz`、在
+`archlinux:base-devel` 容器里用 makepkg 打出的 Arch `.pkg.tar.zst`、Windows
+安装版/便携版 `.zip`，不标 `latest`），并提交
 `desktop/baidunetgo/update.json`——补丁版在「设置 → 更新」里检查的 feed，地址
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 在构建时内置进二进制。回退构建不会记录新 head，下一个 10 天窗口会继续重试；
@@ -239,13 +248,14 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 │   ├── screentime/{app.conf,patches/}   # 0001..0011，KEEP_ABIS=ARM
 │   └── fcitx5/{app.conf,patches/}       # 0001..0003
 ├── desktop/
-│   ├── baidunetgo/{app.conf,patches/}   # 0001..0019，x86 桌面构建
+│   ├── baidunetgo/{app.conf,patches/}   # 0001..0021，x86 桌面构建
 │   └── .build-state.json                # 上次成功构建的上游提交
 ├── .watch-state.json          # android / baidunetgo 的上次 10 天检查时间
 ├── scripts/
 │   ├── build-app.sh           # 拉上游、打补丁、改版本、构建、校验
 │   ├── baidunetgo-feed.py     # 生成更新 feed（update.json）
 │   ├── build-baidunetgo.sh    # 拉上游、rebase 补丁队列、构建 x86 桌面版
+│   ├── build-baidunetgo-arch.sh # 容器里跑 makepkg，打 Arch 包
 │   ├── check-upstream.sh      # 上游 SHA 差异 -> CI 矩阵
 │   ├── publish-fdroid.sh      # 发布 APK 并签名索引
 │   ├── test-baidunetgo-feed.sh # 上面那个生成器的回归测试

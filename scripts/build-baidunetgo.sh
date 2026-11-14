@@ -28,6 +28,11 @@
 # BaiduNetGo is not an Android app: nothing here runs Gradle, touches
 # fdroid/ or publishes through F-Droid. The build is x86 only — linux/amd64
 # and windows/amd64 — and MyGo needs no cgo, so both come from one x86 runner.
+#
+# When linux/amd64 is in the platform list, the MyGo build also writes a
+# PKGBUILD and its sources next to the archive; build() stages those Arch Linux
+# package inputs in $OUT/arch, for scripts/build-baidunetgo-arch.sh in CI or a
+# local `makepkg -si` there.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -338,6 +343,29 @@ build() {
         esac
     done
     shopt -u nullglob
+
+    # Stage what makepkg needs for an Arch Linux package: MyGo writes a
+    # PKGBUILD next to the linux build whose sources are the archive and the
+    # PNG icons. The app directory and the .deb are not sources, so only the
+    # files the PKGBUILD names are copied.
+    if [[ ",$PLATFORMS," == *linux/amd64* ]]; then
+        local arch_src="$WORK/build/linux-amd64" arch_out="$OUT/arch" arch_file
+        if [[ -f "$arch_src/PKGBUILD" ]]; then
+            rm -rf "$arch_out"
+            mkdir -p "$arch_out"
+            cp -f "$arch_src/PKGBUILD" "$arch_out/"
+            shopt -s nullglob
+            for arch_file in "$arch_src"/*.tar.gz "$arch_src"/*.png; do
+                [[ -f "$arch_file" ]] || continue
+                cp -f "$arch_file" "$arch_out/"
+            done
+            shopt -u nullglob
+            echo "==> staged the Arch Linux package inputs in $arch_out"
+        else
+            rm -rf "$arch_out"
+            echo "::warning::no PKGBUILD in $arch_src; skipping the Arch Linux package inputs (mygo did not write one for this build)"
+        fi
+    fi
 
     local built_at
     built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

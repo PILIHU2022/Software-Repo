@@ -44,13 +44,17 @@ code.
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `11cc955` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 10 | `0.1.3-patchwork` (11203, arm64-v8a) |
-| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 19 | `0.8.3` (linux/windows x86; Release + feed) |
+| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 21 | `0.8.3` (linux/windows x86, Arch package; Release + feed) |
 
 The three Android apps are published in F-Droid. **BaiduNetGo is not**: it is a
-Go/MyGo desktop program, built on its own 10-day schedule. Its installers go to
-a GitHub Release tagged `baidunetgo-desktop-<version>-<short_sha>` and to the
-`baidunetgo-x86-<sha>` workflow artifact, and each build also commits the update
-feed `desktop/baidunetgo/update.json` — never an APK.
+Go/MyGo desktop program, built on its own 10-day schedule. Its installers —
+`.deb`, `.tar.gz`, an Arch Linux `.pkg.tar.zst` (`sudo pacman -U`) and the
+Windows setup/portable `.zip` — go to a GitHub Release tagged
+`baidunetgo-desktop-<version>-<short_sha>` and to the `baidunetgo-x86-<sha>`
+workflow artifact; on Linux a downloaded update can be installed in place and
+the app restarted, while a pacman-installed copy defers to `pacman -U`. Each
+build also commits the update feed `desktop/baidunetgo/update.json` — never an
+APK.
 
 **ScreenTime** — daily usage history persisted in a local SQLite database, a new
 analysis screen backed by that history (durations count up from zero while the
@@ -109,10 +113,15 @@ undo, Finder-style marquee selection and drag-to-move, window/font adaptation,
 and a pluggable update-check feed, on top of MyGo's native GPU UI. Built from
 `desktop/baidunetgo/patches` for **x86 only** (`linux/amd64`, `windows/amd64`)
 by `scripts/build-baidunetgo.sh`, which reapplies the queue with `git am -3`
-(the exported-commit form of rebasing) to every new upstream head. Its installers
-are published to a tagged GitHub Release and the `baidunetgo-x86-<sha>` workflow
-artifact; each build also commits `desktop/baidunetgo/update.json`, the feed the
-app reads from Settings → Updates at
+(the exported-commit form of rebasing) to every new upstream head, plus
+`scripts/build-baidunetgo-arch.sh`, which runs makepkg in an
+`archlinux:base-devel` container to add the Arch Linux `.pkg.tar.zst`
+(`sudo pacman -U <file>`). Its installers are published to a tagged GitHub
+Release and the `baidunetgo-x86-<sha>` workflow artifact; on Linux a downloaded
+update can be installed in place and the app restarted, while a copy installed
+by pacman refuses and points at `pacman -U`. Each build also commits
+`desktop/baidunetgo/update.json`, the feed the app reads from Settings → Updates
+at
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 (compiled into the binary). It is never an F-Droid package.
 
@@ -223,9 +232,10 @@ on `.watch-state.json`'s `baidunetgo` timestamp, resolves `pengstem/baidunetgo`
 applies), builds `linux/amd64,windows/amd64` with `go tool mygo build`, and
 uploads the installers as the `baidunetgo-x86-<sha>` artifact. It also publishes
 them to a Release tagged `baidunetgo-desktop-<version>-<short_sha>` (assets:
-`.deb`, `.tar.gz`, Windows setup `.exe` and portable `.zip`; never marked
-`latest`) and commits `desktop/baidunetgo/update.json`, the feed the patched
-binary checks from Settings → Updates at
+`.deb`, `.tar.gz`, the Arch `.pkg.tar.zst` that a makepkg step builds in an
+`archlinux:base-devel` container, Windows setup `.exe` and portable `.zip`; never
+marked `latest`) and commits `desktop/baidunetgo/update.json`, the feed the
+patched binary checks from Settings → Updates at
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 (the URL is baked in at build time). A fallback build keeps the recorded head, so
 the next 10-day window retries the new upstream. Nothing in it touches `fdroid/`.
@@ -289,13 +299,14 @@ with the arm64 build.
 │   ├── screentime/{app.conf,patches/}   # 0001..0011, KEEP_ABIS=ARM
 │   └── fcitx5/{app.conf,patches/}       # 0001..0010
 ├── desktop/
-│   ├── baidunetgo/{app.conf,patches/}   # 0001..0019, x86 desktop build
+│   ├── baidunetgo/{app.conf,patches/}   # 0001..0021, x86 desktop build
 │   └── .build-state.json                # last upstream commit built
 ├── .watch-state.json          # last android/baidunetgo 10-day check
 ├── scripts/
 │   ├── baidunetgo-feed.py     # write the update feed (update.json)
 │   ├── build-app.sh           # fetch, patch, version, build, verify
 │   ├── build-baidunetgo.sh    # fetch, rebase queue, x86 desktop build
+│   ├── build-baidunetgo-arch.sh # makepkg in a container -> Arch package
 │   ├── check-upstream.sh      # upstream SHA diff -> CI matrix
 │   ├── publish-fdroid.sh      # APKs + signed index
 │   ├── test-baidunetgo-feed.sh # its regression test

@@ -15,6 +15,14 @@ name: BaiduNetGo desktop build
 # x86 platforms only; the workflow artifact (90 days) is kept as the quick
 # grab, since a Release download is one click more.
 #
+# On Linux the build also packages the release for Arch Linux: an
+# archlinux:base-devel container runs makepkg on the inputs mygo wrote next to
+# the build, and the resulting baidunetgo-<version>-1-x86_64.pkg.tar.zst
+# (`sudo pacman -U <file>`) is uploaded to the same Release as an extra asset.
+# The feed keeps pointing linux downloads at the .tar.gz; the Arch package is a
+# convenience for pacman users, not a third feed platform. If makepkg fails,
+# the build fails without publishing.
+#
 # Cadence: every 10 days. GitHub crons cannot express "every 10 days" (a
 # `*/10` day-of-month rule fires on the 1st, 11th, 21st and 31st), so the
 # workflow runs daily and the check job returns early unless
@@ -160,6 +168,14 @@ jobs:
           PATCHWORK_FEED_URL: https://raw.githubusercontent.com/${{ github.repository }}/main/desktop/baidunetgo/update.json
         run: ./scripts/build-baidunetgo.sh --build --out "$RUNNER_TEMP/dist"
 
+      # The runner has docker but no pacman/makepkg: the script pulls
+      # archlinux:base-devel, maps the runner uid/gid into it and runs makepkg
+      # there. The package lands in $RUNNER_TEMP/dist, so the Release and the
+      # workflow artifact pick it up with the other installers.
+      - name: Build the Arch Linux package
+        timeout-minutes: 15
+        run: ./scripts/build-baidunetgo-arch.sh --dist "$RUNNER_TEMP/dist"
+
       - name: Read the build info
         id: info
         run: |
@@ -169,6 +185,8 @@ jobs:
           built_sha="$(sed -n 's/^upstream_commit=//p' "$info" | head -n 1)"
           fallback="$(sed -n 's/^upstream_fallback=//p' "$info" | head -n 1)"
           version="$(sed -n 's/^version=//p' "$info" | head -n 1)"
+          arch_pkg="$(sed -n 's/^file=\(.*\.pkg\.tar\.zst\) size=.*/\1/p' \
+            "$info" | head -n 1)"
           {
             echo "built_sha=$built_sha"
             echo "fallback=$fallback"
@@ -180,6 +198,7 @@ jobs:
             echo "- upstream head: \`${{ needs.check.outputs.sha }}\`"
             echo "- built commit: \`$built_sha\` (fallback: ${fallback:-0})"
             echo "- version: ${version:-unknown}"
+            echo "- Arch Linux package: \`${arch_pkg:-none}\` (\`pacman -U\`)"
             echo ''
             echo '| file | size |'
             echo '| --- | --- |'

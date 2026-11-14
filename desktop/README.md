@@ -12,13 +12,13 @@ Gradle build on a desktop program.
 | Upstream | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo), `main` |
 | Queue | `baidunetgo/patches/*.patch`, exported from the authoring clone's `main` |
 | Platforms | `linux/amd64`, `windows/amd64` — x86 only |
-| Builder | `scripts/build-baidunetgo.sh` |
+| Builder | `scripts/build-baidunetgo.sh` (plus `scripts/build-baidunetgo-arch.sh` for the Arch package) |
 | Workflow | `.github/workflows/baidunetgo.yml`, one window every 10 days |
 
 BaiduNetGo is a pure-Go/MyGo desktop client; it has no APK, no package name and
-no F-Droid metadata. Its installers (Linux `.deb` + `.tar.gz`, Windows setup
-`.exe` + portable `.zip`) are uploaded as the workflow artifact
-`baidunetgo-x86-<sha>` and published to a GitHub Release — see
+no F-Droid metadata. Its installers (Linux `.deb` + `.tar.gz`, Arch Linux
+`.pkg.tar.zst`, Windows setup `.exe` + portable `.zip`) are uploaded as the
+workflow artifact `baidunetgo-x86-<sha>` and published to a GitHub Release — see
 [Update check / releases](#update-check--releases).
 
 The workflow compares the upstream `main` SHA with `.build-state.json`, replays
@@ -35,10 +35,14 @@ Every successful build does two things on top of the workflow artifact:
 - it publishes the installers to a GitHub Release tagged
   `baidunetgo-desktop-<version>-<short_sha>`, where `<short_sha>` is the first
   seven characters of the built upstream commit. The assets are the same x86
-  files as the artifact (Linux `.deb` + `.tar.gz`, Windows setup `.exe` +
-  portable `.zip`; `build-info.txt` stays artifact-only). The tag is explicit
-  and the release is never marked `latest`, so `latest` can point at something
-  else later; the feed carries the tagged URLs itself;
+  files as the artifact (Linux `.deb` + `.tar.gz`, Arch Linux
+  `baidunetgo-<version>-1-x86_64.pkg.tar.zst`, Windows setup `.exe` + portable
+  `.zip`; `build-info.txt` stays artifact-only). The Arch package is built in an
+  `archlinux:base-devel` container by `scripts/build-baidunetgo-arch.sh`;
+  `sudo pacman -U <file>` installs it into `/opt/baidunetgo` with a
+  `/usr/bin/baidunetgo` link. The tag is explicit and the release is never
+  marked `latest`, so `latest` can point at something else later; the feed
+  carries the tagged URLs itself;
 - it regenerates and commits `baidunetgo/update.json`, the update feed that the
   app reads from **Settings → Updates**, and prints the feed address and the
   release link in the run summary.
@@ -72,10 +76,22 @@ fix that should be downloadable now), dispatch the workflow with `force`; that
 refreshes the Release and the feed immediately, and the in-app prompt arrives
 with the next upstream version bump.
 
-The app only downloads the installer into the download directory and leaves
-installing it to the user, exactly like upstream. The workflow artifact
-(`baidunetgo-x86-<sha>`, kept 90 days) is still uploaded as the quickest way to
-grab a build without a Release round trip.
+The workflow artifact (`baidunetgo-x86-<sha>`, kept 90 days) is still uploaded
+as the quickest way to grab a build without a Release round trip.
+
+### Updating in place
+
+On Linux the download can be installed without leaving the app: after the
+update check has downloaded the new `.tar.gz`, **install and restart** replaces
+the real binary behind `os.Executable()` (symlinks resolved) with the unpacked
+one and starts the app again, keeping the previous binary as `<exe>.old`.
+Windows and macOS still only download their installer and leave installing it
+to the user.
+
+A copy installed by pacman — the Arch package puts the app in
+`/opt/baidunetgo`, owned by root — refuses the in-place update and says to run
+`sudo pacman -U` on the new `.pkg.tar.zst` instead. A copy installed by the
+archive's `install.sh` under the user's home updates itself.
 
 ## Refreshing the queue
 
