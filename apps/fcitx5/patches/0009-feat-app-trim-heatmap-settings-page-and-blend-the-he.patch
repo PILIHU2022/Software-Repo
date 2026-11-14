@@ -1,0 +1,733 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 18:23:28 +0800
+Subject: [PATCH] feat(app): trim heatmap settings page and blend the heatmap
+ card
+
+- Drop the aggregated overview and the last-7-days list from the statistics
+  page: every number already lives on the home heatmap card, so the page is
+  now just the palette/custom color rows and the data & privacy section.
+- Fold the privacy note into the tracking switch summary and remove the
+  duplicated hex from the palette summary.
+- Give the heatmap card the page surface (colorSurfaceContainerLow + a
+  hairline outlineVariant stroke) and lift the metric chips one step higher,
+  so the card matches the home background while keeping its rounded box.
+- Use an explicit dark stage behind the keyboard theme preview (theme page
+  tab strip and custom theme editor), so dark keyboard themes are judged
+  against a dark backdrop instead of the pastel dynamic-color surface.
+---
+ .../stats/HeatmapPalettePreference.kt         |  15 +-
+ .../settings/stats/TypingStatsFragment.kt     | 213 +-----------------
+ .../settings/theme/CustomThemeActivity.kt     |  29 ++-
+ .../ui/main/settings/theme/ThemeFragment.kt   |  19 +-
+ app/src/main/res/drawable/bg_heatmap_card.xml |  14 +-
+ .../res/drawable/bg_heatmap_stat_chip.xml     |   7 +-
+ .../res/values-zh-rCN/strings_stats_ui.xml    |  36 +--
+ .../res/values-zh-rTW/strings_stats_ui.xml    |  36 +--
+ app/src/main/res/values/colors.xml            |  12 +
+ app/src/main/res/values/strings_stats_ui.xml  |  39 +---
+ 10 files changed, 87 insertions(+), 333 deletions(-)
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt
+index e8eea72d..b71560fc 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt
+@@ -21,8 +21,10 @@ import org.fcitx.fcitx5.android.utils.isDarkMode
+ /**
+  * Preference row for the heatmap color palette.
+  *
+- * The row shows the title, the name of the current palette (plus the hex value for
+- * [HeatmapPalette.Custom]) and the five actual heatmap shades of the current theme.
++ * The row shows the title, the name of the current palette and the five actual heatmap shades of
++ * the current theme. The custom hex value is not repeated here: the custom color row right below
++ * already shows it.
++ *
+  * Tapping it opens a single-choice list of all [HeatmapPalette] entries.
+  *
+  * The preference is not backed by `SharedPreferences` itself; it reads and writes
+@@ -72,7 +74,7 @@ class HeatmapPalettePreference @JvmOverloads constructor(
+         root.findViewById<TextView>(android.R.id.title)?.setText(R.string.stats_ui_palette)
+         root.findViewById<TextView>(android.R.id.summary)?.apply {
+             visibility = View.VISIBLE
+-            text = summary(palette, customColor)
++            text = summary(palette)
+         }
+ 
+         val colors = palette.colors(customColor, isDark)
+@@ -84,15 +86,14 @@ class HeatmapPalettePreference @JvmOverloads constructor(
+ 
+     /**
+      * `current · other options`, so the row tells both the active palette (not just its color)
+-     * and which palettes are available.
++     * and which palettes are available. No hex here: the custom color row right below shows it.
+      */
+-    private fun summary(palette: HeatmapPalette, customColor: Int): CharSequence {
++    private fun summary(palette: HeatmapPalette): CharSequence {
+         val currentName = context.getString(palette.stringRes)
+         val alternatives = HeatmapPalette.entries
+             .filter { it != palette }
+             .joinToString(" / ") { context.getString(it.stringRes) }
+-        val custom = if (palette == HeatmapPalette.Custom) " ${formatArgbHex(customColor)}" else ""
+-        return "$currentName$custom · $alternatives"
++        return "$currentName · $alternatives"
+     }
+ 
+     private fun showPalettePicker() {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
+index 6f8e2cae..55910d33 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
+@@ -5,56 +5,26 @@
+ package org.fcitx.fcitx5.android.ui.main.settings.stats
+ 
+ import android.os.Bundle
+-import android.view.View
+-import androidx.annotation.PluralsRes
+-import androidx.annotation.StringRes
+ import androidx.appcompat.app.AlertDialog
+-import androidx.lifecycle.Lifecycle
+-import androidx.lifecycle.lifecycleScope
+-import androidx.lifecycle.repeatOnLifecycle
+ import androidx.preference.Preference
+-import androidx.preference.PreferenceGroup
+ import androidx.preference.SwitchPreferenceCompat
+-import kotlinx.coroutines.launch
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.data.stats.TypingStatsManager
+-import org.fcitx.fcitx5.android.data.stats.TypingStatsSnapshot
+ import org.fcitx.fcitx5.android.ui.common.PaddingPreferenceFragment
+ import org.fcitx.fcitx5.android.ui.main.heatmap.HeatmapPalette
+ import org.fcitx.fcitx5.android.utils.addCategory
+ import org.fcitx.fcitx5.android.utils.toast
+-import java.text.NumberFormat
+-import java.time.Instant
+-import java.time.LocalDate
+-import java.time.ZoneId
+-import java.time.format.DateTimeFormatter
+-import java.time.format.FormatStyle
+-import java.time.format.TextStyle
+-import java.util.Locale
+ 
+ /**
+  * "Statistics & heatmap" settings screen.
+  *
+- * Read-only overview of the aggregated typing statistics, the last seven days, the heatmap
+- * palette / custom color and the data & privacy section (tracking switch, reset action).
+- *
+- * All values are kept in sync with [TypingStatsManager.snapshot] while the screen is started.
++ * Only the heatmap palette / custom color and the data & privacy section (tracking switch, reset
++ * action). Every statistic lives on the home page heatmap card, so the page stays short and does
++ * not repeat numbers.
+  */
+ class TypingStatsFragment : PaddingPreferenceFragment() {
+ 
+-    private lateinit var totalCharacters: Preference
+-    private lateinit var corrections: Preference
+-    private lateinit var accuracy: Preference
+-    private lateinit var errorRate: Preference
+-    private lateinit var activeDays: Preference
+-    private lateinit var currentStreak: Preference
+-    private lateinit var longestStreak: Preference
+-    private lateinit var bestDay: Preference
+-    private lateinit var since: Preference
+-
+-    private val recentDayPreferences = ArrayList<Preference>(RECENT_DAY_COUNT)
+-
+     private lateinit var palettePreference: HeatmapPalettePreference
+     private lateinit var customColorPreference: Preference
+     private lateinit var trackingPreference: SwitchPreferenceCompat
+@@ -69,25 +39,6 @@ class TypingStatsFragment : PaddingPreferenceFragment() {
+         TypingStatsManager.refresh()
+ 
+         val screen = preferenceManager.createPreferenceScreen(ctx)
+-        recentDayPreferences.clear()
+-
+-        screen.addCategory(R.string.stats_ui_overview) {
+-            totalCharacters = addValueRow(R.string.stats_ui_total_chars)
+-            corrections = addValueRow(R.string.stats_ui_corrections)
+-            accuracy = addValueRow(R.string.stats_ui_accuracy)
+-            errorRate = addValueRow(R.string.stats_ui_error_rate)
+-            activeDays = addValueRow(R.string.stats_ui_active_days)
+-            currentStreak = addValueRow(R.string.stats_ui_current_streak)
+-            longestStreak = addValueRow(R.string.stats_ui_longest_streak)
+-            bestDay = addValueRow(R.string.stats_ui_best_day)
+-            since = addValueRow(R.string.stats_ui_since)
+-        }
+-
+-        screen.addCategory(R.string.stats_ui_recent_7_days) {
+-            repeat(RECENT_DAY_COUNT) {
+-                recentDayPreferences.add(addValueRow(R.string.stats_ui_today))
+-            }
+-        }
+ 
+         screen.addCategory(R.string.stats_ui_appearance) {
+             palettePreference = HeatmapPalettePreference(ctx)
+@@ -130,15 +81,6 @@ class TypingStatsFragment : PaddingPreferenceFragment() {
+             }
+             addPreference(trackingPreference)
+ 
+-            addPreference(Preference(ctx).apply {
+-                isPersistent = false
+-                isSelectable = false
+-                isSingleLineTitle = false
+-                isIconSpaceReserved = false
+-                setTitle(R.string.stats_ui_privacy_title)
+-                setSummary(R.string.stats_ui_privacy_summary)
+-            })
+-
+             addPreference(Preference(ctx).apply {
+                 isPersistent = false
+                 isSingleLineTitle = false
+@@ -152,92 +94,9 @@ class TypingStatsFragment : PaddingPreferenceFragment() {
+         }
+ 
+         preferenceScreen = screen
+-        render(TypingStatsManager.snapshot.value)
+-    }
+-
+-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+-        super.onViewCreated(view, savedInstanceState)
+-        viewLifecycleOwner.lifecycleScope.launch {
+-            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+-                TypingStatsManager.snapshot.collect { render(it) }
+-            }
+-        }
+-    }
+-
+-    /**
+-     * Push [snapshot] into the preference rows.
+-     *
+-     * Called before the screen is attached (from [onCreatePreferences]) as well, so every access
+-     * to a preference field must be guarded.
+-     */
+-    private fun render(snapshot: TypingStatsSnapshot) {
+-        if (!::totalCharacters.isInitialized) return
+-        val hasData = snapshot.totalCharacters > 0L
+-
+-        totalCharacters.summary = charsText(snapshot.totalCharacters)
+-        corrections.summary = quantityString(
+-            R.plurals.stats_ui_corrections_count,
+-            snapshot.totalCorrections,
+-            formatCount(snapshot.totalCorrections)
+-        )
+-        accuracy.summary = if (hasData) formatPercent(snapshot.accuracy) else noData()
+-        errorRate.summary = if (hasData) formatPercent(snapshot.errorRate) else noData()
+-        activeDays.summary = quantityString(
+-            R.plurals.stats_ui_days_count,
+-            snapshot.activeDays.toLong(),
+-            formatCount(snapshot.activeDays.toLong())
+-        )
+-        currentStreak.summary = quantityString(
+-            R.plurals.stats_ui_days_count,
+-            snapshot.currentStreak.toLong(),
+-            formatCount(snapshot.currentStreak.toLong())
+-        )
+-        longestStreak.summary = quantityString(
+-            R.plurals.stats_ui_days_count,
+-            snapshot.longestStreak.toLong(),
+-            formatCount(snapshot.longestStreak.toLong())
+-        )
+-        bestDay.summary = snapshot.bestDay?.let { day ->
+-            getString(
+-                R.string.stats_ui_best_day_summary,
+-                formatIsoDate(day.date),
+-                charsText(day.characters)
+-            )
+-        } ?: noData()
+-        since.summary = formatStartDate(snapshot.startTime)
+-
+-        renderRecentDays(snapshot)
+-
+-        if (::trackingPreference.isInitialized) {
+-            val enabled = statsPrefs.enabled.getValue()
+-            // setChecked() persists, so only touch it when it actually differs
+-            if (trackingPreference.isChecked != enabled) {
+-                trackingPreference.isChecked = enabled
+-            }
+-        }
+         updateCustomColor()
+     }
+ 
+-    private fun renderRecentDays(snapshot: TypingStatsSnapshot) {
+-        val today = LocalDate.now()
+-        val statsByDate = snapshot.days.associateBy { it.date }
+-        recentDayPreferences.forEachIndexed { index, row ->
+-            val date = today.minusDays((RECENT_DAY_COUNT - 1 - index).toLong())
+-            val dateText = formatDateWithWeekday(date)
+-            row.title = if (date == today) {
+-                "${getString(R.string.stats_ui_today)} · $dateText"
+-            } else {
+-                dateText
+-            }
+-            val stat = statsByDate[date.toString()]
+-            row.summary = if (stat == null || stat.characters <= 0L) {
+-                noData()
+-            } else {
+-                daySummaryText(stat.characters, stat.corrections)
+-            }
+-        }
+-    }
+-
+     private fun updateCustomColor() {
+         if (!::customColorPreference.isInitialized) return
+         val color = statsPrefs.customColor.getValue()
+@@ -254,74 +113,10 @@ class TypingStatsFragment : PaddingPreferenceFragment() {
+             .setPositiveButton(R.string.stats_ui_reset) { _, _ ->
+                 TypingStatsManager.reset()
+                 // reset() publishes the empty snapshot itself; refresh() covers a concurrent
+-                // flush race and keeps the "since" anchor up to date.
++                // flush race and keeps the tracking anchor up to date.
+                 TypingStatsManager.refresh()
+                 ctx.toast(R.string.stats_ui_reset_done)
+             }
+             .show()
+     }
+-
+-    private fun PreferenceGroup.addValueRow(@StringRes titleRes: Int): Preference =
+-        valueRow(titleRes).also { addPreference(it) }
+-
+-    private fun valueRow(@StringRes titleRes: Int): Preference =
+-        Preference(requireContext()).apply {
+-            isPersistent = false
+-            isSelectable = false
+-            isSingleLineTitle = false
+-            isIconSpaceReserved = false
+-            setTitle(titleRes)
+-            setSummary(R.string.stats_ui_no_data)
+-        }
+-
+-    private fun noData(): String = getString(R.string.stats_ui_no_data)
+-
+-    private fun formatCount(value: Long): String =
+-        NumberFormat.getIntegerInstance(Locale.getDefault()).format(value)
+-
+-    private fun formatPercent(fraction: Float): String =
+-        String.format(Locale.getDefault(), "%.1f%%", fraction * 100f)
+-
+-    private fun quantityString(@PluralsRes id: Int, value: Long, formatted: String): String =
+-        resources.getQuantityString(
+-            id,
+-            value.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(),
+-            formatted
+-        )
+-
+-    private fun charsText(count: Long): String = quantityString(
+-        R.plurals.stats_ui_chars_count, count, formatCount(count)
+-    )
+-
+-    private fun correctionsText(count: Long): String = quantityString(
+-        R.plurals.stats_ui_corrections_count, count, formatCount(count)
+-    )
+-
+-    /** "N characters · M corrections", both pluralised independently. */
+-    private fun daySummaryText(characters: Long, corrections: Long): String =
+-        charsText(characters) + " · " + correctionsText(corrections)
+-
+-    private fun formatDate(date: LocalDate): String = date.format(
+-        DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(Locale.getDefault())
+-    )
+-
+-    private fun formatDateWithWeekday(date: LocalDate): String {
+-        val weekday = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.getDefault())
+-        return "${formatDate(date)} · $weekday"
+-    }
+-
+-    private fun formatIsoDate(raw: String): String =
+-        runCatching { LocalDate.parse(raw) }.getOrNull()?.let(::formatDate) ?: raw
+-
+-    private fun formatStartDate(startTime: Long): String {
+-        if (startTime <= 0L) return noData()
+-        // Be forgiving about values stored as seconds instead of epoch millis.
+-        val millis = if (startTime < 100_000_000_000L) startTime * 1_000L else startTime
+-        val date = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
+-        return formatDate(date)
+-    }
+-
+-    companion object {
+-        private const val RECENT_DAY_COUNT = 7
+-    }
+ }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt
+index c056b854..6b6c22ee 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt
+@@ -12,6 +12,7 @@ import android.graphics.Bitmap
+ import android.graphics.BitmapFactory
+ import android.graphics.Rect
+ import android.graphics.drawable.BitmapDrawable
++import android.graphics.drawable.GradientDrawable
+ import android.net.Uri
+ import android.os.Bundle
+ import android.os.Parcelable
+@@ -20,6 +21,7 @@ import android.view.MenuItem
+ import android.view.View
+ import android.view.ViewGroup
+ import android.webkit.MimeTypeMap
++import android.widget.FrameLayout
+ import android.widget.SeekBar
+ import androidx.activity.addCallback
+ import androidx.activity.enableEdgeToEdge
+@@ -68,6 +70,7 @@ import splitties.views.dsl.constraintlayout.startOfParent
+ import splitties.views.dsl.constraintlayout.topOfParent
+ import splitties.views.dsl.constraintlayout.topToTopOf
+ import splitties.views.dsl.core.add
++import splitties.views.dsl.core.frameLayout
+ import splitties.views.dsl.core.matchParent
+ import splitties.views.dsl.core.seekBar
+ import splitties.views.dsl.core.textView
+@@ -112,6 +115,28 @@ class CustomThemeActivity : AppCompatActivity() {
+ 
+     private lateinit var previewUi: KeyboardPreviewUi
+ 
++    /**
++     * Dark "stage" behind the keyboard preview, so custom themes are judged against a dark
++     * backdrop instead of the (light / primary colored) activity surface.
++     *
++     * Only vertical padding is used: [KeyboardPreviewUi] lays itself out at
++     * `DisplayMetrics.widthPixels`, so horizontal padding would clip the preview instead of
++     * insetting it.
++     */
++    private val previewStage by lazy {
++        val stageBackground = GradientDrawable().apply {
++            shape = GradientDrawable.RECTANGLE
++            setColor(color(R.color.theme_preview_background))
++            cornerRadius = dp(12f)
++        }
++        frameLayout {
++            background = stageBackground
++            topPadding = dp(12)
++            bottomPadding = dp(12)
++            add(previewUi.root, FrameLayout.LayoutParams(wrapContent, wrapContent))
++        }
++    }
++
+     private fun createTextView(@StringRes string: Int? = null, ripple: Boolean = false) = textView {
+         if (string != null) {
+             setText(string)
+@@ -155,14 +180,14 @@ class CustomThemeActivity : AppCompatActivity() {
+         val itemMargin = dp(30)
+         constraintLayout {
+             bottomPadding = dp(24)
+-            add(previewUi.root, lParams(wrapContent, wrapContent) {
++            add(previewStage, lParams(wrapContent, wrapContent) {
+                 topOfParent()
+                 centerHorizontally()
+                 above(cropLabel, dp(8))
+                 verticalChainStyle = packed
+             })
+             add(cropLabel, lParams(matchConstraints, lineHeight) {
+-                below(previewUi.root)
++                below(previewStage)
+                 centerHorizontally(itemMargin)
+                 above(variantLabel)
+             })
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
+index 5011c9d4..1ab562b3 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
+@@ -4,7 +4,6 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main.settings.theme
+ 
+-import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.os.Build
+ import android.os.Bundle
+ import android.view.LayoutInflater
+@@ -22,7 +21,7 @@ import kotlinx.coroutines.launch
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.data.theme.ThemeManager
+ import splitties.dimensions.dp
+-import splitties.resources.styledColor
++import splitties.resources.color
+ import splitties.views.backgroundColor
+ import splitties.views.dsl.constraintlayout.below
+ import splitties.views.dsl.constraintlayout.bottomOfParent
+@@ -65,7 +64,16 @@ class ThemeFragment : Fragment() {
+             elevation = dp(4f)
+         }
+ 
+-        tabLayout = TabLayout(this)
++        tabLayout = TabLayout(this).apply {
++            // The preview stage is always dark, so keep the tab strip on the same dark
++            // backdrop and use light on-dark text/indicator regardless of the app mode.
++            backgroundColor = color(R.color.theme_preview_background)
++            setTabTextColors(
++                color(R.color.theme_preview_foreground_muted),
++                color(R.color.theme_preview_foreground)
++            )
++            setSelectedTabIndicatorColor(color(R.color.theme_preview_foreground))
++        }
+ 
+         viewPager = ViewPager2(this).apply {
+             adapter = object : FragmentStateAdapter(this@ThemeFragment) {
+@@ -96,7 +104,10 @@ class ThemeFragment : Fragment() {
+                 centerHorizontally()
+                 bottomOfParent()
+             })
+-            backgroundColor = styledColorCompat(android.R.attr.colorPrimary)
++            // Explicit dark background instead of ?attr/colorPrimary: the preview must not
++            // follow the (pastel / dynamic) app surface, otherwise dark keyboard themes and
++            // their wallpapers are hard to judge and clash with MD3 surfaces.
++            backgroundColor = color(R.color.theme_preview_background)
+             elevation = dp(4f)
+         }
+ 
+diff --git a/app/src/main/res/drawable/bg_heatmap_card.xml b/app/src/main/res/drawable/bg_heatmap_card.xml
+index dd86ae22..bc36f404 100644
+--- a/app/src/main/res/drawable/bg_heatmap_card.xml
++++ b/app/src/main/res/drawable/bg_heatmap_card.xml
+@@ -1,13 +1,19 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- Rounded card behind the typing heatmap. Theme attributes keep it readable in light and dark. -->
++<!--
++  Rounded box behind the typing heatmap.
++
++  The fill is one step above the page surface (colorSurfaceContainerLow over colorSurface), so
++  the card sits on the same background as the rest of the home page while still reading as a
++  distinct rounded box; the hairline outline keeps the edge visible in both light and dark.
++-->
+ <shape xmlns:android="http://schemas.android.com/apk/res/android"
+     android:shape="rectangle">
+ 
+-    <solid android:color="?attr/colorBackgroundFloating" />
++    <solid android:color="?attr/colorSurfaceContainerLow" />
+ 
+-    <corners android:radius="14dp" />
++    <corners android:radius="16dp" />
+ 
+     <stroke
+         android:width="1dp"
+-        android:color="?attr/colorControlHighlight" />
++        android:color="?attr/colorOutlineVariant" />
+ </shape>
+diff --git a/app/src/main/res/drawable/bg_heatmap_stat_chip.xml b/app/src/main/res/drawable/bg_heatmap_stat_chip.xml
+index 8bd071c2..dd417259 100644
+--- a/app/src/main/res/drawable/bg_heatmap_stat_chip.xml
++++ b/app/src/main/res/drawable/bg_heatmap_stat_chip.xml
+@@ -1,9 +1,12 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- Small pill behind a headline metric (characters / accuracy / streak). -->
++<!--
++  Small pill behind a headline metric (characters / accuracy / streak).
++  One step above the heatmap card (colorSurfaceContainerHigh) so the numbers stay legible on it.
++-->
+ <shape xmlns:android="http://schemas.android.com/apk/res/android"
+     android:shape="rectangle">
+ 
+-    <solid android:color="?attr/colorControlHighlight" />
++    <solid android:color="?attr/colorSurfaceContainerHigh" />
+ 
+     <corners android:radius="12dp" />
+ </shape>
+diff --git a/app/src/main/res/values-zh-rCN/strings_stats_ui.xml b/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
+index d0dbff03..3e025e89 100644
+--- a/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
++++ b/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
+@@ -3,22 +3,6 @@
+ <resources>
+     <string name="stats_ui_title">统计与热力图</string>
+ 
+-    <!-- Overview -->
+-    <string name="stats_ui_overview">概览</string>
+-    <string name="stats_ui_total_chars">累计字数</string>
+-    <string name="stats_ui_corrections">修正字数</string>
+-    <string name="stats_ui_accuracy">正确率</string>
+-    <string name="stats_ui_error_rate">错误率</string>
+-    <string name="stats_ui_active_days">活跃天数</string>
+-    <string name="stats_ui_current_streak">当前连续</string>
+-    <string name="stats_ui_longest_streak">最长连续</string>
+-    <string name="stats_ui_best_day">最佳单日</string>
+-    <string name="stats_ui_since">开始统计于</string>
+-
+-    <!-- Last 7 days -->
+-    <string name="stats_ui_recent_7_days">最近 7 天</string>
+-    <string name="stats_ui_today">今天</string>
+-
+     <!-- Appearance -->
+     <string name="stats_ui_appearance">外观</string>
+     <string name="stats_ui_palette">配色方案</string>
+@@ -27,31 +11,15 @@
+     <!-- Data & privacy -->
+     <string name="stats_ui_data_privacy">数据与隐私</string>
+     <string name="stats_ui_tracking">记录输入统计</string>
+-    <string name="stats_ui_tracking_summary">仅保存汇总计数，关闭后将暂停记录</string>
+-    <string name="stats_ui_privacy_title">隐私说明</string>
+-    <string name="stats_ui_privacy_summary">仅在本地保存汇总计数，绝不保存任何输入内容。</string>
++    <string name="stats_ui_tracking_summary">仅保存汇总计数，不保存输入内容，关闭即暂停</string>
+     <string name="stats_ui_reset">重置统计</string>
+     <string name="stats_ui_reset_title">重置统计？</string>
+     <string name="stats_ui_reset_message">将删除所有已记录的统计数据，并从今天重新计算统计起始日期。此操作无法撤销。</string>
+     <string name="stats_ui_reset_done">统计已重置</string>
+ 
+-    <!-- Values and units -->
+-    <string name="stats_ui_no_data">—</string>
+-    <plurals name="stats_ui_chars_count">
+-        <item quantity="other">%1$s 字</item>
+-    </plurals>
+-    <plurals name="stats_ui_corrections_count">
+-        <item quantity="other">修正 %1$s 次</item>
+-    </plurals>
+-    <plurals name="stats_ui_days_count">
+-        <item quantity="other">%1$s 天</item>
+-    </plurals>
+-    <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
+-
+     <!-- Custom color dialog -->
+     <string name="stats_ui_color_dialog_title">选择自定义颜色</string>
+     <string name="stats_ui_color_preview">预览</string>
+     <string name="stats_ui_color_hex_hint">#RRGGBB 或 #AARRGGBB</string>
+     <string name="stats_ui_color_invalid">请输入有效的十六进制颜色，例如 #2DA44E</string>
+-    <string name="stats_ui_color_custom">自定义</string>
+-</resources>
++</resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-zh-rTW/strings_stats_ui.xml b/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
+index f70f7c27..fe532af8 100644
+--- a/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
++++ b/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
+@@ -3,22 +3,6 @@
+ <resources>
+     <string name="stats_ui_title">統計與熱力圖</string>
+ 
+-    <!-- Overview -->
+-    <string name="stats_ui_overview">總覽</string>
+-    <string name="stats_ui_total_chars">累計字數</string>
+-    <string name="stats_ui_corrections">修正字數</string>
+-    <string name="stats_ui_accuracy">正確率</string>
+-    <string name="stats_ui_error_rate">錯誤率</string>
+-    <string name="stats_ui_active_days">活躍天數</string>
+-    <string name="stats_ui_current_streak">目前連續</string>
+-    <string name="stats_ui_longest_streak">最長連續</string>
+-    <string name="stats_ui_best_day">最佳單日</string>
+-    <string name="stats_ui_since">開始統計於</string>
+-
+-    <!-- Last 7 days -->
+-    <string name="stats_ui_recent_7_days">最近 7 天</string>
+-    <string name="stats_ui_today">今天</string>
+-
+     <!-- Appearance -->
+     <string name="stats_ui_appearance">外觀</string>
+     <string name="stats_ui_palette">配色方案</string>
+@@ -27,31 +11,15 @@
+     <!-- Data & privacy -->
+     <string name="stats_ui_data_privacy">資料與隱私</string>
+     <string name="stats_ui_tracking">記錄輸入統計</string>
+-    <string name="stats_ui_tracking_summary">僅儲存彙總計數，關閉後將暫停記錄</string>
+-    <string name="stats_ui_privacy_title">隱私說明</string>
+-    <string name="stats_ui_privacy_summary">僅在本機儲存彙總計數，絕不儲存任何輸入內容。</string>
++    <string name="stats_ui_tracking_summary">僅儲存彙總計數，不儲存輸入內容，關閉即暫停</string>
+     <string name="stats_ui_reset">重設統計</string>
+     <string name="stats_ui_reset_title">重設統計？</string>
+     <string name="stats_ui_reset_message">將刪除所有已記錄的統計資料，並從今天重新計算統計起始日期。此操作無法復原。</string>
+     <string name="stats_ui_reset_done">統計已重設</string>
+ 
+-    <!-- Values and units -->
+-    <string name="stats_ui_no_data">—</string>
+-    <plurals name="stats_ui_chars_count">
+-        <item quantity="other">%1$s 字</item>
+-    </plurals>
+-    <plurals name="stats_ui_corrections_count">
+-        <item quantity="other">修正 %1$s 次</item>
+-    </plurals>
+-    <plurals name="stats_ui_days_count">
+-        <item quantity="other">%1$s 天</item>
+-    </plurals>
+-    <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
+-
+     <!-- Custom color dialog -->
+     <string name="stats_ui_color_dialog_title">選擇自訂顏色</string>
+     <string name="stats_ui_color_preview">預覽</string>
+     <string name="stats_ui_color_hex_hint">#RRGGBB 或 #AARRGGBB</string>
+     <string name="stats_ui_color_invalid">請輸入有效的十六進位顏色，例如 #2DA44E</string>
+-    <string name="stats_ui_color_custom">自訂</string>
+-</resources>
++</resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values/colors.xml b/app/src/main/res/values/colors.xml
+index 6b0d6661..67763594 100644
+--- a/app/src/main/res/values/colors.xml
++++ b/app/src/main/res/values/colors.xml
+@@ -7,4 +7,16 @@
+     <color name="blue_500">#2196F3</color>
+     <color name="grey_400">#BDBDBD</color>
+     <color name="grey_700">#616161</color>
++
++    <!--
++      Dark stage behind the keyboard preview (theme page and custom theme editor).
++      Deliberately an explicit near-black neutral instead of a theme attribute: the preview
++      must look the same in app light mode, dark mode and with any dynamic color palette,
++      so that keyboard themes are judged against a dark backdrop rather than a pastel surface.
++    -->
++    <color name="theme_preview_background">#1B1B1F</color>
++    <!-- Light on-dark foreground for labels / selected tabs drawn on the preview stage. -->
++    <color name="theme_preview_foreground">#E6E1E5</color>
++    <!-- Muted on-dark foreground for unselected tabs (still >= 7:1 against the stage). -->
++    <color name="theme_preview_foreground_muted">#CAC4D0</color>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values/strings_stats_ui.xml b/app/src/main/res/values/strings_stats_ui.xml
+index fe19fc58..69c590b2 100644
+--- a/app/src/main/res/values/strings_stats_ui.xml
++++ b/app/src/main/res/values/strings_stats_ui.xml
+@@ -3,22 +3,6 @@
+ <resources>
+     <string name="stats_ui_title">Statistics &amp; heatmap</string>
+ 
+-    <!-- Overview -->
+-    <string name="stats_ui_overview">Overview</string>
+-    <string name="stats_ui_total_chars">Total characters</string>
+-    <string name="stats_ui_corrections">Corrected characters</string>
+-    <string name="stats_ui_accuracy">Accuracy</string>
+-    <string name="stats_ui_error_rate">Error rate</string>
+-    <string name="stats_ui_active_days">Active days</string>
+-    <string name="stats_ui_current_streak">Current streak</string>
+-    <string name="stats_ui_longest_streak">Longest streak</string>
+-    <string name="stats_ui_best_day">Best day</string>
+-    <string name="stats_ui_since">Tracking since</string>
+-
+-    <!-- Last 7 days -->
+-    <string name="stats_ui_recent_7_days">Last 7 days</string>
+-    <string name="stats_ui_today">Today</string>
+-
+     <!-- Appearance -->
+     <string name="stats_ui_appearance">Appearance</string>
+     <string name="stats_ui_palette">Color palette</string>
+@@ -27,34 +11,15 @@
+     <!-- Data & privacy -->
+     <string name="stats_ui_data_privacy">Data &amp; privacy</string>
+     <string name="stats_ui_tracking">Record typing statistics</string>
+-    <string name="stats_ui_tracking_summary">Stores aggregated counts only; turning this off pauses recording</string>
+-    <string name="stats_ui_privacy_title">Privacy</string>
+-    <string name="stats_ui_privacy_summary">Only aggregated counts are stored locally. The text you type is never saved.</string>
++    <string name="stats_ui_tracking_summary">Counts only, never text; off pauses recording</string>
+     <string name="stats_ui_reset">Reset statistics</string>
+     <string name="stats_ui_reset_title">Reset statistics?</string>
+     <string name="stats_ui_reset_message">All recorded statistics will be deleted and the tracking start date restarts from today. This cannot be undone.</string>
+     <string name="stats_ui_reset_done">Statistics reset</string>
+ 
+-    <!-- Values and units -->
+-    <string name="stats_ui_no_data">—</string>
+-    <plurals name="stats_ui_chars_count">
+-        <item quantity="one">%1$s character</item>
+-        <item quantity="other">%1$s characters</item>
+-    </plurals>
+-    <plurals name="stats_ui_corrections_count">
+-        <item quantity="one">%1$s correction</item>
+-        <item quantity="other">%1$s corrections</item>
+-    </plurals>
+-    <plurals name="stats_ui_days_count">
+-        <item quantity="one">%1$s day</item>
+-        <item quantity="other">%1$s days</item>
+-    </plurals>
+-    <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
+-
+     <!-- Custom color dialog -->
+     <string name="stats_ui_color_dialog_title">Pick a custom color</string>
+     <string name="stats_ui_color_preview">Preview</string>
+     <string name="stats_ui_color_hex_hint">#RRGGBB or #AARRGGBB</string>
+     <string name="stats_ui_color_invalid">Enter a valid hex color, for example #2DA44E</string>
+-    <string name="stats_ui_color_custom">Custom</string>
+-</resources>
++</resources>
+\ No newline at end of file

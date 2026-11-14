@@ -10,7 +10,7 @@
 #   EXPENSES_DIR       default: <repo>/../RecurringExpenseTracker
 #   FCITX5_DIR         default: <repo>/../fcitx5-android
 #   FCITX5_PATCHES_DIR default: <repo>/../.toolchain/tmp/fcitx5-patches
-#   FCITX5_BRANCH      default: feat/rime-sync-manager
+#   FCITX5_BRANCH      default: feat/typing-heatmap
 #   FCITX5_BASE        default: master
 #
 # When a working tree has no .patchwork/patches (for example because the
@@ -18,7 +18,7 @@
 # branch with `git archive`, so the clones themselves are never modified.
 #
 # fcitx5-android has no .patchwork/ directory: its queue is exported with
-# `git format-patch master..feat/rime-sync-manager` from the authoring clone,
+# `git format-patch master..feat/typing-heatmap` from the authoring clone,
 # or copied from the staged directory when that clone is not available.
 set -euo pipefail
 
@@ -27,7 +27,7 @@ SCREENTIME_DIR="${SCREENTIME_DIR:-$ROOT/../ScreenTime}"
 EXPENSES_DIR="${EXPENSES_DIR:-$ROOT/../RecurringExpenseTracker}"
 FCITX5_DIR="${FCITX5_DIR:-$ROOT/../fcitx5-android}"
 FCITX5_PATCHES_DIR="${FCITX5_PATCHES_DIR:-$ROOT/../.toolchain/tmp/fcitx5-patches}"
-FCITX5_BRANCH="${FCITX5_BRANCH:-feat/rime-sync-manager}"
+FCITX5_BRANCH="${FCITX5_BRANCH:-feat/typing-heatmap}"
 FCITX5_BASE="${FCITX5_BASE:-master}"
 
 usage() {
@@ -48,7 +48,7 @@ Environment:
   FCITX5_PATCHES_DIR staged fcitx5 queue used when the clone is missing
                      (default: ../.toolchain/tmp/fcitx5-patches)
   FCITX5_BRANCH      feature branch holding the fcitx5 queue
-                     (default: feat/rime-sync-manager)
+                     (default: feat/typing-heatmap)
   FCITX5_BASE        upstream base of that branch (default: master)
 EOF
 }

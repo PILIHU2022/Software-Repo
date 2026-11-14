@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 12:07:45 +0800
+Subject: [PATCH] fix(app): pluralize statistics counts and clarify correction
+ summaries
+
+The statistics screen printed "1 corrections" and "1 days" in English.
+Use quantity strings for characters, corrections and days, and build the
+per-day summary from the plural forms.
+---
+ .../settings/stats/TypingStatsFragment.kt     | 56 ++++++++++++++-----
+ .../res/values-zh-rCN/strings_stats_ui.xml    | 13 +++--
+ .../res/values-zh-rTW/strings_stats_ui.xml    | 13 +++--
+ app/src/main/res/values/strings_stats_ui.xml  | 16 ++++--
+ 4 files changed, 73 insertions(+), 25 deletions(-)
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
+index 3cc13ed4..6f8e2cae 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
+@@ -6,6 +6,7 @@ package org.fcitx.fcitx5.android.ui.main.settings.stats
+ 
+ import android.os.Bundle
+ import android.view.View
++import androidx.annotation.PluralsRes
+ import androidx.annotation.StringRes
+ import androidx.appcompat.app.AlertDialog
+ import androidx.lifecycle.Lifecycle
+@@ -173,20 +174,34 @@ class TypingStatsFragment : PaddingPreferenceFragment() {
+         if (!::totalCharacters.isInitialized) return
+         val hasData = snapshot.totalCharacters > 0L
+ 
+-        totalCharacters.summary =
+-            getString(R.string.stats_ui_chars_unit, formatCount(snapshot.totalCharacters))
+-        corrections.summary =
+-            getString(R.string.stats_ui_corrections_unit, snapshot.totalCorrections)
++        totalCharacters.summary = charsText(snapshot.totalCharacters)
++        corrections.summary = quantityString(
++            R.plurals.stats_ui_corrections_count,
++            snapshot.totalCorrections,
++            formatCount(snapshot.totalCorrections)
++        )
+         accuracy.summary = if (hasData) formatPercent(snapshot.accuracy) else noData()
+         errorRate.summary = if (hasData) formatPercent(snapshot.errorRate) else noData()
+-        activeDays.summary = getString(R.string.stats_ui_days_unit, snapshot.activeDays)
+-        currentStreak.summary = getString(R.string.stats_ui_days_unit, snapshot.currentStreak)
+-        longestStreak.summary = getString(R.string.stats_ui_days_unit, snapshot.longestStreak)
++        activeDays.summary = quantityString(
++            R.plurals.stats_ui_days_count,
++            snapshot.activeDays.toLong(),
++            formatCount(snapshot.activeDays.toLong())
++        )
++        currentStreak.summary = quantityString(
++            R.plurals.stats_ui_days_count,
++            snapshot.currentStreak.toLong(),
++            formatCount(snapshot.currentStreak.toLong())
++        )
++        longestStreak.summary = quantityString(
++            R.plurals.stats_ui_days_count,
++            snapshot.longestStreak.toLong(),
++            formatCount(snapshot.longestStreak.toLong())
++        )
+         bestDay.summary = snapshot.bestDay?.let { day ->
+             getString(
+                 R.string.stats_ui_best_day_summary,
+                 formatIsoDate(day.date),
+-                getString(R.string.stats_ui_chars_unit, formatCount(day.characters))
++                charsText(day.characters)
+             )
+         } ?: noData()
+         since.summary = formatStartDate(snapshot.startTime)
+@@ -218,11 +233,7 @@ class TypingStatsFragment : PaddingPreferenceFragment() {
+             row.summary = if (stat == null || stat.characters <= 0L) {
+                 noData()
+             } else {
+-                getString(
+-                    R.string.stats_ui_day_summary,
+-                    formatCount(stat.characters),
+-                    stat.corrections
+-                )
++                daySummaryText(stat.characters, stat.corrections)
+             }
+         }
+     }
+@@ -271,6 +282,25 @@ class TypingStatsFragment : PaddingPreferenceFragment() {
+     private fun formatPercent(fraction: Float): String =
+         String.format(Locale.getDefault(), "%.1f%%", fraction * 100f)
+ 
++    private fun quantityString(@PluralsRes id: Int, value: Long, formatted: String): String =
++        resources.getQuantityString(
++            id,
++            value.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(),
++            formatted
++        )
++
++    private fun charsText(count: Long): String = quantityString(
++        R.plurals.stats_ui_chars_count, count, formatCount(count)
++    )
++
++    private fun correctionsText(count: Long): String = quantityString(
++        R.plurals.stats_ui_corrections_count, count, formatCount(count)
++    )
++
++    /** "N characters · M corrections", both pluralised independently. */
++    private fun daySummaryText(characters: Long, corrections: Long): String =
++        charsText(characters) + " · " + correctionsText(corrections)
++
+     private fun formatDate(date: LocalDate): String = date.format(
+         DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(Locale.getDefault())
+     )
+diff --git a/app/src/main/res/values-zh-rCN/strings_stats_ui.xml b/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
+index f30068bb..d0dbff03 100644
+--- a/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
++++ b/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
+@@ -37,10 +37,15 @@
+ 
+     <!-- Values and units -->
+     <string name="stats_ui_no_data">—</string>
+-    <string name="stats_ui_chars_unit">%1$s 字</string>
+-    <string name="stats_ui_corrections_unit">%1$d 次</string>
+-    <string name="stats_ui_days_unit">%1$d 天</string>
+-    <string name="stats_ui_day_summary">%1$s 字 · 修正 %2$d 次</string>
++    <plurals name="stats_ui_chars_count">
++        <item quantity="other">%1$s 字</item>
++    </plurals>
++    <plurals name="stats_ui_corrections_count">
++        <item quantity="other">修正 %1$s 次</item>
++    </plurals>
++    <plurals name="stats_ui_days_count">
++        <item quantity="other">%1$s 天</item>
++    </plurals>
+     <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
+ 
+     <!-- Custom color dialog -->
+diff --git a/app/src/main/res/values-zh-rTW/strings_stats_ui.xml b/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
+index c52006b9..f70f7c27 100644
+--- a/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
++++ b/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
+@@ -37,10 +37,15 @@
+ 
+     <!-- Values and units -->
+     <string name="stats_ui_no_data">—</string>
+-    <string name="stats_ui_chars_unit">%1$s 字</string>
+-    <string name="stats_ui_corrections_unit">%1$d 次</string>
+-    <string name="stats_ui_days_unit">%1$d 天</string>
+-    <string name="stats_ui_day_summary">%1$s 字 · 修正 %2$d 次</string>
++    <plurals name="stats_ui_chars_count">
++        <item quantity="other">%1$s 字</item>
++    </plurals>
++    <plurals name="stats_ui_corrections_count">
++        <item quantity="other">修正 %1$s 次</item>
++    </plurals>
++    <plurals name="stats_ui_days_count">
++        <item quantity="other">%1$s 天</item>
++    </plurals>
+     <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
+ 
+     <!-- Custom color dialog -->
+diff --git a/app/src/main/res/values/strings_stats_ui.xml b/app/src/main/res/values/strings_stats_ui.xml
+index 0cc7dc71..fe19fc58 100644
+--- a/app/src/main/res/values/strings_stats_ui.xml
++++ b/app/src/main/res/values/strings_stats_ui.xml
+@@ -37,10 +37,18 @@
+ 
+     <!-- Values and units -->
+     <string name="stats_ui_no_data">—</string>
+-    <string name="stats_ui_chars_unit">%1$s characters</string>
+-    <string name="stats_ui_corrections_unit">%1$d corrections</string>
+-    <string name="stats_ui_days_unit">%1$d days</string>
+-    <string name="stats_ui_day_summary">%1$s characters · %2$d corrections</string>
++    <plurals name="stats_ui_chars_count">
++        <item quantity="one">%1$s character</item>
++        <item quantity="other">%1$s characters</item>
++    </plurals>
++    <plurals name="stats_ui_corrections_count">
++        <item quantity="one">%1$s correction</item>
++        <item quantity="other">%1$s corrections</item>
++    </plurals>
++    <plurals name="stats_ui_days_count">
++        <item quantity="one">%1$s day</item>
++        <item quantity="other">%1$s days</item>
++    </plurals>
+     <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
+ 
+     <!-- Custom color dialog -->

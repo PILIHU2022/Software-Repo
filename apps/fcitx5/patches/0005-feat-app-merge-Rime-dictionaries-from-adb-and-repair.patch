@@ -1,0 +1,588 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 7 Nov 2026 10:59:10 +0800
+Subject: [PATCH] feat(app): merge Rime dictionaries from adb and repair
+ sync_dir
+
+The Syncthing bridge only copied non-dictionary files, and a profile reset
+could drop sync_dir from installation.yaml, after which librime silently
+synced into the app-private rime/sync directory instead of the shared
+folder.
+
+* RimeProfileSync restores a missing sync_dir before comparing the staged
+  profile, so the shared folder is used again even after a fresh install.
+* RimeImportReceiver gains RIME_SYNC, which runs librime's
+  sync_user_data() through the Rime addon "sync" sub-config (the same path
+  as the schema-menu "Synchronize" item) without a visible keyboard.
+* RIME_IMPORT now merges dictionaries after applying the profile, so
+  *.userdb.txt staged next to the config files is picked up too.
+* tools/: PC push/pull script and a systemd user timer to drive both
+  actions over adb.
+
+Built as 0.1.3-patchwork / 11205 (PATCHWORK_REVISION=5).
+---
+ app/src/main/AndroidManifest.xml              |  10 +-
+ .../android/receiver/RimeImportReceiver.kt    |  97 +++++++-
+ .../fcitx5/android/utils/RimeProfileSync.kt   |  38 ++-
+ tools/install-rime-sync-systemd.sh            |  48 ++++
+ tools/rime-sync-android.sh                    | 226 ++++++++++++++++++
+ tools/systemd/rime-sync-android.service       |  15 ++
+ tools/systemd/rime-sync-android.timer         |  14 ++
+ 7 files changed, 434 insertions(+), 14 deletions(-)
+ create mode 100755 tools/install-rime-sync-systemd.sh
+ create mode 100755 tools/rime-sync-android.sh
+ create mode 100644 tools/systemd/rime-sync-android.service
+ create mode 100644 tools/systemd/rime-sync-android.timer
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 95b59579..f95ae9df 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -158,9 +158,12 @@
+             android:windowSoftInputMode="adjustResize" />
+ 
+         <!--
+-          Applies the Rime profile that Syncthing delivered to
+-          Download/Rime-Sync/Rime-Arch.  Gated by READ_INPUT_STATE, which adb
+-          shell holds, so ordinary apps cannot trigger it.
++          Headless bridge for the Syncthing Rime profile in
++          Download/Rime-Sync/Rime-Arch.  RIME_IMPORT copies the staged profile
++          into the Rime dir and redeploys; RIME_SYNC merges the dictionaries
++          (same code path as the "Synchronize" menu item).  Gated by
++          READ_INPUT_STATE, which adb shell holds, so ordinary apps cannot
++          trigger them.
+         -->
+         <receiver
+             android:name=".receiver.RimeImportReceiver"
+@@ -168,6 +171,7 @@
+             android:permission="android.permission.READ_INPUT_STATE">
+             <intent-filter>
+                 <action android:name="${applicationId}.action.RIME_IMPORT" />
++                <action android:name="${applicationId}.action.RIME_SYNC" />
+             </intent-filter>
+         </receiver>
+ 
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt b/app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt
+index ee478630..a2d589c4 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/receiver/RimeImportReceiver.kt
+@@ -8,44 +8,123 @@ import android.content.BroadcastReceiver
+ import android.content.Context
+ import android.content.Intent
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.withTimeoutOrNull
+ import org.fcitx.fcitx5.android.FcitxApplication
++import org.fcitx.fcitx5.android.daemon.FcitxDaemon
+ import org.fcitx.fcitx5.android.utils.RimeProfileSync
+ import timber.log.Timber
+ 
+ /**
+- * Applies the Rime profile staged by Syncthing in shared storage.
++ * Headless entry points for the Syncthing <-> Rime bridge.
+  *
+- * Protected by `android.permission.READ_INPUT_STATE` (held by shell/adb), so it
+- * can be triggered from a PC or a script:
++ * Both actions are protected by `android.permission.READ_INPUT_STATE` (held by
++ * shell/adb), so they can be triggered from a PC or a script but not by normal
++ * apps:
+  *
+  * ```
++ * # copy Download/Rime-Sync/Rime-Arch into the Rime dir and redeploy
+  * adb shell am broadcast \
+  *   -a org.fcitx.fcitx5.android.action.RIME_IMPORT \
+  *   -n org.fcitx.fcitx5.android/.receiver.RimeImportReceiver
+- * ```
+  *
+- * Fcitx restarts at the end, which makes Rime rebuild from the new files.
++ * # merge the dictionaries found in the shared sync directory
++ * # (same code path as "Synchronize" in the Rime schema menu)
++ * adb shell am broadcast \
++ *   -a org.fcitx.fcitx5.android.action.RIME_SYNC \
++ *   -n org.fcitx.fcitx5.android/.receiver.RimeImportReceiver
++ * ```
+  */
+ class RimeImportReceiver : BroadcastReceiver() {
+ 
+     override fun onReceive(context: Context, intent: Intent) {
+-        if (intent.action != ACTION) return
+-        val app = FcitxApplication.getInstance()
++        when (intent.action) {
++            ACTION_IMPORT -> importProfile()
++            ACTION_SYNC -> syncProfile()
++            else -> return
++        }
++    }
++
++    private fun importProfile() {
+         val pendingResult = goAsync()
+         Timber.i("RimeImportReceiver: apply staged profile")
+-        app.coroutineScope.launch {
++        FcitxApplication.getInstance().coroutineScope.launch {
+             try {
+                 val copied = RimeProfileSync.apply()
+                 Timber.i("RimeImportReceiver: done, wrote $copied file(s)")
+             } catch (e: Exception) {
+                 Timber.e(e, "RimeImportReceiver: failed")
+             } finally {
++                // The profile copy (and a possible redeploy) is the part the
++                // broadcast has to wait for; merging the dictionaries can take
++                // longer, so release the broadcast first.
+                 pendingResult.finish()
+             }
++            // Merging is also what imports the dictionary snapshots staged in
++            // the same folder (the profile copy deliberately skips *.userdb).
++            runCatching { syncRimeUserData(SYNC_AFTER_IMPORT_TIMEOUT_MS) }
++                .onFailure { Timber.w(it, "RimeImportReceiver: post-import sync failed") }
++        }
++    }
++
++    private fun syncProfile() {
++        val pendingResult = goAsync()
++        Timber.i("RimeImportReceiver: sync user data")
++        FcitxApplication.getInstance().coroutineScope.launch {
++            try {
++                syncRimeUserData(READY_TIMEOUT_MS)
++            } catch (e: Exception) {
++                Timber.e(e, "RimeImportReceiver: sync failed")
++            } finally {
++                pendingResult.finish()
++            }
++        }
++    }
++
++    /**
++     * Run librime's `sync_user_data()` through the Rime addon's `sync`
++     * sub-config, which is the same code path as the "Synchronize" item in the
++     * schema menu, but without needing a visible keyboard or input context.
++     *
++     * The daemon is started on demand; the wait is bounded so that a pending
++     * deployment cannot keep a broadcast alive past its timeout.
++     */
++    private suspend fun syncRimeUserData(timeoutMs: Long) {
++        val connection = FcitxDaemon.connect(CONNECTION_NAME)
++        try {
++            val requested = withTimeoutOrNull(timeoutMs) {
++                connection.runOnReady {
++                    setAddonSubConfig(RIME_ADDON, RIME_SYNC_SUBCONFIG)
++                }
++                true
++            }
++            if (requested == true) {
++                Timber.i("RimeImportReceiver: rime sync requested")
++            } else {
++                Timber.w("RimeImportReceiver: fcitx not ready, sync skipped")
++            }
++        } finally {
++            FcitxDaemon.disconnect(CONNECTION_NAME)
+         }
+     }
+ 
+     companion object {
+-        const val ACTION = "org.fcitx.fcitx5.android.action.RIME_IMPORT"
++        const val ACTION_IMPORT = "org.fcitx.fcitx5.android.action.RIME_IMPORT"
++        const val ACTION_SYNC = "org.fcitx.fcitx5.android.action.RIME_SYNC"
++
++        /** Backwards-compatible alias for the original import action. */
++        const val ACTION = ACTION_IMPORT
++
++        private const val CONNECTION_NAME = "rime-import-receiver"
++        private const val RIME_ADDON = "rime"
++        private const val RIME_SYNC_SUBCONFIG = "sync"
++
++        /** Fcitx needs a moment to start; never block a broadcast for longer. */
++        private const val READY_TIMEOUT_MS = 8_000L
++
++        /**
++         * A redeploy after a profile change can take minutes; the sync runs in
++         * the background after the broadcast has already been released.
++         */
++        private const val SYNC_AFTER_IMPORT_TIMEOUT_MS = 300_000L
+     }
+ }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt b/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt
+index b74185b8..46a3d384 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/utils/RimeProfileSync.kt
+@@ -62,12 +62,21 @@ object RimeProfileSync {
+         val src = stagingDir()
+         check(src.isDirectory) { "Staging folder not found: ${src.absolutePath}" }
+         val dst = rimeDir().apply { mkdirs() }
++        // A profile reset (fresh install, cleared app data, restored backup)
++        // recreates installation.yaml without sync_dir.  librime then writes
++        // its synced dictionaries into the app-private rime/sync directory
++        // instead of the folder shared with the PC, which looks like "sync
++        // does nothing".  Restore the pointer whenever it is missing.
++        val syncDirFixed = withContext(Dispatchers.IO) { ensureSyncDir(dst) }
+         val changes = withContext(Dispatchers.IO) { countChanges(src, dst) }
+-        if (changes == 0) {
++        if (changes == 0 && !syncDirFixed) {
+             Timber.i("RimeProfileSync: already up to date")
+             return 0
+         }
+-        Timber.i("RimeProfileSync: $changes changed file(s), ${src.absolutePath} -> ${dst.absolutePath}")
++        Timber.i(
++            "RimeProfileSync: $changes changed file(s) (sync_dir restored: $syncDirFixed), " +
++                "${src.absolutePath} -> ${dst.absolutePath}"
++        )
+         FcitxDaemon.stopFcitx()
+         var copied = 0
+         try {
+@@ -89,6 +98,31 @@ object RimeProfileSync {
+         return copied
+     }
+ 
++    /**
++     * Make sure `installation.yaml` points librime at the shared sync folder.
++     *
++     * The phone's own installation id must be preserved, so the file itself is
++     * never replaced: only a missing `sync_dir` key is appended.  The value is
++     * the parent of the staging folder (e.g. `Download/Rime-Sync`), which is
++     * where `RimeSyncUserData` looks for and writes back snapshots.
++     *
++     * @return true when the file was modified
++     */
++    private fun ensureSyncDir(dst: File): Boolean {
++        val sharedRoot = stagingDir().parentFile?.absolutePath ?: return false
++        val installation = File(dst, "installation.yaml")
++        if (!installation.isFile) return false
++        val text = runCatching { installation.readText() }.getOrNull() ?: return false
++        if (Regex("(?m)^\\s*sync_dir\\s*:").containsMatchIn(text)) return false
++        return runCatching {
++            val newline = if (text.endsWith("\n")) "" else "\n"
++            installation.appendText("$newline" + "sync_dir: \"$sharedRoot\"\n")
++            true
++        }.onFailure {
++            Timber.w(it, "RimeProfileSync: cannot update ${installation.absolutePath}")
++        }.getOrDefault(false)
++    }
++
+     private fun countChanges(src: File, dst: File): Int {
+         if (src.name in SKIP_TOP_LEVEL) return 0
+         if (isSkippedFile(src.name)) return 0
+diff --git a/tools/install-rime-sync-systemd.sh b/tools/install-rime-sync-systemd.sh
+new file mode 100755
+index 00000000..98eeb158
+--- /dev/null
++++ b/tools/install-rime-sync-systemd.sh
+@@ -0,0 +1,48 @@
++#!/usr/bin/env bash
++# Install the rime-sync-android user units.
++#
++# Run from a desktop terminal (a shell inside the DSH sandbox usually cannot
++# reach the user systemd bus):
++#
++#   fcitx5-android/tools/install-rime-sync-systemd.sh
++#
++# Copies both units into ~/.config/systemd/user.  If the user bus is reachable
++# the timer is enabled and started right away; otherwise a timers.target.wants
++# symlink is created so it starts with the next login.
++set -euo pipefail
++
++here=$(cd "$(dirname "$0")" && pwd)
++unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
++timer=rime-sync-android.timer
++
++mkdir -p "$unit_dir"
++install -m 644 "$here/systemd/rime-sync-android.service" "$unit_dir/"
++install -m 644 "$here/systemd/rime-sync-android.timer" "$unit_dir/"
++
++if command -v systemctl >/dev/null &&
++    systemctl --user daemon-reload 2>/dev/null &&
++    systemctl --user enable --now "$timer" 2>/dev/null; then
++    systemctl --user --no-pager status "$timer" || true
++    cat <<'EOF'
++
++Enabled. Check the next runs with:
++  systemctl --user list-timers rime-sync-android.timer
++  journalctl --user -u rime-sync-android.service -n 50
++Run one round by hand:
++  systemctl --user start rime-sync-android.service
++EOF
++    exit 0
++fi
++
++# No user bus (e.g. inside a container/sandbox): enable for the next login.
++mkdir -p "$unit_dir/timers.target.wants"
++ln -sfn "$unit_dir/$timer" "$unit_dir/timers.target.wants/$timer"
++cat <<EOF
++
++systemd user bus is not reachable from this shell; the units are installed in
++$unit_dir and the timer will start with the next login.
++
++To activate it now, run in a desktop terminal:
++  systemctl --user daemon-reload
++  systemctl --user start $timer
++EOF
+diff --git a/tools/rime-sync-android.sh b/tools/rime-sync-android.sh
+new file mode 100755
+index 00000000..9b8ed117
+--- /dev/null
++++ b/tools/rime-sync-android.sh
+@@ -0,0 +1,226 @@
++#!/usr/bin/env bash
++# rime-sync-android.sh — bridge the PC's merged Rime dictionary to Fcitx5 for
++# Android and bring the phone's snapshot back.
++#
++# The phone runs a patched Fcitx5 that understands two adb-triggerable actions:
++#   RIME_IMPORT  copy Download/Rime-Sync/Rime-Arch into the app Rime dir,
++#                redeploy if config files changed, then merge dictionaries
++#   RIME_SYNC    merge dictionaries only (same path as the "Synchronize" menu)
++#
++# Syncthing keeps the config mirror fresh but ignores *.userdb.txt, so the
++# merged dictionary produced by the PC (in Rime-Sync/Rime-Arch/) has to be
++# pushed over adb; this script does that and asks the phone to merge it.
++#
++# Usage:
++#   rime-sync-android.sh                 # push + import/sync + pull back
++#   rime-sync-android.sh --watch         # same, whenever the PC dict changes
++#   rime-sync-android.sh --no-pull       # push + import/sync only
++#   rime-sync-android.sh --no-import     # dictionary merge only
++#
++# Environment:
++#   ADB_SERIAL     device serial (default: the only connected device)
++#   RIME_SYNC_DIR  PC mirror of the phone's sync dir (default: ~/Useless/Rime-Sync)
++#
++# Exit status: 0 on success, 1 on configuration/connection errors.
++set -euo pipefail
++
++PKG=org.fcitx.fcitx5.android
++RECEIVER="$PKG/.receiver.RimeImportReceiver"
++ACTION_IMPORT="$PKG.action.RIME_IMPORT"
++ACTION_SYNC="$PKG.action.RIME_SYNC"
++
++PHONE_SYNC_ROOT="${PHONE_SYNC_ROOT:-/sdcard/Download/Rime-Sync}"
++PHONE_STAGING="$PHONE_SYNC_ROOT/Rime-Arch"
++LOCAL_SYNC="${RIME_SYNC_DIR:-$HOME/Useless/Rime-Sync}"
++LOCAL_STAGING="$LOCAL_SYNC/Rime-Arch"
++# Where the phone's snapshots are written back; same folder as the PC mirror by
++# default, so the PC's next Rime sync merges them.
++LOCAL_PULL="${RIME_PULL_DIR:-$LOCAL_SYNC}"
++
++WATCH=0
++DO_PULL=1
++DO_IMPORT=1
++
++while (($#)); do
++    case "$1" in
++        --watch) WATCH=1 ;;
++        --no-pull) DO_PULL=0 ;;
++        --no-import) DO_IMPORT=0 ;;
++        -h | --help)
++            sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
++            exit 0
++            ;;
++        *)
++            echo "unknown option: $1" >&2
++            exit 1
++            ;;
++    esac
++    shift
++done
++
++log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
++die() {
++    echo "error: $*" >&2
++    exit 1
++}
++
++adb_do() { adb -s "$ADB_SERIAL" "$@"; }
++
++# Same as adb_do, but bounded: without a device some adb commands block forever.
++adb_to() {
++    local seconds=$1
++    shift
++    if [[ -n "${ADB_SERIAL:-}" ]]; then
++        timeout "$seconds" adb -s "$ADB_SERIAL" "$@"
++    else
++        timeout "$seconds" adb "$@"
++    fi
++}
++
++# --- device -----------------------------------------------------------------
++
++resolve_device() {
++    if [[ -n "${ADB_SERIAL:-}" ]]; then
++        adb_do get-state >/dev/null 2>&1 || die "device '$ADB_SERIAL' is not connected"
++        return
++    fi
++    adb start-server >/dev/null 2>&1 || true
++    local serials i
++    for i in $(seq 1 10); do
++        # wireless debugging reconnects through mDNS, which takes a moment
++        serials=$(adb devices | awk 'NR > 1 && $2 == "device" { print $1 }')
++        [[ -n "$serials" ]] && break
++        sleep 2
++    done
++    [[ -n "$serials" ]] || die "no adb device; is wireless debugging on?"
++    if [[ $(grep -c . <<<"$serials") -gt 1 ]]; then
++        # One phone can be listed twice (mDNS name plus ip:port).  Both point at
++        # the same device, so prefer the mDNS transport and move on.
++        local mdns
++        mdns=$(grep -m1 '_adb-tls-connect\._tcp' <<<"$serials" || true)
++        if [[ -n "$mdns" && $(grep -c . <<<"$serials") -eq 2 ]]; then
++            serials=$mdns
++        else
++            die "more than one device, set ADB_SERIAL to one of: $(tr '\n' ' ' <<<"$serials")"
++        fi
++    fi
++    ADB_SERIAL=$serials
++}
++
++# --- push -------------------------------------------------------------------
++
++push_dictionaries() {
++    [[ -d "$LOCAL_STAGING" ]] || die "missing local folder: $LOCAL_STAGING"
++    shopt -s nullglob
++    local files=("$LOCAL_STAGING"/*.userdb.txt)
++    shopt -u nullglob
++    ((${#files[@]})) || {
++        log "no *.userdb.txt in $LOCAL_STAGING, nothing to push"
++        return 0
++    }
++    local pushed=0 f name local_md5 remote_md5
++    for f in "${files[@]}"; do
++        name=$(basename "$f")
++        local_md5=$(md5sum "$f" | cut -d' ' -f1)
++        remote_md5=$(adb_do shell "md5sum '$PHONE_STAGING/$name' 2>/dev/null" | awk '{ print $1 }')
++        if [[ "$local_md5" == "$remote_md5" ]]; then
++            continue
++        fi
++        adb_do push "$f" "$PHONE_STAGING/$name" >/dev/null
++        log "pushed $name"
++        pushed=$((pushed + 1))
++    done
++    ((pushed)) || log "phone already has the current dictionary"
++}
++
++# --- ask the phone to merge -------------------------------------------------
++
++broadcast() {
++    local action=$1 attempt
++    # Wireless debugging reconnects now and then; retry instead of failing the
++    # whole round on a transient "device offline".
++    for attempt in 1 2 3 4 5; do
++        if adb_do shell am broadcast -a "$action" -n "$RECEIVER" >/dev/null 2>&1; then
++            return 0
++        fi
++        log "broadcast $action failed (attempt $attempt), retrying"
++        sleep 3
++        adb_to 15 wait-for-device >/dev/null 2>&1 || true
++    done
++    die "broadcast $action failed"
++}
++
++wait_for_sync() {
++    local deadline=$((SECONDS + 600))
++    local started=0
++    while ((SECONDS < deadline)); do
++        local buffer
++        buffer=$(adb_to 20 logcat -d -s rime.fcitx-rime 2>/dev/null || true)
++        if ((started == 0)) && grep -q 'synchronize user dict' <<<"$buffer"; then
++            started=1
++        fi
++        if ((started)) && grep -q 'tasks ran' <<<"$buffer"; then
++            return 0
++        fi
++        sleep 3
++    done
++    log "warning: no sync completion seen in logcat within 10 minutes"
++}
++
++request_sync() {
++    adb_to 15 logcat -c >/dev/null 2>&1 || true
++    if ((DO_IMPORT)); then
++        broadcast "$ACTION_IMPORT" # applies configs and merges dictionaries
++    else
++        broadcast "$ACTION_SYNC"
++    fi
++    wait_for_sync
++}
++
++# --- pull the phone's snapshot back ----------------------------------------
++
++pull_snapshots() {
++    ((DO_PULL)) || return 0
++    local name file
++    local -a dirs=()
++    # Read the listing first: adb inherits the loop's stdin and would otherwise
++    # swallow the remaining lines.
++    mapfile -t dirs < <(adb_do shell "ls '$PHONE_SYNC_ROOT' 2>/dev/null" | tr -d '\r')
++    for dir in "${dirs[@]}"; do
++        name=$(basename "$dir")
++        [[ "$name" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue
++        mkdir -p "$LOCAL_PULL/$name"
++        local remote_files=()
++        mapfile -t remote_files < <(
++            adb_do shell "ls '$PHONE_SYNC_ROOT/$name' 2>/dev/null" |
++                tr -d '\r' | grep -E '\.userdb\.txt$' || true
++        )
++        for file in "${remote_files[@]}"; do
++            adb_do pull "$PHONE_SYNC_ROOT/$name/$file" "$LOCAL_PULL/$name/$file" >/dev/null 2>&1 || true
++        done
++        log "pulled $name snapshot"
++    done
++}
++
++# --- one round --------------------------------------------------------------
++
++sync_once() {
++    resolve_device
++    push_dictionaries
++    request_sync
++    pull_snapshots
++}
++
++if ((WATCH)); then
++    [[ -d "$LOCAL_STAGING" ]] || die "missing local folder: $LOCAL_STAGING"
++    command -v inotifywait >/dev/null || die "watch mode needs inotify-tools"
++    log "watching $LOCAL_STAGING (Ctrl-C to stop)"
++    sync_once
++    while inotifywait -q -e close_write,create,moved_to --include '\.userdb\.txt$' \
++        "$LOCAL_STAGING" >/dev/null 2>&1; do
++        sleep 1 # let the writer finish
++        sync_once || log "sync round failed, still watching"
++    done
++else
++    sync_once
++fi
+diff --git a/tools/systemd/rime-sync-android.service b/tools/systemd/rime-sync-android.service
+new file mode 100644
+index 00000000..4aed0a97
+--- /dev/null
++++ b/tools/systemd/rime-sync-android.service
+@@ -0,0 +1,15 @@
++[Unit]
++Description=Push merged Rime dictionary to Fcitx5 for Android
++Documentation=file://%h/Projects/GitHub_APPS/fcitx5-android/tools/rime-sync-android.sh
++After=graphical-session.target
++Wants=graphical-session.target
++
++[Service]
++Type=oneshot
++# The phone must be reachable through wireless debugging (same LAN, screen
++# awake).  Failures are harmless: the timer simply tries again next round.
++ExecStart=%h/Projects/GitHub_APPS/fcitx5-android/tools/rime-sync-android.sh
++# Device serial is auto-detected when exactly one adb device is connected.
++# Environment=ADB_SERIAL=adb-c7005367-9fl33M._adb-tls-connect._tcp
++# Environment=RIME_SYNC_DIR=%h/Useless/Rime-Sync
++TimeoutStartSec=15min
+diff --git a/tools/systemd/rime-sync-android.timer b/tools/systemd/rime-sync-android.timer
+new file mode 100644
+index 00000000..9a284d6e
+--- /dev/null
++++ b/tools/systemd/rime-sync-android.timer
+@@ -0,0 +1,14 @@
++[Unit]
++Description=Periodically sync the Rime dictionary with Fcitx5 for Android
++
++[Timer]
++# First attempt shortly after login, then every five minutes.  The script
++# compares checksums, so rounds without changes only cost a few adb calls.
++OnStartupSec=2min
++OnUnitActiveSec=5min
++AccuracySec=30s
++Persistent=true
++Unit=rime-sync-android.service
++
++[Install]
++WantedBy=timers.target

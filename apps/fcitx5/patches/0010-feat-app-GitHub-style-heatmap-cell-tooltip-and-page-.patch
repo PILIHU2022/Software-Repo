@@ -1,0 +1,767 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 18:47:59 +0800
+Subject: [PATCH] feat(app): GitHub-style heatmap cell tooltip and page-tinted
+ theme preview
+
+- Replace the Toast shown when a heatmap day is tapped with an anchored
+  bubble: near-black rounded bubble, white text, a notch pointing at the
+  tapped cell, placed above it (below when there is no room), moving on a
+  second tap, and dismissed by outside touch, scrolling, back, rotation or
+  when the card is rebound.
+- Let the notch follow the cell even when the bubble has to be clamped to
+  the window edge, so edge cells are no longer pointed at the wrong column.
+- Put the theme preview (theme page strip and custom theme editor stage) on
+  the page background instead of the accent color or a hardcoded dark, so it
+  matches the home background in light mode and stays dark in dark mode.
+---
+ .../main/heatmap/ContributionHeatmapView.kt   | 207 +++++++++++++--
+ .../ui/main/heatmap/HeatmapTooltipView.kt     | 240 ++++++++++++++++++
+ .../main/heatmap/TypingHeatmapPreference.kt   |   6 +
+ .../settings/theme/CustomThemeActivity.kt     |   7 +-
+ .../ui/main/settings/theme/ThemeFragment.kt   |  21 +-
+ .../res/values-zh-rCN/strings_heatmap.xml     |   2 +
+ .../res/values-zh-rTW/strings_heatmap.xml     |   2 +
+ app/src/main/res/values/colors.xml            |  15 +-
+ app/src/main/res/values/strings_heatmap.xml   |   6 +
+ 9 files changed, 455 insertions(+), 51 deletions(-)
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapTooltipView.kt
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt
+index f1ae7398..6788ab17 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt
+@@ -7,23 +7,29 @@ package org.fcitx.fcitx5.android.ui.main.heatmap
+ import android.content.Context
+ import android.content.res.Configuration
+ import android.graphics.Canvas
++import android.graphics.Color
+ import android.graphics.Paint
++import android.graphics.Rect
+ import android.graphics.RectF
++import android.graphics.drawable.ColorDrawable
+ import android.util.AttributeSet
+ import android.util.TypedValue
++import android.view.Gravity
+ import android.view.MotionEvent
+ import android.view.View
++import android.view.ViewGroup
+ import android.view.ViewTreeObserver
+ import android.widget.HorizontalScrollView
++import android.widget.PopupWindow
+ import androidx.annotation.AttrRes
+ import androidx.annotation.ColorInt
+ import androidx.core.content.ContextCompat
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.data.stats.TypingStatsMath
+ import org.fcitx.fcitx5.android.utils.isDarkMode
+-import org.fcitx.fcitx5.android.utils.toast
+ import java.text.DateFormat
+ import java.text.DateFormatSymbols
++import java.text.NumberFormat
+ import java.time.DayOfWeek
+ import java.time.LocalDate
+ import java.time.ZoneId
+@@ -41,7 +47,7 @@ import kotlin.math.roundToInt
+  * Columns are weeks (the 53 weeks ending with the current one), rows are weekdays
+  * (Monday first). The view renders itself at its natural size and is meant to live inside a
+  * [android.widget.HorizontalScrollView]; tapping a cell reports the day through
+- * [onDayClickListener].
++ * [onDayClickListener], or shows the built-in [HeatmapTooltipView] bubble when no listener is set.
+  */
+ class ContributionHeatmapView @JvmOverloads constructor(
+     context: Context,
+@@ -49,8 +55,11 @@ class ContributionHeatmapView @JvmOverloads constructor(
+ ) : View(context, attrs) {
+ 
+     /**
+-     * Invoked when a day cell is tapped. The default implementation shows a toast with the
+-     * localized date and the number of characters typed that day.
++     * Invoked when a day cell is tapped.
++     *
++     * When set, the host owns the feedback and the built-in tooltip bubble is never drawn. When it
++     * is `null`, the view shows a GitHub-style bubble with the localized date and the number of
++     * characters typed that day; see [dismissTooltip].
+      */
+     var onDayClickListener: ((LocalDate, Long) -> Unit)? = null
+ 
+@@ -72,6 +81,11 @@ class ContributionHeatmapView @JvmOverloads constructor(
+         if (!hasData) invalidate()
+     }
+ 
++    /** The bubble is anchored to a cell, so any scroll (grid or page) has to hide it. */
++    private val tooltipScrollListener = ViewTreeObserver.OnScrollChangedListener {
++        if (tooltipPopup?.isShowing == true) dismissTooltip()
++    }
++
+     private var cellSize = 0f
+     private var cellGap = 0f
+     private var cellRadius = 0f
+@@ -91,21 +105,12 @@ class ContributionHeatmapView @JvmOverloads constructor(
+     private val hintTextPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
+     private val hintBackdropPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+ 
+-    private val defaultDayClickListener: (LocalDate, Long) -> Unit = { date, count ->
+-        val dateText = if (date == LocalDate.now()) {
+-            context.getString(R.string.heatmap_today)
+-        } else {
+-            val millis = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+-            DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.getDefault())
+-                .format(Date(millis))
+-        }
+-        val countText = context.resources.getQuantityString(
+-            R.plurals.heatmap_chars_count,
+-            count.coerceIn(0L, 2L).toInt(),
+-            formatCountCompact(count)
+-        )
+-        context.toast(context.getString(R.string.heatmap_day_tooltip, dateText, countText))
+-    }
++    /**
++     * Bubble for the last tapped cell. It is created on the first tap and then reused (moved to the
++     * new cell) instead of stacking popups; both fields are released in [onDetachedFromWindow].
++     */
++    private var tooltipPopup: PopupWindow? = null
++    private var tooltipBubble: HeatmapTooltipView? = null
+ 
+     /** Screen-space left edge of the first cell column. */
+     private val gridLeft: Float get() = paddingLeft + labelWidth + labelGap
+@@ -171,6 +176,8 @@ class ContributionHeatmapView @JvmOverloads constructor(
+ 
+     override fun onConfigurationChanged(newConfig: Configuration) {
+         super.onConfigurationChanged(newConfig)
++        // The bubble is anchored in window coordinates; a configuration change invalidates them.
++        dismissTooltip()
+         isDark = newConfig.isDarkMode()
+         colors = palette.colors(customColor, isDark)
+         refreshMetrics()
+@@ -191,13 +198,26 @@ class ContributionHeatmapView @JvmOverloads constructor(
+     override fun onAttachedToWindow() {
+         super.onAttachedToWindow()
+         viewTreeObserver.addOnScrollChangedListener(scrollInvalidator)
++        viewTreeObserver.addOnScrollChangedListener(tooltipScrollListener)
+     }
+ 
+     override fun onDetachedFromWindow() {
++        // The bubble lives in its own window: it must never outlive the heatmap (rotation, page
++        // change, recycled preference row).
++        dismissTooltip()
++        tooltipPopup = null
++        tooltipBubble = null
++        viewTreeObserver.removeOnScrollChangedListener(tooltipScrollListener)
+         viewTreeObserver.removeOnScrollChangedListener(scrollInvalidator)
+         super.onDetachedFromWindow()
+     }
+ 
++    override fun onWindowVisibilityChanged(visibility: Int) {
++        super.onWindowVisibilityChanged(visibility)
++        // Leaving the page (or any window switch) hides the bubble together with the grid.
++        if (visibility != VISIBLE) dismissTooltip()
++    }
++
+     override fun onTouchEvent(event: MotionEvent): Boolean {
+         when (event.actionMasked) {
+             MotionEvent.ACTION_DOWN -> {
+@@ -210,17 +230,25 @@ class ContributionHeatmapView @JvmOverloads constructor(
+             MotionEvent.ACTION_UP -> {
+                 if (trackingTap) {
+                     trackingTap = false
+-                    val date = dateAt(event.x, event.y)
+-                    if (date != null) {
++                    val cell = cellAt(event.x, event.y)
++                    if (cell != null) {
+                         performClick()
+-                        val count = counts[date] ?: 0L
+-                        (onDayClickListener ?: defaultDayClickListener).invoke(date, count)
++                        val count = counts[cell.date] ?: 0L
++                        val listener = onDayClickListener
++                        if (listener != null) {
++                            // The host wants custom feedback, so the built-in bubble stays away.
++                            dismissTooltip()
++                            listener.invoke(cell.date, count)
++                        } else {
++                            showDayTooltip(cell, count)
++                        }
+                     }
+                     return true
+                 }
+             }
+ 
+             MotionEvent.ACTION_CANCEL -> {
++                dismissTooltip()
+                 if (trackingTap) {
+                     trackingTap = false
+                     return true
+@@ -347,15 +375,133 @@ class ContributionHeatmapView @JvmOverloads constructor(
+         return week in 0 until WEEKS && row in 0 until DAYS_PER_WEEK
+     }
+ 
+-    private fun dateAt(x: Float, y: Float): LocalDate? {
++    /** Week column and weekday row under a touch, or `null` outside the grid / after today. */
++    private fun cellAt(x: Float, y: Float): DayCell? {
+         if (!isInsideGrid(x, y)) return null
+         val week = ((x - gridLeft) / step).toInt()
+         val row = ((y - gridTop) / step).toInt()
+         val today = LocalDate.now()
+         val date = firstMonday(today).plusWeeks(week.toLong()).plusDays(row.toLong())
+-        return if (date.isAfter(today)) null else date
++        return if (date.isAfter(today)) null else DayCell(date, week, row)
++    }
++
++    /**
++     * Hide the day tooltip bubble if it is showing.
++     *
++     * The view already dismisses the bubble on scroll, touch cancel, rotation, window visibility
++     * changes and detach; hosts that recycle or unbind the view should call this as well.
++     */
++    fun dismissTooltip() {
++        val popup = tooltipPopup ?: return
++        if (popup.isShowing) popup.dismiss()
++    }
++
++    /**
++     * Show, or move, the GitHub-style bubble for one tapped [cell].
++     *
++     * GitHub anchors its contribution tooltip in a separate window, so this one is a [PopupWindow]
++     * placed in window coordinates. The bubble is centered on the cell and clamped to the visible
++     * window. It prefers the space above the cell, with the notch pointing down at it; when the
++     * first weekday rows leave no room there it flips below the cell, notch pointing up, so the
++     * bubble is never clipped by the status bar.
++     */
++    private fun showDayTooltip(cell: DayCell, count: Long) {
++        if (!isAttachedToWindow || windowToken == null) return
++        val bubble = tooltipBubble ?: HeatmapTooltipView(context).also { tooltipBubble = it }
++        bubble.text = dayTooltipText(cell.date, count)
++        val popup = tooltipPopup ?: createTooltipPopup(bubble)
++
++        // The popup window is a child of the window hosting the heatmap, while
++        // getWindowVisibleDisplayFrame() reports screen coordinates, so convert it by the
++        // difference between the two origins before using it for clamping.
++        val visible = Rect().also { getWindowVisibleDisplayFrame(it) }
++        val onScreen = IntArray(2).also { getLocationOnScreen(it) }
++        val inWindow = IntArray(2).also { getLocationInWindow(it) }
++        visible.offset(inWindow[0] - onScreen[0], inWindow[1] - onScreen[1])
++
++        val margin = dp(TOOLTIP_SCREEN_MARGIN_DP).roundToInt()
++        val maxBubbleWidth = max(
++            visible.width() - 2 * margin,
++            dp(TOOLTIP_MIN_BUBBLE_WIDTH_DP).roundToInt()
++        )
++        bubble.maxBubbleWidth = maxBubbleWidth
++        bubble.measure(
++            MeasureSpec.makeMeasureSpec(maxBubbleWidth, MeasureSpec.AT_MOST),
++            MeasureSpec.makeMeasureSpec(visible.height(), MeasureSpec.AT_MOST)
++        )
++        val bubbleWidth = bubble.measuredWidth
++        val bubbleHeight = bubble.measuredHeight
++        val tipInset = bubble.arrowTipInsetPx
++
++        val gap = dp(TOOLTIP_GAP_DP)
++        val cellCenterX = inWindow[0] + gridLeft + cell.week * step + cellSize / 2f
++        val cellTop = inWindow[1] + gridTop + cell.row * step
++        val cellBottom = cellTop + cellSize
++        // Aim the notch tip at `gap` from the cell, so account for how deep the tip sits in the
++        // measured bounds on the arrow side.
++        val aboveTop = cellTop - gap - bubbleHeight + tipInset
++        val belowTop = cellBottom + gap - tipInset
++        bubble.arrowDown = aboveTop >= visible.top.toFloat()
++
++        val left = (cellCenterX - bubbleWidth / 2f).roundToInt().coerceIn(
++            visible.left + margin,
++            max(visible.right - margin - bubbleWidth, visible.left + margin)
++        )
++        // Point the notch at the cell even when the bubble had to be clamped to the window edge.
++        bubble.arrowCenterX = cellCenterX - left
++        val top = if (bubble.arrowDown) {
++            aboveTop.roundToInt()
++        } else {
++            belowTop.roundToInt()
++                .coerceAtMost(visible.bottom - bubbleHeight)
++                .coerceAtLeast(visible.top)
++        }
++
++        popup.width = bubbleWidth
++        popup.height = bubbleHeight
++        if (popup.isShowing) {
++            popup.update(left, top, bubbleWidth, bubbleHeight)
++        } else {
++            popup.showAtLocation(this, Gravity.NO_GRAVITY, left, top)
++        }
++    }
++
++    private fun createTooltipPopup(bubble: HeatmapTooltipView): PopupWindow =
++        PopupWindow(
++            bubble,
++            ViewGroup.LayoutParams.WRAP_CONTENT,
++            ViewGroup.LayoutParams.WRAP_CONTENT,
++            true
++        ).apply {
++            // A popup only gets outside touches (and therefore dismisses) with a background; the
++            // bubble paints itself, so the window background has to stay transparent. PopupWindow
++            // elevation is deliberately left at 0: with a transparent background the window manager
++            // would shadow the rectangular window bounds instead of the rounded bubble, so
++            // HeatmapTooltipView paints its own soft shadow.
++            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
++            isOutsideTouchable = true
++            isFocusable = true
++            // Without clipping the window manager cannot silently drag the notch off its cell.
++            isClippingEnabled = false
++            inputMethodMode = PopupWindow.INPUT_METHOD_NOT_NEEDED
++        }.also { tooltipPopup = it }
++
++    /** GitHub-like label: localized count with its unit, plus the localized medium date. */
++    private fun dayTooltipText(date: LocalDate, count: Long): CharSequence {
++        val millis = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
++        val dateText = DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.getDefault())
++            .format(Date(millis))
++        val countText = resources.getQuantityString(
++            R.plurals.heatmap_chars_count,
++            count.coerceIn(0L, 2L).toInt(),
++            NumberFormat.getIntegerInstance(Locale.getDefault()).format(count)
++        )
++        return context.getString(R.string.heatmap_day_tooltip_detail, countText, dateText)
+     }
+ 
++    /** Day under a touch, with the cell indices the tooltip is anchored to. */
++    private data class DayCell(val date: LocalDate, val week: Int, val row: Int)
++
+     private fun refreshMetrics() {
+         cellSize = dp(CELL_SIZE_DP)
+         cellGap = dp(CELL_GAP_DP)
+@@ -436,6 +582,15 @@ class ContributionHeatmapView @JvmOverloads constructor(
+         private const val HINT_PADDING_HORIZONTAL_DP = 12f
+         private const val HINT_PADDING_VERTICAL_DP = 5f
+         private const val TODAY_STROKE_DP = 1.4f
++
++        /** Visible gap between the tooltip notch tip and the tapped cell. */
++        private const val TOOLTIP_GAP_DP = 3f
++
++        /** Keep the bubble clear of the window edges so it never touches the screen border. */
++        private const val TOOLTIP_SCREEN_MARGIN_DP = 8f
++
++        /** Never squeeze the bubble narrower than this while clamping to a narrow window. */
++        private const val TOOLTIP_MIN_BUBBLE_WIDTH_DP = 120f
+     }
+ }
+ 
+@@ -446,7 +601,7 @@ class ContributionHeatmapView @JvmOverloads constructor(
+ internal fun formatCountCompact(count: Long): String {
+     val value = count.coerceAtLeast(0L)
+     return when {
+-        value < 10_000L -> java.text.NumberFormat.getIntegerInstance(Locale.getDefault())
++        value < 10_000L -> NumberFormat.getIntegerInstance(Locale.getDefault())
+             .format(value)
+ 
+         // The upper bounds leave room for rounding, so 999_999 reads "1.0M" instead of "1000.0K".
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapTooltipView.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapTooltipView.kt
+new file mode 100644
+index 00000000..c649d417
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapTooltipView.kt
+@@ -0,0 +1,240 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.heatmap
++
++import android.content.Context
++import android.graphics.Canvas
++import android.graphics.Paint
++import android.graphics.Path
++import android.graphics.RectF
++import android.text.Layout
++import android.text.StaticLayout
++import android.text.TextDirectionHeuristics
++import android.text.TextPaint
++import android.text.TextUtils
++import android.util.TypedValue
++import android.view.View
++import androidx.core.content.ContextCompat
++import org.fcitx.fcitx5.android.R
++import kotlin.math.max
++import kotlin.math.roundToInt
++
++/**
++ * GitHub-style tooltip bubble shown for a tapped [ContributionHeatmapView] day cell.
++ *
++ * Anchoring rules: the bubble is drawn with a small triangular notch on one edge, always centered
++ * on the bubble's horizontal axis so it can point at the cell the host anchors it to.
++ *
++ * - [arrowDown] `true` (the normal case): the bubble floats *above* the cell, the notch is on the
++ *   bottom edge and its tip points down at the cell.
++ * - [arrowDown] `false`: the bubble floats *below* the cell, used when there is not enough room
++ *   above it (e.g. the first weekday rows right under the status bar); the notch is on the top edge
++ *   and points up.
++ *
++ * The bubble never positions itself: the host sets [text] and [maxBubbleWidth], measures the view
++ * to learn its exact size, then places the popup so that the notch tip is a few dp above/below the
++ * cell and the bubble stays inside the visible window. [arrowTipInsetPx] tells the host how far the
++ * tip sits inside the measured bounds, so the visible gap does not depend on the shadow padding.
++ *
++ * Styling follows GitHub's contribution tooltip: near-black (deliberately independent of the app
++ * theme, like GitHub's bubble in both light and dark mode), rounded corners, no border, white
++ * centered text of one or two lines. [onDraw] does not allocate.
++ */
++class HeatmapTooltipView(context: Context) : View(context) {
++
++    /** Text of the bubble; it is laid out again (1 to [MAX_LINES] lines) on the next measure. */
++    var text: CharSequence = ""
++        set(value) {
++            field = value
++            invalidate()
++        }
++
++    /** `true`: notch on the bottom edge (bubble above the cell); `false`: notch on the top edge. */
++    var arrowDown: Boolean = true
++        set(value) {
++            field = value
++            invalidate()
++        }
++
++    /**
++     * Horizontal center of the notch in view-local pixels, or `-1` to center it on the bubble.
++     *
++     * The host passes the cell center converted to bubble-local coordinates so the notch keeps
++     * pointing at the tapped cell even when the bubble itself had to be clamped to the screen
++     * edge; the value is clamped so the notch never overlaps the rounded corners.
++     */
++    var arrowCenterX: Float = -1f
++        set(value) {
++            field = value
++            invalidate()
++        }
++
++    /**
++     * Upper bound in pixels for the measured bubble, shadow padding included (`0` = no bound).
++     * Text that does not fit wraps onto a second line instead of growing off screen.
++     */
++    var maxBubbleWidth: Int = 0
++        set(value) {
++            field = value
++            requestLayout()
++            invalidate()
++        }
++
++    /** Distance in pixels between the notch tip and the nearest view bound on the arrow side. */
++    val arrowTipInsetPx: Float get() = shadowExtent
++
++    private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
++        textSize = sp(TEXT_SIZE_SP)
++        color = ContextCompat.getColor(context, R.color.heatmap_tooltip_foreground)
++    }
++
++    private val bubblePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.FILL
++        color = ContextCompat.getColor(context, R.color.heatmap_tooltip_background)
++    }
++
++    private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.FILL
++    }
++
++    private val cornerRadius = dp(CORNER_RADIUS_DP)
++    private val arrowWidth = dp(ARROW_WIDTH_DP)
++    private val arrowHeight = dp(ARROW_HEIGHT_DP)
++    private val horizontalPadding = dp(PADDING_HORIZONTAL_DP)
++    private val verticalPadding = dp(PADDING_VERTICAL_DP)
++    private val shadowOffset = dp(SHADOW_OFFSET_DP)
++    private val shadowSpread = dp(SHADOW_SPREAD_DP)
++
++    /**
++     * Room the soft shadow needs on every side. The extra half pixel keeps the outermost, barely
++     * opaque edge inside the view bounds instead of letting it be clipped on one side.
++     */
++    private val shadowExtent = shadowSpread + shadowOffset + dp(0.5f)
++
++    private var textLayout: StaticLayout? = null
++    private val bubbleRect = RectF()
++    private val shadowRect = RectF()
++    private val bubblePath = Path()
++
++    init {
++        // A transient visual hint, not an interactive node: keep it out of the accessibility tree
++        // so TalkBack is never pulled into a popup that disappears on the next touch.
++        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
++    }
++
++    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
++        val horizontalInset = (horizontalPadding + shadowExtent).roundToInt()
++        val maxTextWidth = if (maxBubbleWidth > 0) {
++            max(maxBubbleWidth - 2 * horizontalInset, 1)
++        } else {
++            Int.MAX_VALUE
++        }
++        val desiredWidth = textPaint.measureText(text, 0, text.length).roundToInt()
++        val layout = buildTextLayout(text, desiredWidth.coerceIn(1, maxTextWidth))
++        textLayout = layout
++        val width = layout.width + 2 * horizontalInset
++        val height = layout.height + 2 * (verticalPadding + shadowExtent).roundToInt() +
++            arrowHeight.roundToInt()
++        setMeasuredDimension(
++            resolveSize(width, widthMeasureSpec),
++            resolveSize(height, heightMeasureSpec)
++        )
++    }
++
++    override fun onDraw(canvas: Canvas) {
++        val layout = textLayout ?: return
++        val w = width.toFloat()
++        val h = height.toFloat()
++        val tipDown = arrowDown
++        val left = shadowExtent
++        val right = w - shadowExtent
++        // Leave room for the notch on its own edge; the other edge only keeps the shadow inside.
++        val top = shadowExtent + if (tipDown) 0f else arrowHeight
++        val bottom = h - shadowExtent - if (tipDown) arrowHeight else 0f
++        bubbleRect.set(left, top, right, bottom)
++
++        // Hardware canvases only honor Paint#shadowLayer for text, so GitHub's soft elevation is
++        // faked with two translucent rounded rings below the bubble.
++        shadowRect.set(bubbleRect)
++        shadowRect.offset(0f, shadowOffset)
++        shadowRect.inset(-shadowSpread, -shadowSpread)
++        shadowPaint.color = SHADOW_COLOR_OUTER
++        canvas.drawRoundRect(
++            shadowRect,
++            cornerRadius + shadowSpread,
++            cornerRadius + shadowSpread,
++            shadowPaint
++        )
++        shadowRect.inset(shadowSpread / 2f, shadowSpread / 2f)
++        shadowPaint.color = SHADOW_COLOR_INNER
++        canvas.drawRoundRect(
++            shadowRect,
++            cornerRadius + shadowSpread / 2f,
++            cornerRadius + shadowSpread / 2f,
++            shadowPaint
++        )
++
++        // Body and notch share one path so they fill as a single continuous shape (no seam).
++        val halfArrow = arrowWidth / 2f
++        // Keep the notch on the straight part of the edge: rounded corners + a little slack.
++        val minCenterX = bubbleRect.left + cornerRadius + halfArrow
++        val maxCenterX = bubbleRect.right - cornerRadius - halfArrow
++        val centerX = if (arrowCenterX >= 0f) {
++            arrowCenterX.coerceIn(minCenterX, maxCenterX)
++        } else {
++            w / 2f
++        }
++        bubblePath.reset()
++        bubblePath.addRoundRect(bubbleRect, cornerRadius, cornerRadius, Path.Direction.CW)
++        if (tipDown) {
++            bubblePath.moveTo(centerX - halfArrow, bottom)
++            bubblePath.lineTo(centerX + halfArrow, bottom)
++            bubblePath.lineTo(centerX, bottom + arrowHeight)
++        } else {
++            bubblePath.moveTo(centerX - halfArrow, top)
++            bubblePath.lineTo(centerX, top - arrowHeight)
++            bubblePath.lineTo(centerX + halfArrow, top)
++        }
++        bubblePath.close()
++        canvas.drawPath(bubblePath, bubblePaint)
++
++        // The layout already centers its (possibly two) lines; center the laid out block as well.
++        canvas.save()
++        canvas.translate((w - layout.width) / 2f, top + verticalPadding)
++        layout.draw(canvas)
++        canvas.restore()
++    }
++
++    private fun buildTextLayout(source: CharSequence, width: Int): StaticLayout =
++        StaticLayout.Builder.obtain(source, 0, source.length, textPaint, width)
++            .setAlignment(Layout.Alignment.ALIGN_CENTER)
++            .setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
++            .setMaxLines(MAX_LINES)
++            .setEllipsize(TextUtils.TruncateAt.END)
++            .setIncludePad(false)
++            .build()
++
++    private fun dp(value: Float): Float = TypedValue.applyDimension(
++        TypedValue.COMPLEX_UNIT_DIP, value, resources.displayMetrics
++    )
++
++    private fun sp(value: Float): Float = TypedValue.applyDimension(
++        TypedValue.COMPLEX_UNIT_SP, value, resources.displayMetrics
++    )
++
++    companion object {
++        private const val TEXT_SIZE_SP = 12.5f
++        private const val MAX_LINES = 2
++        private const val CORNER_RADIUS_DP = 8f
++        private const val ARROW_WIDTH_DP = 12f
++        private const val ARROW_HEIGHT_DP = 6f
++        private const val PADDING_HORIZONTAL_DP = 10f
++        private const val PADDING_VERTICAL_DP = 6f
++        private const val SHADOW_OFFSET_DP = 1f
++        private const val SHADOW_SPREAD_DP = 1.5f
++        private const val SHADOW_COLOR_OUTER = 0x0A000000
++        private const val SHADOW_COLOR_INNER = 0x14000000
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt
+index c351ca7f..143c9f91 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt
+@@ -102,6 +102,10 @@ class TypingHeatmapPreference(context: Context) : Preference(context) {
+         prefs?.stats?.palette?.unregisterOnChangeListener(paletteListener)
+         prefs?.stats?.customColor?.unregisterOnChangeListener(customColorListener)
+         prefs?.stats?.enabled?.unregisterOnChangeListener(enabledListener)
++        // The heatmap tooltip lives in its own window and must not survive the card.
++        boundRoot?.get()
++            ?.findViewById<ContributionHeatmapView>(R.id.heatmap_heatmap)
++            ?.dismissTooltip()
+         boundRoot = null
+         super.onDetached()
+     }
+@@ -114,6 +118,8 @@ class TypingHeatmapPreference(context: Context) : Preference(context) {
+         val root = holder.itemView
+         boundRoot = WeakReference(root)
+         scrollToRecentPending = true
++        // A recycled row must not keep a bubble that belonged to its previous binding.
++        root.findViewById<ContributionHeatmapView>(R.id.heatmap_heatmap)?.dismissTooltip()
+         root.findViewById<ImageView>(R.id.heatmap_open_stats)?.setOnClickListener {
+             onOpenStats?.invoke()
+         }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt
+index 6b6c22ee..3ef5e353 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/CustomThemeActivity.kt
+@@ -116,8 +116,9 @@ class CustomThemeActivity : AppCompatActivity() {
+     private lateinit var previewUi: KeyboardPreviewUi
+ 
+     /**
+-     * Dark "stage" behind the keyboard preview, so custom themes are judged against a dark
+-     * backdrop instead of the (light / primary colored) activity surface.
++     * Stage behind the keyboard preview. It uses the page background (not the accent color and
++     * not a hardcoded dark), so the preview blends into the theme page: dark in dark mode and
++     * matching the home background in light mode.
+      *
+      * Only vertical padding is used: [KeyboardPreviewUi] lays itself out at
+      * `DisplayMetrics.widthPixels`, so horizontal padding would clip the preview instead of
+@@ -126,7 +127,7 @@ class CustomThemeActivity : AppCompatActivity() {
+     private val previewStage by lazy {
+         val stageBackground = GradientDrawable().apply {
+             shape = GradientDrawable.RECTANGLE
+-            setColor(color(R.color.theme_preview_background))
++            setColor(styledColor(android.R.attr.colorBackground))
+             cornerRadius = dp(12f)
+         }
+         frameLayout {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
+index 1ab562b3..9c2659d3 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
+@@ -20,8 +20,8 @@ import com.google.android.material.tabs.TabLayoutMediator
+ import kotlinx.coroutines.launch
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.data.theme.ThemeManager
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import splitties.dimensions.dp
+-import splitties.resources.color
+ import splitties.views.backgroundColor
+ import splitties.views.dsl.constraintlayout.below
+ import splitties.views.dsl.constraintlayout.bottomOfParent
+@@ -65,14 +65,14 @@ class ThemeFragment : Fragment() {
+         }
+ 
+         tabLayout = TabLayout(this).apply {
+-            // The preview stage is always dark, so keep the tab strip on the same dark
+-            // backdrop and use light on-dark text/indicator regardless of the app mode.
+-            backgroundColor = color(R.color.theme_preview_background)
++            // The preview stage uses the page background, so the tab strip follows the app
++            // theme (dark backdrop in dark mode, page background in light mode).
++            backgroundColor = styledColorCompat(android.R.attr.colorBackground)
+             setTabTextColors(
+-                color(R.color.theme_preview_foreground_muted),
+-                color(R.color.theme_preview_foreground)
++                styledColorCompat(android.R.attr.textColorSecondary),
++                styledColorCompat(android.R.attr.textColorPrimary)
+             )
+-            setSelectedTabIndicatorColor(color(R.color.theme_preview_foreground))
++            setSelectedTabIndicatorColor(styledColorCompat(android.R.attr.colorPrimary))
+         }
+ 
+         viewPager = ViewPager2(this).apply {
+@@ -104,10 +104,9 @@ class ThemeFragment : Fragment() {
+                 centerHorizontally()
+                 bottomOfParent()
+             })
+-            // Explicit dark background instead of ?attr/colorPrimary: the preview must not
+-            // follow the (pastel / dynamic) app surface, otherwise dark keyboard themes and
+-            // their wallpapers are hard to judge and clash with MD3 surfaces.
+-            backgroundColor = color(R.color.theme_preview_background)
++            // The preview sits on the page background (not on the accent color), so it blends
++            // into the theme page: dark in dark mode, matching the home background in light mode.
++            backgroundColor = styledColorCompat(android.R.attr.colorBackground)
+             elevation = dp(4f)
+         }
+ 
+diff --git a/app/src/main/res/values-zh-rCN/strings_heatmap.xml b/app/src/main/res/values-zh-rCN/strings_heatmap.xml
+index 8b48b99e..c5d0c6ed 100644
+--- a/app/src/main/res/values-zh-rCN/strings_heatmap.xml
++++ b/app/src/main/res/values-zh-rCN/strings_heatmap.xml
+@@ -11,6 +11,8 @@
+     <string name="heatmap_more">多</string>
+     <string name="heatmap_today">今天</string>
+     <string name="heatmap_day_tooltip">%1$s · %2$s</string>
++    <!-- GitHub 风格气泡：%1$s 为字数（heatmap_chars_count 复数，如“1,234 个字符”），%2$s 为本地化日期。 -->
++    <string name="heatmap_day_tooltip_detail">%2$s · %1$s</string>
+     <string name="heatmap_stats_paused">统计已暂停</string>
+     <string name="heatmap_open_stats">打开统计</string>
+     <string name="heatmap_no_data">暂无数据</string>
+diff --git a/app/src/main/res/values-zh-rTW/strings_heatmap.xml b/app/src/main/res/values-zh-rTW/strings_heatmap.xml
+index 38ee8492..2cc071fd 100644
+--- a/app/src/main/res/values-zh-rTW/strings_heatmap.xml
++++ b/app/src/main/res/values-zh-rTW/strings_heatmap.xml
+@@ -11,6 +11,8 @@
+     <string name="heatmap_more">多</string>
+     <string name="heatmap_today">今天</string>
+     <string name="heatmap_day_tooltip">%1$s · %2$s</string>
++    <!-- GitHub 風格氣泡：%1$s 為字數（heatmap_chars_count 複數，如「1,234 個字元」），%2$s 為在地化日期。 -->
++    <string name="heatmap_day_tooltip_detail">%2$s · %1$s</string>
+     <string name="heatmap_stats_paused">統計已暫停</string>
+     <string name="heatmap_open_stats">開啟統計</string>
+     <string name="heatmap_no_data">尚無資料</string>
+diff --git a/app/src/main/res/values/colors.xml b/app/src/main/res/values/colors.xml
+index 67763594..3ef8837d 100644
+--- a/app/src/main/res/values/colors.xml
++++ b/app/src/main/res/values/colors.xml
+@@ -8,15 +8,8 @@
+     <color name="grey_400">#BDBDBD</color>
+     <color name="grey_700">#616161</color>
+ 
+-    <!--
+-      Dark stage behind the keyboard preview (theme page and custom theme editor).
+-      Deliberately an explicit near-black neutral instead of a theme attribute: the preview
+-      must look the same in app light mode, dark mode and with any dynamic color palette,
+-      so that keyboard themes are judged against a dark backdrop rather than a pastel surface.
+-    -->
+-    <color name="theme_preview_background">#1B1B1F</color>
+-    <!-- Light on-dark foreground for labels / selected tabs drawn on the preview stage. -->
+-    <color name="theme_preview_foreground">#E6E1E5</color>
+-    <!-- Muted on-dark foreground for unselected tabs (still >= 7:1 against the stage). -->
+-    <color name="theme_preview_foreground_muted">#CAC4D0</color>
++    <!-- GitHub-style cell tooltip: near-black bubble with white text, independent of the
++         app light/dark theme (same look as GitHub's contribution tooltip). -->
++    <color name="heatmap_tooltip_background">#EB24292F</color>
++    <color name="heatmap_tooltip_foreground">#FFFFFFFF</color>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values/strings_heatmap.xml b/app/src/main/res/values/strings_heatmap.xml
+index 335b3cfd..75f5a25d 100644
+--- a/app/src/main/res/values/strings_heatmap.xml
++++ b/app/src/main/res/values/strings_heatmap.xml
+@@ -11,6 +11,12 @@
+     <string name="heatmap_more">More</string>
+     <string name="heatmap_today">Today</string>
+     <string name="heatmap_day_tooltip">%1$s · %2$s</string>
++    <!--
++      GitHub-style bubble above a tapped heatmap cell. %1$s is the counted unit (the
++      heatmap_chars_count plural, e.g. "1,234 characters"), %2$s the localized medium date
++      (e.g. "Nov 14, 2026"). Translators keep the word order natural for the language.
++    -->
++    <string name="heatmap_day_tooltip_detail">%1$s on %2$s</string>
+     <string name="heatmap_stats_paused">Statistics are paused</string>
+     <string name="heatmap_open_stats">Open statistics</string>
+     <string name="heatmap_no_data">No data yet</string>

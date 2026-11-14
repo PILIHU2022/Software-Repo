@@ -1,0 +1,4510 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 10:17:34 +0800
+Subject: [PATCH] feat(app): add typing heatmap, statistics and refreshed home
+ layout
+
+- Record committed characters and corrections in the IME and persist
+  per-day aggregates in a tiny Room database (counts only, never text).
+- Put a GitHub-style 53-week heatmap card at the top of the home page,
+  with total characters, accuracy, current streak and tappable days.
+- Add a Statistics & heatmap screen: overview, last 7 days, accuracy and
+  error rate, tracking switch, reset, five palettes and a custom color
+  picker with live shade preview.
+- Rebuild the settings home into four sections with icon rows, concise
+  summaries and section headers.
+- Cover the counting/streak/level math and palette ramps with JVM tests.
+
+Built as 0.1.3-patchwork (versionCode 11206, arm64-v8a).
+---
+ .../fcitx/fcitx5/android/FcitxApplication.kt  |   2 +
+ .../fcitx5/android/data/prefs/AppPrefs.kt     |  25 +
+ .../android/data/prefs/ManagedPreference.kt   |  21 +
+ .../data/prefs/ManagedPreferenceInternal.kt   |   3 +
+ .../android/data/stats/TypingDailyStat.kt     |  34 ++
+ .../android/data/stats/TypingStatsDao.kt      |  32 ++
+ .../android/data/stats/TypingStatsDatabase.kt |  30 ++
+ .../android/data/stats/TypingStatsManager.kt  | 289 +++++++++++
+ .../android/data/stats/TypingStatsMath.kt     | 121 +++++
+ .../android/data/stats/TypingStatsSnapshot.kt |  92 ++++
+ .../android/input/FcitxInputMethodService.kt  |  65 +++
+ .../fcitx5/android/ui/main/MainFragment.kt    | 141 +++---
+ .../main/heatmap/ContributionHeatmapView.kt   | 457 ++++++++++++++++++
+ .../android/ui/main/heatmap/HeatmapPalette.kt | 194 ++++++++
+ .../main/heatmap/TypingHeatmapPreference.kt   | 254 ++++++++++
+ .../ui/main/home/HomeCategoryPreference.kt    |  29 ++
+ .../android/ui/main/home/HomePreference.kt    | 150 ++++++
+ .../android/ui/main/settings/SettingsRoute.kt |   7 +
+ .../stats/HeatmapColorPickerDialog.kt         | 252 ++++++++++
+ .../stats/HeatmapPalettePreference.kt         | 137 ++++++
+ .../settings/stats/TypingStatsFragment.kt     | 297 ++++++++++++
+ app/src/main/res/drawable/bg_heatmap_card.xml |  13 +
+ .../res/drawable/bg_heatmap_stat_chip.xml     |   9 +
+ .../main/res/drawable/bg_heatmap_swatch.xml   |  12 +
+ .../drawable/bg_heatmap_swatch_selected.xml   |  14 +
+ app/src/main/res/drawable/ic_stats_24.xml     |  25 +
+ .../main/res/layout/dialog_heatmap_color.xml  | 115 +++++
+ .../res/layout/preference_heatmap_palette.xml |  91 ++++
+ .../res/layout/preference_home_category.xml   |  24 +
+ .../main/res/layout/preference_home_entry.xml |  72 +++
+ .../res/layout/preference_typing_heatmap.xml  | 279 +++++++++++
+ .../res/values-zh-rCN/strings_heatmap.xml     |  33 ++
+ .../main/res/values-zh-rCN/strings_home.xml   |  23 +
+ .../res/values-zh-rCN/strings_stats_ui.xml    |  52 ++
+ .../res/values-zh-rTW/strings_heatmap.xml     |  33 ++
+ .../main/res/values-zh-rTW/strings_home.xml   |  23 +
+ .../res/values-zh-rTW/strings_stats_ui.xml    |  52 ++
+ app/src/main/res/values/strings_heatmap.xml   |  35 ++
+ app/src/main/res/values/strings_home.xml      |  23 +
+ app/src/main/res/values/strings_stats_ui.xml  |  52 ++
+ .../android/data/stats/TypingStatsMathTest.kt | 258 ++++++++++
+ .../ui/main/heatmap/HeatmapPaletteTest.kt     | 128 +++++
+ 42 files changed, 3938 insertions(+), 60 deletions(-)
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingDailyStat.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDao.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDatabase.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMath.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsSnapshot.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPalette.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomeCategoryPreference.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapColorPickerDialog.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
+ create mode 100644 app/src/main/res/drawable/bg_heatmap_card.xml
+ create mode 100644 app/src/main/res/drawable/bg_heatmap_stat_chip.xml
+ create mode 100644 app/src/main/res/drawable/bg_heatmap_swatch.xml
+ create mode 100644 app/src/main/res/drawable/bg_heatmap_swatch_selected.xml
+ create mode 100644 app/src/main/res/drawable/ic_stats_24.xml
+ create mode 100644 app/src/main/res/layout/dialog_heatmap_color.xml
+ create mode 100644 app/src/main/res/layout/preference_heatmap_palette.xml
+ create mode 100644 app/src/main/res/layout/preference_home_category.xml
+ create mode 100644 app/src/main/res/layout/preference_home_entry.xml
+ create mode 100644 app/src/main/res/layout/preference_typing_heatmap.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_heatmap.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_home.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_stats_ui.xml
+ create mode 100644 app/src/main/res/values-zh-rTW/strings_heatmap.xml
+ create mode 100644 app/src/main/res/values-zh-rTW/strings_home.xml
+ create mode 100644 app/src/main/res/values-zh-rTW/strings_stats_ui.xml
+ create mode 100644 app/src/main/res/values/strings_heatmap.xml
+ create mode 100644 app/src/main/res/values/strings_home.xml
+ create mode 100644 app/src/main/res/values/strings_stats_ui.xml
+ create mode 100644 app/src/test/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMathTest.kt
+ create mode 100644 app/src/test/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPaletteTest.kt
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt b/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt
+index bd293b93..5af2ee83 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt
+@@ -21,6 +21,7 @@ import kotlinx.coroutines.plus
+ import org.fcitx.fcitx5.android.daemon.FcitxDaemon
+ import org.fcitx.fcitx5.android.data.clipboard.ClipboardManager
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
++import org.fcitx.fcitx5.android.data.stats.TypingStatsManager
+ import org.fcitx.fcitx5.android.data.theme.ThemeManager
+ import org.fcitx.fcitx5.android.ui.main.LogActivity
+ import org.fcitx.fcitx5.android.utils.AppUtil
+@@ -134,6 +135,7 @@ class FcitxApplication : Application() {
+             setValue(currentPid)
+         }
+         ClipboardManager.init(ctx)
++        TypingStatsManager.init(ctx)
+         ThemeManager.init(resources.configuration)
+         Locales.onLocaleChange(resources.configuration)
+         registerReceiver(shutdownReceiver, IntentFilter(Intent.ACTION_SHUTDOWN))
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/AppPrefs.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/AppPrefs.kt
+index bed1cbfe..b77579ba 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/AppPrefs.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/AppPrefs.kt
+@@ -371,6 +371,30 @@ class AppPrefs(private val sharedPreferences: SharedPreferences) {
+         )
+     }
+ 
++    /**
++     * Typing statistics. Deliberately has no settings UI: the values are managed by
++     * [org.fcitx.fcitx5.android.data.stats.TypingStatsManager] (enabled/startTime) and by the
++     * statistics screen (palette/customColor).
++     */
++    inner class Stats : ManagedPreferenceProvider() {
++        val enabled: ManagedPreference.PBool =
++            ManagedPreference.PBool(sharedPreferences, "typing_stats_enabled", true)
++                .apply { register() }
++
++        /** Epoch millis of the "since install" anchor, `0` until the first launch. */
++        val startTime: ManagedPreference.PLong =
++            ManagedPreference.PLong(sharedPreferences, "typing_stats_start_time", 0L)
++                .apply { register() }
++
++        val palette: ManagedPreference.PString =
++            ManagedPreference.PString(sharedPreferences, "heatmap_palette", "Github")
++                .apply { register() }
++
++        val customColor: ManagedPreference.PInt =
++            ManagedPreference.PInt(sharedPreferences, "heatmap_custom_color", 0xFF2DA44E.toInt())
++                .apply { register() }
++    }
++
+     private val providers = mutableListOf<ManagedPreferenceProvider>()
+ 
+     fun <T : ManagedPreferenceProvider> registerProvider(
+@@ -391,6 +415,7 @@ class AppPrefs(private val sharedPreferences: SharedPreferences) {
+     val clipboard = Clipboard().register()
+     val symbols = Symbols().register()
+     val advanced = Advanced().register()
++    val stats = Stats().register()
+ 
+     @Keep
+     private val onSharedPreferenceChangeListener =
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreference.kt
+index ca8367b0..3dff917c 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreference.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreference.kt
+@@ -153,6 +153,27 @@ abstract class ManagedPreference<T : Any>(
+         }
+     }
+ 
++    class PLong(sharedPreferences: SharedPreferences, key: String, defaultValue: Long) :
++        ManagedPreference<Long>(sharedPreferences, key, defaultValue) {
++
++        override fun setValue(value: Long) {
++            sharedPreferences.edit { putLong(key, value) }
++        }
++
++        override fun getValue(): Long {
++            return try {
++                sharedPreferences.getLong(key, defaultValue)
++            } catch (e: Exception) {
++                setValue(defaultValue)
++                defaultValue
++            }
++        }
++
++        override fun putValueTo(editor: SharedPreferences.Editor) {
++            editor.putLong(key, getValue())
++        }
++    }
++
+     class PFloat(sharedPreferences: SharedPreferences, key: String, defaultValue: Float) :
+         ManagedPreference<Float>(sharedPreferences, key, defaultValue) {
+         override fun setValue(value: Float) {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreferenceInternal.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreferenceInternal.kt
+index 422368c3..beb00f0e 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreferenceInternal.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/prefs/ManagedPreferenceInternal.kt
+@@ -27,4 +27,7 @@ abstract class ManagedPreferenceInternal(private val sharedPreferences: SharedPr
+ 
+     protected fun float(key: String, defaultValue: Float) =
+         ManagedPreference.PFloat(sharedPreferences, key, defaultValue).apply { register() }
++
++    protected fun long(key: String, defaultValue: Long) =
++        ManagedPreference.PLong(sharedPreferences, key, defaultValue).apply { register() }
+ }
+\ No newline at end of file
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingDailyStat.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingDailyStat.kt
+new file mode 100644
+index 00000000..6a6cd192
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingDailyStat.kt
+@@ -0,0 +1,34 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.stats
++
++import androidx.room.Entity
++import androidx.room.PrimaryKey
++
++/**
++ * Aggregated typing activity of one day.
++ *
++ * No text content is ever stored here, only counts.
++ *
++ * @param date local date in ISO-8601 format (`yyyy-MM-dd`), as produced by
++ * [java.time.LocalDate.toString]
++ * @param characters number of committed (non-whitespace, non-control) code points
++ * @param corrections number of already-committed characters the user deleted
++ * @param commits number of commit operations (not characters)
++ * @param updatedAt epoch millis of the last update of this row
++ */
++@Entity(tableName = TypingDailyStat.TABLE_NAME)
++data class TypingDailyStat(
++    @PrimaryKey
++    val date: String,
++    val characters: Long = 0L,
++    val corrections: Long = 0L,
++    val commits: Long = 0L,
++    val updatedAt: Long = System.currentTimeMillis(),
++) {
++    companion object {
++        const val TABLE_NAME = "typing_daily"
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDao.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDao.kt
+new file mode 100644
+index 00000000..e3464d15
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDao.kt
+@@ -0,0 +1,32 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.stats
++
++import androidx.room.Dao
++import androidx.room.Query
++import androidx.room.Upsert
++
++@Dao
++abstract class TypingStatsDao {
++
++    @Query("SELECT * FROM ${TypingDailyStat.TABLE_NAME} ORDER BY date ASC")
++    abstract suspend fun all(): List<TypingDailyStat>
++
++    /**
++     * All rows whose date is greater than or equal to [fromDate] (`yyyy-MM-dd`).
++     * ISO local dates compare correctly as strings within the same calendar era.
++     */
++    @Query("SELECT * FROM ${TypingDailyStat.TABLE_NAME} WHERE date >= :fromDate ORDER BY date ASC")
++    abstract suspend fun since(fromDate: String): List<TypingDailyStat>
++
++    @Query("SELECT * FROM ${TypingDailyStat.TABLE_NAME} WHERE date = :date LIMIT 1")
++    abstract suspend fun get(date: String): TypingDailyStat?
++
++    @Upsert
++    abstract suspend fun upsert(stat: TypingDailyStat)
++
++    @Query("DELETE FROM ${TypingDailyStat.TABLE_NAME}")
++    abstract suspend fun clear()
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDatabase.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDatabase.kt
+new file mode 100644
+index 00000000..0e7ab131
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsDatabase.kt
+@@ -0,0 +1,30 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.stats
++
++import android.content.Context
++import androidx.room.Database
++import androidx.room.Room
++import androidx.room.RoomDatabase
++
++@Database(
++    entities = [TypingDailyStat::class],
++    version = 1,
++    exportSchema = false
++)
++abstract class TypingStatsDatabase : RoomDatabase() {
++
++    abstract fun typingStatsDao(): TypingStatsDao
++
++    companion object {
++        private const val DB_NAME = "typing_stats"
++
++        fun build(context: Context): TypingStatsDatabase = Room
++            .databaseBuilder(context, TypingStatsDatabase::class.java, DB_NAME)
++            // allow wipe the database instead of crashing when downgrade
++            .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
++            .build()
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt
+new file mode 100644
+index 00000000..c2d185d5
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt
+@@ -0,0 +1,289 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.stats
++
++import android.content.Context
++import android.os.Handler
++import android.os.Looper
++import androidx.annotation.Keep
++import androidx.room.withTransaction
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import org.fcitx.fcitx5.android.data.prefs.AppPrefs
++import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
++import timber.log.Timber
++import java.time.LocalDate
++import java.time.ZoneId
++
++/**
++ * Entry point of the typing statistics feature.
++ *
++ * Counting is deliberately cheap for the IME main thread: [recordCommit] and
++ * [recordCorrection] only bump in-memory counters and (re)schedule a debounced flush.
++ * Everything else happens on a background [Dispatchers.IO] coroutine scope, so Room is
++ * never touched from the main thread.
++ *
++ * Only aggregated counts are stored, never any text content.
++ */
++object TypingStatsManager {
++
++    /** How long to buffer increments before writing them to Room. */
++    private const val FLUSH_DELAY_MS = 1_500L
++
++    /**
++     * Also flush while the user is still typing after this many buffered characters, so a long
++     * uninterrupted burst is not lost if the IME process is killed before the debounce fires.
++     */
++    private const val EARLY_FLUSH_CHARACTERS = 2_000L
++
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++    private val writeMutex = Mutex()
++    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
++
++    private val _snapshot = MutableStateFlow(TypingStatsSnapshot.empty())
++
++    /** Latest statistics; updated after flushing/reloading, not on every character. */
++    val snapshot: StateFlow<TypingStatsSnapshot> = _snapshot.asStateFlow()
++
++    private val prefs: AppPrefs
++        get() = AppPrefs.getInstance()
++
++    private lateinit var database: TypingStatsDatabase
++    private lateinit var dao: TypingStatsDao
++
++    @Volatile
++    private var initialized = false
++
++    /** Cached value of [AppPrefs.stats]`enabled`, to avoid touching prefs per keystroke. */
++    @Volatile
++    private var trackingEnabled = true
++
++    private val initLock = Any()
++    private val bufferLock = Any()
++
++    // buffered increments per local day, guarded by [bufferLock].
++    // Keep the day the keys were pressed, so a burst that crosses midnight is still
++    // attributed to the correct heatmap cell.
++    private val pending = mutableMapOf<String, Delta>()
++
++    private val flushRunnable = Runnable { flush() }
++
++    @Keep
++    private val enabledListener = ManagedPreference.OnChangeListener<Boolean> { _, value ->
++        trackingEnabled = value
++    }
++
++    private class Delta(
++        val characters: Long,
++        val corrections: Long,
++        val commits: Long,
++    ) {
++        val isEmpty: Boolean
++            get() = characters == 0L && corrections == 0L && commits == 0L
++
++        companion object {
++            val Empty = Delta(0L, 0L, 0L)
++        }
++    }
++
++    /**
++     * Open the database and load the initial snapshot.
++     *
++     * Idempotent, safe to call from both [android.app.Application] and the IME service,
++     * and safe when the database cannot be opened (statistics are silently disabled then).
++     */
++    fun init(context: Context) {
++        if (initialized) return
++        synchronized(initLock) {
++            if (initialized) return
++            try {
++                val appContext = context.applicationContext ?: context
++                database = TypingStatsDatabase.build(appContext)
++                dao = database.typingStatsDao()
++                val startTimePref = prefs.stats.startTime
++                if (startTimePref.getValue() == 0L) {
++                    // "since install" anchor, first time we ever run
++                    startTimePref.setValue(System.currentTimeMillis())
++                }
++                trackingEnabled = prefs.stats.enabled.getValue()
++                prefs.stats.enabled.registerOnChangeListener(enabledListener)
++                initialized = true
++            } catch (e: Exception) {
++                Timber.e(e, "Failed to initialize typing statistics")
++                return
++            }
++        }
++        _snapshot.value = TypingStatsSnapshot.empty(prefs.stats.startTime.getValue())
++        refresh()
++    }
++
++    /**
++     * Buffer [text] (which is about to be committed) for today.
++     *
++     * A no-op when tracking is disabled or the manager failed to initialize.
++     */
++    fun recordCommit(text: CharSequence) {
++        if (text.isEmpty()) return
++        if (!isTrackingActive()) return
++        val characters = TypingStatsMath.countCharacters(text)
++        val date = todayKey()
++        val bufferedCharacters = synchronized(bufferLock) {
++            val old = pending[date] ?: Delta.Empty
++            pending[date] = Delta(
++                old.characters + characters,
++                old.corrections,
++                old.commits + 1L
++            )
++            pending.values.sumOf { it.characters }
++        }
++        if (bufferedCharacters >= EARLY_FLUSH_CHARACTERS) {
++            flush()
++        } else {
++            scheduleFlush()
++        }
++    }
++
++    /**
++     * Buffer [count] deleted characters that had already been committed.
++     *
++     * A no-op when tracking is disabled or the manager failed to initialize.
++     */
++    fun recordCorrection(count: Int) {
++        if (count <= 0) return
++        if (!isTrackingActive()) return
++        val date = todayKey()
++        synchronized(bufferLock) {
++            val old = pending[date] ?: Delta.Empty
++            pending[date] = Delta(old.characters, old.corrections + count.toLong(), old.commits)
++        }
++        scheduleFlush()
++    }
++
++    /**
++     * Write buffered increments to Room as soon as possible.
++     *
++     * Non-blocking, safe to call from the main thread.
++     */
++    fun flush() {
++        if (!initialized) return
++        mainHandler.removeCallbacks(flushRunnable)
++        val deltas = drainPending()
++        if (deltas.isEmpty()) return
++        scope.launch {
++            write(deltas)
++            publishSnapshot()
++        }
++    }
++
++    /** Reload the snapshot from Room, after flushing anything still buffered. */
++    fun refresh() {
++        if (!initialized) return
++        scope.launch {
++            write(drainPending())
++            publishSnapshot()
++        }
++    }
++
++    /** Drop all recorded statistics and restart the "since install" anchor from now. */
++    fun reset() {
++        if (!initialized) return
++        mainHandler.removeCallbacks(flushRunnable)
++        synchronized(bufferLock) {
++            pending.clear()
++        }
++        scope.launch {
++            writeMutex.withLock {
++                try {
++                    dao.clear()
++                } catch (e: Exception) {
++                    Timber.e(e, "Failed to clear typing statistics")
++                }
++            }
++            prefs.stats.startTime.setValue(System.currentTimeMillis())
++            publishSnapshot()
++        }
++    }
++
++    /** Persist whether typing activity should be recorded at all. */
++    fun setEnabled(enabled: Boolean) {
++        trackingEnabled = enabled
++        prefs.stats.enabled.setValue(enabled)
++        // persist what has been buffered so far before recording stops
++        if (!enabled) flush()
++    }
++
++    private fun isTrackingActive(): Boolean = initialized && trackingEnabled
++
++    private fun scheduleFlush() {
++        val handler = mainHandler
++        handler.removeCallbacks(flushRunnable)
++        handler.postDelayed(flushRunnable, FLUSH_DELAY_MS)
++    }
++
++    private fun drainPending(): Map<String, Delta> {
++        synchronized(bufferLock) {
++            if (pending.isEmpty()) return emptyMap()
++            val drained = pending.toMap()
++            pending.clear()
++            return drained
++        }
++    }
++
++    private fun todayKey(): String = LocalDate.now(ZoneId.systemDefault()).toString()
++
++    private suspend fun write(deltas: Map<String, Delta>) {
++        if (deltas.isEmpty()) return
++        writeMutex.withLock {
++            try {
++                val now = System.currentTimeMillis()
++                database.withTransaction {
++                    deltas.forEach { (date, delta) ->
++                        if (delta.isEmpty) return@forEach
++                        val existing = dao.get(date)
++                        val updated = if (existing == null) {
++                            TypingDailyStat(
++                                date = date,
++                                characters = delta.characters,
++                                corrections = delta.corrections,
++                                commits = delta.commits,
++                                updatedAt = now,
++                            )
++                        } else {
++                            existing.copy(
++                                characters = existing.characters + delta.characters,
++                                corrections = existing.corrections + delta.corrections,
++                                commits = existing.commits + delta.commits,
++                                updatedAt = now,
++                            )
++                        }
++                        dao.upsert(updated)
++                    }
++                }
++            } catch (e: Exception) {
++                Timber.e(e, "Failed to persist typing statistics")
++            }
++        }
++    }
++
++    private suspend fun publishSnapshot() {
++        writeMutex.withLock {
++            if (!initialized) return
++            try {
++                val days = dao.all()
++                val startTime = prefs.stats.startTime.getValue()
++                _snapshot.value = TypingStatsSnapshot.from(days, startTime)
++            } catch (e: Exception) {
++                Timber.e(e, "Failed to load typing statistics")
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMath.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMath.kt
+new file mode 100644
+index 00000000..32e207a6
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMath.kt
+@@ -0,0 +1,121 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.stats
++
++import java.time.LocalDate
++
++/**
++ * Pure functions behind the typing statistics feature.
++ *
++ * Everything here is plain Kotlin/JVM (only `java.time` is used, which is available on Android
++ * via core library desugaring), so it can be unit tested without the Android framework.
++ */
++object TypingStatsMath {
++
++    /**
++     * Count the characters of [text] as Unicode code points, excluding whitespace and
++     * ISO control characters, so that newlines, tabs and similar do not count as typing work.
++     */
++    fun countCharacters(text: CharSequence): Int {
++        var count = 0
++        var i = 0
++        while (i < text.length) {
++            val codePoint = Character.codePointAt(text, i)
++            i += Character.charCount(codePoint)
++            if (Character.isWhitespace(codePoint)) continue
++            if (Character.isISOControl(codePoint)) continue
++            count++
++        }
++        return count
++    }
++
++    /**
++     * `characters / (characters + corrections)`, clamped to `0..1`.
++     * Returns `1f` when the denominator is not positive, i.e. when nothing is recorded yet.
++     */
++    fun accuracy(characters: Long, corrections: Long): Float {
++        val denominator = characters.toDouble() + corrections.toDouble()
++        if (denominator <= 0.0) return 1f
++        return (characters.toDouble() / denominator).toFloat().coerceIn(0f, 1f)
++    }
++
++    fun errorRate(characters: Long, corrections: Long): Float =
++        1f - accuracy(characters, corrections)
++
++    /**
++     * Number of consecutive active days ending today.
++     *
++     * If today has no activity yet but yesterday has, the streak is still alive and counted
++     * from yesterday (the user may simply not have typed today). The streak stops at the
++     * first missing day.
++     */
++    fun currentStreak(activeDates: Set<LocalDate>, today: LocalDate): Int {
++        if (activeDates.isEmpty()) return 0
++        var day = when {
++            today in activeDates -> today
++            today.minusDays(1) in activeDates -> today.minusDays(1)
++            else -> return 0
++        }
++        var streak = 0
++        while (day in activeDates) {
++            streak++
++            day = day.minusDays(1)
++        }
++        return streak
++    }
++
++    fun longestStreak(activeDates: Set<LocalDate>): Int {
++        if (activeDates.isEmpty()) return 0
++        var longest = 1
++        var run = 0
++        var previous: LocalDate? = null
++        // newest first, so consecutive days are adjacent in the iteration
++        for (day in activeDates.sortedDescending()) {
++            run = if (previous != null && previous.minusDays(1) == day) run + 1 else 1
++            if (run > longest) longest = run
++            previous = day
++        }
++        return longest
++    }
++
++    /**
++     * Map raw per-day counts to heatmap levels in `0..maxLevel`.
++     *
++     * Level 0 means "no activity"; every positive count is scaled against the global maximum
++     * so that the busiest day always reaches [maxLevel]:
++     * `1 + floor(count / max * (maxLevel - 1))`.
++     */
++    fun heatmapLevels(
++        counts: Map<LocalDate, Long>,
++        maxLevel: Int = 4
++    ): Map<LocalDate, Int> {
++        if (maxLevel <= 0) return counts.keys.associateWith { 0 }
++        val max = counts.values.maxOrNull() ?: return emptyMap()
++        if (max <= 0L) return counts.keys.associateWith { 0 }
++        val spread = (maxLevel - 1).toLong()
++        return counts.mapValues { (_, count) ->
++            when {
++                count <= 0L -> 0
++                count >= max -> maxLevel
++                else -> (1 + scaledLevel(count, max, spread)).coerceIn(1, maxLevel)
++            }
++        }
++    }
++
++    /**
++     * `floor(count * spread / max)` for `0 < count < max`, using exact integer arithmetic
++     * (a floating point division would drop the exact boundaries, e.g. `2 / 6 * 3`).
++     */
++    private fun scaledLevel(count: Long, max: Long, spread: Long): Int {
++        if (spread == 0L) return 0
++        val product = if (count > Long.MAX_VALUE / spread) {
++            // unreachable for realistic counts, fall back to floating point instead of overflowing
++            return ((count.toDouble() * spread.toDouble()) / max.toDouble()).toInt()
++        } else {
++            count * spread
++        }
++        return (product / max).toInt()
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsSnapshot.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsSnapshot.kt
+new file mode 100644
+index 00000000..63d1cafa
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsSnapshot.kt
+@@ -0,0 +1,92 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.stats
++
++import java.time.LocalDate
++
++/**
++ * Immutable view of the stored typing statistics.
++ *
++ * [days] is expected to be sorted by date, one entry per day with recorded activity.
++ *
++ * @param startTime epoch millis of the "since install" anchor (when tracking started)
++ */
++data class TypingStatsSnapshot(
++    val days: List<TypingDailyStat>,
++    val startTime: Long,
++    val totalCharacters: Long,
++    val totalCorrections: Long,
++    val totalCommits: Long,
++    val today: LocalDate = LocalDate.now(),
++) {
++
++    val accuracy: Float
++        get() = TypingStatsMath.accuracy(totalCharacters, totalCorrections)
++
++    val errorRate: Float
++        get() = TypingStatsMath.errorRate(totalCharacters, totalCorrections)
++
++    val activeDays: Int
++        get() = days.size
++
++    val currentStreak: Int
++        get() = TypingStatsMath.currentStreak(activeDateSet(), today)
++
++    val longestStreak: Int
++        get() = TypingStatsMath.longestStreak(activeDateSet())
++
++    val bestDay: TypingDailyStat?
++        get() = days.filter { it.characters > 0L }.maxByOrNull { it.characters }
++
++    val todayStat: TypingDailyStat?
++        get() = days.firstOrNull { it.date == today.toString() }
++
++    /** Characters per day, for [TypingStatsMath.heatmapLevels]. */
++    fun countsByDate(): Map<LocalDate, Long> {
++        val result = LinkedHashMap<LocalDate, Long>(days.size)
++        days.forEach { day ->
++            val date = day.date.toLocalDateOrNull() ?: return@forEach
++            result[date] = day.characters
++        }
++        return result
++    }
++
++    private fun activeDateSet(): Set<LocalDate> {
++        val result = HashSet<LocalDate>(days.size)
++        days.forEach { day ->
++            day.date.toLocalDateOrNull()?.let { result.add(it) }
++        }
++        return result
++    }
++
++    companion object {
++        fun empty(startTime: Long = 0L): TypingStatsSnapshot =
++            TypingStatsSnapshot(
++                days = emptyList(),
++                startTime = startTime,
++                totalCharacters = 0L,
++                totalCorrections = 0L,
++                totalCommits = 0L,
++            )
++
++        fun from(days: List<TypingDailyStat>, startTime: Long): TypingStatsSnapshot =
++            TypingStatsSnapshot(
++                days = days,
++                startTime = startTime,
++                totalCharacters = days.sumOf { it.characters },
++                totalCorrections = days.sumOf { it.corrections },
++                totalCommits = days.sumOf { it.commits },
++            )
++    }
++}
++
++/**
++ * Parse an ISO local date, tolerating corrupted rows (a broken row must never crash the IME).
++ */
++internal fun String.toLocalDateOrNull(): LocalDate? = try {
++    LocalDate.parse(this)
++} catch (e: RuntimeException) {
++    null
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/input/FcitxInputMethodService.kt b/app/src/main/java/org/fcitx/fcitx5/android/input/FcitxInputMethodService.kt
+index f18e3f7d..5c7c0b43 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/input/FcitxInputMethodService.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/input/FcitxInputMethodService.kt
+@@ -61,6 +61,7 @@ import org.fcitx.fcitx5.android.data.InputFeedbacks
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
+ import org.fcitx.fcitx5.android.data.prefs.ManagedPreferenceProvider
++import org.fcitx.fcitx5.android.data.stats.TypingStatsManager
+ import org.fcitx.fcitx5.android.data.theme.Theme
+ import org.fcitx.fcitx5.android.data.theme.ThemeManager
+ import org.fcitx.fcitx5.android.input.cursor.CursorRange
+@@ -224,6 +225,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+             }
+         }
+         super.onCreate()
++        TypingStatsManager.init(this)
+         decorView = window.window!!.decorView
+         contentView = decorView.findViewById(android.R.id.content)
+         lastKnownConfig = resources.configuration
+@@ -287,6 +289,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+                     val keyCode = it.sym.keyCode
+                     if (keyCode != KeyEvent.KEYCODE_UNKNOWN) {
+                         // recognized keyCode
++                        if (!it.up &&
++                            (keyCode == KeyEvent.KEYCODE_DEL || keyCode == KeyEvent.KEYCODE_FORWARD_DEL)
++                        ) {
++                            // hardware deletion of already committed text
++                            recordDeletion()
++                        }
+                         val eventTime = SystemClock.uptimeMillis()
+                         if (it.up) {
+                             sendUpKeyEvent(eventTime, keyCode, it.states.metaState)
+@@ -339,6 +347,10 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+ 
+     private fun handleDeleteSurrounding(before: Int, after: Int) {
+         val ic = currentInputConnection ?: return
++        if (composing.isEmpty()) {
++            val deleted = before.toLong() + after.toLong()
++            if (deleted > 0L) recordCorrection(deleted.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
++        }
+         if (before > 0) {
+             selection.predictOffset(-before)
+         }
+@@ -350,6 +362,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+     }
+ 
+     private fun handleBackspaceKey() {
++        recordDeletion()
+         val lastSelection = selection.latest
+         if (lastSelection.isNotEmpty()) {
+             selection.predict(lastSelection.start)
+@@ -422,6 +435,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+ 
+     fun commitText(text: String, cursor: Int = -1) {
+         val ic = currentInputConnection ?: return
++        recordCommitText(text)
+         // when composing text equals commit content, finish composing text as-is
+         if (composing.isNotEmpty() && composingText.toString() == text) {
+             val c = if (cursor == -1) text.length else cursor
+@@ -488,10 +502,59 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+     fun deleteSelection() {
+         val lastSelection = selection.latest
+         if (lastSelection.isEmpty()) return
++        if (composing.isEmpty()) {
++            recordCorrection(lastSelection.end - lastSelection.start)
++        }
+         selection.predict(lastSelection.start)
+         currentInputConnection?.commitText("", 1)
+     }
+ 
++    /**
++     * Whether the current editor is a password field, in which case nothing is recorded.
++     */
++    private fun isPrivateInput(): Boolean {
++        val info = currentInputEditorInfo ?: return false
++        val variation = info.inputType and InputType.TYPE_MASK_VARIATION
++        return when (info.inputType and InputType.TYPE_MASK_CLASS) {
++            InputType.TYPE_CLASS_TEXT ->
++                variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
++                    variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
++                    variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
++
++            InputType.TYPE_CLASS_NUMBER ->
++                variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
++
++            else -> false
++        }
++    }
++
++    private fun recordCommitText(text: CharSequence) {
++        if (text.isEmpty()) return
++        if (isPrivateInput()) return
++        TypingStatsManager.recordCommit(text)
++    }
++
++    private fun recordCorrection(count: Int) {
++        if (count <= 0) return
++        if (isPrivateInput()) return
++        TypingStatsManager.recordCorrection(count)
++    }
++
++    /**
++     * Count a deletion of already committed text, as triggered by backspace or a hardware
++     * delete key. Cancelling the composing text is not a correction, so it is never counted.
++     */
++    private fun recordDeletion() {
++        if (composing.isNotEmpty()) return
++        val lastSelection = selection.latest
++        when {
++            lastSelection.isNotEmpty() ->
++                recordCorrection(lastSelection.end - lastSelection.start)
++
++            lastSelection.start > 0 -> recordCorrection(1)
++        }
++    }
++
+     fun sendCombinationKeyEvents(
+         keyEventCode: Int,
+         alt: Boolean = false,
+@@ -1065,6 +1128,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+ 
+     override fun onFinishInput() {
+         Timber.d("onFinishInput")
++        TypingStatsManager.flush()
+         postFcitxJob {
+             focus(false)
+         }
+@@ -1084,6 +1148,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
+     }
+ 
+     override fun onDestroy() {
++        TypingStatsManager.flush()
+         recreateInputViewPrefs.forEach {
+             it.unregisterOnChangeListener(recreateInputViewListener)
+         }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt
+index b29a5e71..02c150c9 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainFragment.kt
+@@ -1,6 +1,6 @@
+ /*
+  * SPDX-License-Identifier: LGPL-2.1-or-later
+- * SPDX-FileCopyrightText: Copyright 2021-2025 Fcitx5 for Android Contributors
++ * SPDX-FileCopyrightText: Copyright 2021-2026 Fcitx5 for Android Contributors
+  */
+ package org.fcitx.fcitx5.android.ui.main
+ 
+@@ -11,18 +11,20 @@ import android.view.Menu
+ import android.view.MenuInflater
+ import android.view.MenuItem
+ import android.view.View
+-import androidx.annotation.DrawableRes
+ import androidx.annotation.StringRes
+ import androidx.core.view.MenuProvider
+ import androidx.lifecycle.Lifecycle
+ import androidx.preference.PreferenceCategory
++import androidx.preference.PreferenceScreen
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.ui.common.PaddingPreferenceFragment
+ import org.fcitx.fcitx5.android.ui.files.FileManagerActivity
++import org.fcitx.fcitx5.android.ui.main.heatmap.TypingHeatmapPreference
++import org.fcitx.fcitx5.android.ui.main.home.HomeCategoryPreference
++import org.fcitx.fcitx5.android.ui.main.home.HomeSpacerPreference
++import org.fcitx.fcitx5.android.ui.main.home.addHomePreference
+ import org.fcitx.fcitx5.android.ui.main.settings.SettingsRoute
+ import org.fcitx.fcitx5.android.utils.Const
+-import org.fcitx.fcitx5.android.utils.addCategory
+-import org.fcitx.fcitx5.android.utils.addPreference
+ import org.fcitx.fcitx5.android.utils.item
+ import org.fcitx.fcitx5.android.utils.navigateWithAnim
+ import org.fcitx.fcitx5.android.utils.startActivity
+@@ -56,79 +58,98 @@ class MainFragment : PaddingPreferenceFragment() {
+         override fun onMenuItemSelected(menuItem: MenuItem): Boolean = false
+     }
+ 
+-    private fun PreferenceCategory.addDestinationPreference(
++    private fun PreferenceScreen.addHomeCategory(
+         @StringRes title: Int,
+-        @DrawableRes icon: Int,
+-        route: SettingsRoute
++        block: PreferenceCategory.() -> Unit
+     ) {
+-        addPreference(title, icon = icon) {
+-            navigateWithAnim(route)
+-        }
++        val category = HomeCategoryPreference(context, context.getString(title))
++        addPreference(category)
++        block(category)
+     }
+ 
+     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+         preferenceScreen = preferenceManager.createPreferenceScreen(requireContext()).apply {
+-            addCategory("Fcitx") {
+-                addDestinationPreference(
++            // The heatmap card sits above everything else and opens the statistics page.
++            addPreference(TypingHeatmapPreference(requireContext()).apply {
++                isIconSpaceReserved = false
++                onOpenStats = { navigateWithAnim(SettingsRoute.TypingStats) }
++            })
++
++            addHomeCategory(R.string.home_category_input) {
++                addHomePreference(
+                     R.string.global_options,
+-                    R.drawable.ic_baseline_tune_24,
+-                    SettingsRoute.GlobalConfig
+-                )
+-                addDestinationPreference(
++                    R.string.home_summary_global,
++                    R.drawable.ic_baseline_tune_24
++                ) { navigateWithAnim(SettingsRoute.GlobalConfig) }
++                addHomePreference(
+                     R.string.input_methods,
+-                    R.drawable.ic_baseline_language_24,
+-                    SettingsRoute.InputMethodList
+-                )
+-                addDestinationPreference(
++                    R.string.home_summary_ime,
++                    R.drawable.ic_baseline_language_24
++                ) { navigateWithAnim(SettingsRoute.InputMethodList) }
++                addHomePreference(
+                     R.string.addons,
+-                    R.drawable.ic_baseline_extension_24,
+-                    SettingsRoute.AddonList
+-                )
++                    R.string.home_summary_addons,
++                    R.drawable.ic_baseline_extension_24
++                ) { navigateWithAnim(SettingsRoute.AddonList) }
+             }
+-            addCategory("Android") {
+-                addDestinationPreference(
++
++            addHomeCategory(R.string.home_category_appearance) {
++                addHomePreference(
+                     R.string.theme,
+-                    R.drawable.ic_baseline_palette_24,
+-                    SettingsRoute.Theme
+-                )
+-                addDestinationPreference(
++                    R.string.home_summary_theme,
++                    R.drawable.ic_baseline_palette_24
++                ) { navigateWithAnim(SettingsRoute.Theme) }
++                addHomePreference(
+                     R.string.virtual_keyboard,
+-                    R.drawable.ic_baseline_keyboard_24,
+-                    SettingsRoute.VirtualKeyboard
+-                )
+-                addDestinationPreference(
++                    R.string.home_summary_keyboard,
++                    R.drawable.ic_baseline_keyboard_24
++                ) { navigateWithAnim(SettingsRoute.VirtualKeyboard) }
++                addHomePreference(
+                     R.string.candidates_window,
+-                    R.drawable.ic_baseline_list_alt_24,
+-                    SettingsRoute.CandidatesWindow
+-                )
+-                addDestinationPreference(
+-                    R.string.clipboard,
+-                    R.drawable.ic_clipboard,
+-                    SettingsRoute.Clipboard
+-                )
+-                addDestinationPreference(
++                    R.string.home_summary_candidates,
++                    R.drawable.ic_baseline_list_alt_24
++                ) { navigateWithAnim(SettingsRoute.CandidatesWindow) }
++                addHomePreference(
+                     R.string.emoji_and_symbols,
+-                    R.drawable.ic_baseline_emoji_symbols_24,
+-                    SettingsRoute.Symbol
+-                )
+-                addDestinationPreference(
+-                    R.string.plugins,
+-                    R.drawable.ic_baseline_android_24,
+-                    SettingsRoute.Plugin
+-                )
+-                addPreference(
++                    R.string.home_summary_symbols,
++                    R.drawable.ic_baseline_emoji_symbols_24
++                ) { navigateWithAnim(SettingsRoute.Symbol) }
++            }
++
++            addHomeCategory(R.string.home_category_tools) {
++                addHomePreference(
++                    R.string.clipboard,
++                    R.string.home_summary_clipboard,
++                    R.drawable.ic_clipboard
++                ) { navigateWithAnim(SettingsRoute.Clipboard) }
++                addHomePreference(
+                     R.string.file_manager,
+-                    R.string.file_manager_summary,
++                    R.string.home_summary_files,
+                     R.drawable.ic_folder_24
+-                ) {
+-                    startActivity<FileManagerActivity>()
+-                }
+-                addDestinationPreference(
++                ) { startActivity<FileManagerActivity>() }
++                addHomePreference(
++                    R.string.plugins,
++                    R.string.home_summary_plugins,
++                    R.drawable.ic_baseline_android_24
++                ) { navigateWithAnim(SettingsRoute.Plugin) }
++                addHomePreference(
++                    R.string.home_stats_title,
++                    R.string.home_summary_stats,
++                    R.drawable.ic_stats_24
++                ) { navigateWithAnim(SettingsRoute.TypingStats) }
++            }
++
++            addHomeCategory(R.string.home_category_system) {
++                addHomePreference(
+                     R.string.advanced,
+-                    R.drawable.ic_baseline_more_horiz_24,
+-                    SettingsRoute.Advanced
+-                )
++                    R.string.home_summary_advanced,
++                    R.drawable.ic_baseline_more_horiz_24
++                ) { navigateWithAnim(SettingsRoute.Advanced) }
+             }
++
++            // PaddingPreferenceFragment already handles the navigation bar inset; this only
++            // keeps the last row from hugging the bottom edge.
++            addPreference(HomeSpacerPreference(requireContext()))
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt
+new file mode 100644
+index 00000000..f1ae7398
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/ContributionHeatmapView.kt
+@@ -0,0 +1,457 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.heatmap
++
++import android.content.Context
++import android.content.res.Configuration
++import android.graphics.Canvas
++import android.graphics.Paint
++import android.graphics.RectF
++import android.util.AttributeSet
++import android.util.TypedValue
++import android.view.MotionEvent
++import android.view.View
++import android.view.ViewTreeObserver
++import android.widget.HorizontalScrollView
++import androidx.annotation.AttrRes
++import androidx.annotation.ColorInt
++import androidx.core.content.ContextCompat
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.data.stats.TypingStatsMath
++import org.fcitx.fcitx5.android.utils.isDarkMode
++import org.fcitx.fcitx5.android.utils.toast
++import java.text.DateFormat
++import java.text.DateFormatSymbols
++import java.time.DayOfWeek
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.temporal.ChronoUnit
++import java.time.temporal.TemporalAdjusters
++import java.util.Date
++import java.util.Locale
++import kotlin.math.max
++import kotlin.math.min
++import kotlin.math.roundToInt
++
++/**
++ * GitHub-style contribution calendar for typing statistics.
++ *
++ * Columns are weeks (the 53 weeks ending with the current one), rows are weekdays
++ * (Monday first). The view renders itself at its natural size and is meant to live inside a
++ * [android.widget.HorizontalScrollView]; tapping a cell reports the day through
++ * [onDayClickListener].
++ */
++class ContributionHeatmapView @JvmOverloads constructor(
++    context: Context,
++    attrs: AttributeSet? = null
++) : View(context, attrs) {
++
++    /**
++     * Invoked when a day cell is tapped. The default implementation shows a toast with the
++     * localized date and the number of characters typed that day.
++     */
++    var onDayClickListener: ((LocalDate, Long) -> Unit)? = null
++
++    private var isDark: Boolean = context.resources.configuration.isDarkMode()
++    private var palette: HeatmapPalette = HeatmapPalette.Github
++    private var customColor: Int = 0xFF2DA44E.toInt()
++    private var colors: IntArray = HeatmapPalette.Github.colors(customColor, isDark)
++
++    private var counts: Map<LocalDate, Long> = emptyMap()
++    private var levels: Map<LocalDate, Int> = emptyMap()
++    private var totalCharacters: Long = 0L
++    private var hasData: Boolean = false
++
++    /** A gesture started on a day cell; we consume it even if the finger ends on a gap. */
++    private var trackingTap: Boolean = false
++
++    /** Keeps the "no data" hint centered on the visible part of the scrolled grid. */
++    private val scrollInvalidator = ViewTreeObserver.OnScrollChangedListener {
++        if (!hasData) invalidate()
++    }
++
++    private var cellSize = 0f
++    private var cellGap = 0f
++    private var cellRadius = 0f
++    private var labelGap = 0f
++    private var labelWidth = 0f
++    private var monthLabelHeight = 0f
++    private var monthBaseline = 0f
++    private var hintRadius = 0f
++    private var weekdayLabels: List<String> = emptyList()
++    private var shortMonths: Array<String> = emptyArray()
++
++    private val cellPaint = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.STROKE
++    }
++    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
++    private val hintTextPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
++    private val hintBackdropPaint = Paint(Paint.ANTI_ALIAS_FLAG)
++
++    private val defaultDayClickListener: (LocalDate, Long) -> Unit = { date, count ->
++        val dateText = if (date == LocalDate.now()) {
++            context.getString(R.string.heatmap_today)
++        } else {
++            val millis = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
++            DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.getDefault())
++                .format(Date(millis))
++        }
++        val countText = context.resources.getQuantityString(
++            R.plurals.heatmap_chars_count,
++            count.coerceIn(0L, 2L).toInt(),
++            formatCountCompact(count)
++        )
++        context.toast(context.getString(R.string.heatmap_day_tooltip, dateText, countText))
++    }
++
++    /** Screen-space left edge of the first cell column. */
++    private val gridLeft: Float get() = paddingLeft + labelWidth + labelGap
++
++    /** Screen-space top edge of the first cell row. */
++    private val gridTop: Float get() = paddingTop + monthLabelHeight
++
++    /** Distance between two adjacent cell origins. */
++    private val step: Float get() = cellSize + cellGap
++
++    init {
++        isClickable = true
++        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
++        refreshMetrics()
++        refreshThemeColors()
++        updateContentDescription()
++    }
++
++    /**
++     * Replace the rendered data.
++     *
++     * @param counts characters per day, keyed by local date
++     * @param palette selected color palette
++     * @param customColor ARGB color for [HeatmapPalette.Custom]
++     * @param isDark whether the surrounding theme is dark
++     */
++    fun setData(
++        counts: Map<LocalDate, Long>,
++        palette: HeatmapPalette,
++        customColor: Int,
++        isDark: Boolean
++    ) {
++        this.counts = counts
++        this.palette = palette
++        this.customColor = customColor
++        this.isDark = isDark
++        this.colors = palette.colors(customColor, isDark)
++        this.levels = if (counts.isEmpty()) emptyMap() else TypingStatsMath.heatmapLevels(counts)
++        this.totalCharacters = counts.values.sum()
++        this.hasData = counts.any { it.value > 0L }
++        refreshThemeColors()
++        updateContentDescription()
++        invalidate()
++    }
++
++    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
++        val gridWidth = WEEKS * cellSize + (WEEKS - 1) * cellGap
++        val gridHeight = DAYS_PER_WEEK * cellSize + (DAYS_PER_WEEK - 1) * cellGap
++        val desiredWidth = (gridLeft + gridWidth + paddingRight).roundToInt()
++        val desiredHeight = (gridTop + gridHeight + paddingBottom).roundToInt()
++
++        val width = when (MeasureSpec.getMode(widthMeasureSpec)) {
++            MeasureSpec.EXACTLY -> MeasureSpec.getSize(widthMeasureSpec)
++            MeasureSpec.AT_MOST -> min(desiredWidth, MeasureSpec.getSize(widthMeasureSpec))
++            else -> desiredWidth
++        }
++        val height = resolveSize(desiredHeight, heightMeasureSpec)
++        setMeasuredDimension(
++            max(width, suggestedMinimumWidth),
++            max(height, suggestedMinimumHeight)
++        )
++    }
++
++    override fun onConfigurationChanged(newConfig: Configuration) {
++        super.onConfigurationChanged(newConfig)
++        isDark = newConfig.isDarkMode()
++        colors = palette.colors(customColor, isDark)
++        refreshMetrics()
++        refreshThemeColors()
++        requestLayout()
++        invalidate()
++    }
++
++    override fun onDraw(canvas: Canvas) {
++        val today = LocalDate.now()
++        val firstMonday = firstMonday(today)
++        drawMonthLabels(canvas, firstMonday, today)
++        drawWeekdayLabels(canvas)
++        drawCells(canvas, firstMonday, today)
++        if (!hasData) drawNoDataHint(canvas)
++    }
++
++    override fun onAttachedToWindow() {
++        super.onAttachedToWindow()
++        viewTreeObserver.addOnScrollChangedListener(scrollInvalidator)
++    }
++
++    override fun onDetachedFromWindow() {
++        viewTreeObserver.removeOnScrollChangedListener(scrollInvalidator)
++        super.onDetachedFromWindow()
++    }
++
++    override fun onTouchEvent(event: MotionEvent): Boolean {
++        when (event.actionMasked) {
++            MotionEvent.ACTION_DOWN -> {
++                // Consume the whole grid area (gaps included) so taps on empty space do not
++                // reach the preference row and open the statistics screen by accident.
++                trackingTap = isInsideGrid(event.x, event.y)
++                if (trackingTap) return true
++            }
++
++            MotionEvent.ACTION_UP -> {
++                if (trackingTap) {
++                    trackingTap = false
++                    val date = dateAt(event.x, event.y)
++                    if (date != null) {
++                        performClick()
++                        val count = counts[date] ?: 0L
++                        (onDayClickListener ?: defaultDayClickListener).invoke(date, count)
++                    }
++                    return true
++                }
++            }
++
++            MotionEvent.ACTION_CANCEL -> {
++                if (trackingTap) {
++                    trackingTap = false
++                    return true
++                }
++            }
++        }
++        return super.onTouchEvent(event)
++    }
++
++    private fun firstMonday(today: LocalDate): LocalDate =
++        today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
++            .minusWeeks((WEEKS - 1).toLong())
++
++    private fun drawMonthLabels(canvas: Canvas, firstMonday: LocalDate, today: LocalDate) {
++        val baseline = paddingTop + monthBaseline
++        var lastRight = Float.NEGATIVE_INFINITY
++        var lastMonth = -1
++        for (week in 0 until WEEKS) {
++            val monday = firstMonday.plusWeeks(week.toLong())
++            if (monday.isAfter(today)) break
++            if (monday.monthValue == lastMonth) continue
++            lastMonth = monday.monthValue
++            val label = shortMonths.getOrNull(monday.monthValue - 1) ?: continue
++            if (label.isEmpty()) continue
++            val x = gridLeft + week * step
++            // Never overlap the previous month label.
++            if (x < lastRight + labelGap) continue
++            canvas.drawText(label, x, baseline, labelPaint)
++            lastRight = x + labelPaint.measureText(label)
++        }
++    }
++
++    private fun drawWeekdayLabels(canvas: Canvas) {
++        val metrics = labelPaint.fontMetrics
++        val verticalCentering = cellSize / 2f - (metrics.ascent + metrics.descent) / 2f
++        WEEKDAY_ROWS.forEachIndexed { index, row ->
++            val text = weekdayLabels.getOrNull(index) ?: return@forEachIndexed
++            val y = gridTop + row * step + verticalCentering
++            val x = gridLeft - labelGap - labelPaint.measureText(text)
++            canvas.drawText(text, x, y, labelPaint)
++        }
++    }
++
++    private fun drawCells(canvas: Canvas, firstMonday: LocalDate, today: LocalDate) {
++        val left = gridLeft
++        val top = gridTop
++        val maxLevel = colors.size - 1
++        for (week in 0 until WEEKS) {
++            val monday = firstMonday.plusWeeks(week.toLong())
++            if (monday.isAfter(today)) break
++            val x = left + week * step
++            for (row in 0 until DAYS_PER_WEEK) {
++                val date = monday.plusDays(row.toLong())
++                // Draw the rest of the current week as empty cells, like GitHub does, so the
++                // grid keeps a rectangular silhouette instead of a ragged edge.
++                val level = if (date.isAfter(today)) {
++                    0
++                } else {
++                    (levels[date] ?: 0).coerceIn(0, maxLevel)
++                }
++                cellPaint.color = colors[level]
++                val y = top + row * step
++                canvas.drawRoundRect(
++                    x, y, x + cellSize, y + cellSize, cellRadius, cellRadius, cellPaint
++                )
++            }
++        }
++        drawTodayOutline(canvas, firstMonday, today)
++    }
++
++    private fun drawTodayOutline(canvas: Canvas, firstMonday: LocalDate, today: LocalDate) {
++        val thisMonday = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
++        val week = ChronoUnit.WEEKS.between(firstMonday, thisMonday).toInt()
++        val row = today.dayOfWeek.value - 1
++        if (week !in 0 until WEEKS || row !in 0 until DAYS_PER_WEEK) return
++        val x = gridLeft + week * step
++        val y = gridTop + row * step
++        canvas.drawRoundRect(x, y, x + cellSize, y + cellSize, cellRadius, cellRadius, outlinePaint)
++    }
++
++    private fun drawNoDataHint(canvas: Canvas) {
++        val text = context.getString(R.string.heatmap_no_data)
++        val textWidth = hintTextPaint.measureText(text)
++        val metrics = hintTextPaint.fontMetrics
++        val halfTextHeight = (metrics.descent - metrics.ascent) / 2f
++        val horizontalPadding = dp(HINT_PADDING_HORIZONTAL_DP)
++        val verticalPadding = dp(HINT_PADDING_VERTICAL_DP)
++
++        val gridWidth = WEEKS * cellSize + (WEEKS - 1) * cellGap
++        val gridHeight = DAYS_PER_WEEK * cellSize + (DAYS_PER_WEEK - 1) * cellGap
++        // Center the hint on the part of the grid that is actually visible: the full 53 weeks
++        // are wider than a phone screen, and the hint is the only content in this state.
++        val scroller = parent as? HorizontalScrollView
++        val visibleCenter = if (scroller != null && scroller.width > 0) {
++            scroller.scrollX + scroller.width / 2f
++        } else {
++            gridLeft + gridWidth / 2f
++        }
++        val halfWidth = textWidth / 2f + horizontalPadding
++        val minCenter = gridLeft + halfWidth
++        val maxCenter = gridLeft + gridWidth - halfWidth
++        val centerX = if (maxCenter >= minCenter) {
++            visibleCenter.coerceIn(minCenter, maxCenter)
++        } else {
++            (minCenter + maxCenter) / 2f
++        }
++        val centerY = gridTop + gridHeight / 2f
++
++        val backdrop = RectF(
++            centerX - textWidth / 2f - horizontalPadding,
++            centerY - halfTextHeight - verticalPadding,
++            centerX + textWidth / 2f + horizontalPadding,
++            centerY + halfTextHeight + verticalPadding
++        )
++        canvas.drawRoundRect(backdrop, hintRadius, hintRadius, hintBackdropPaint)
++        val baseline = centerY - (metrics.ascent + metrics.descent) / 2f
++        canvas.drawText(text, centerX - textWidth / 2f, baseline, hintTextPaint)
++    }
++
++    private fun isInsideGrid(x: Float, y: Float): Boolean {
++        val week = ((x - gridLeft) / step).toInt()
++        val row = ((y - gridTop) / step).toInt()
++        if (x < gridLeft || y < gridTop) return false
++        return week in 0 until WEEKS && row in 0 until DAYS_PER_WEEK
++    }
++
++    private fun dateAt(x: Float, y: Float): LocalDate? {
++        if (!isInsideGrid(x, y)) return null
++        val week = ((x - gridLeft) / step).toInt()
++        val row = ((y - gridTop) / step).toInt()
++        val today = LocalDate.now()
++        val date = firstMonday(today).plusWeeks(week.toLong()).plusDays(row.toLong())
++        return if (date.isAfter(today)) null else date
++    }
++
++    private fun refreshMetrics() {
++        cellSize = dp(CELL_SIZE_DP)
++        cellGap = dp(CELL_GAP_DP)
++        cellRadius = dp(CELL_RADIUS_DP)
++        labelGap = dp(LABEL_GAP_DP)
++        hintRadius = dp(HINT_RADIUS_DP)
++        outlinePaint.strokeWidth = dp(TODAY_STROKE_DP)
++        labelPaint.textSize = sp(LABEL_TEXT_SP)
++        hintTextPaint.textSize = sp(HINT_TEXT_SP)
++
++        val symbols = DateFormatSymbols.getInstance(Locale.getDefault())
++        shortMonths = symbols.shortMonths
++        val weekdays = symbols.shortWeekdays
++        // Calendar indexes weekdays 1 = Sunday .. 7 = Saturday, so Monday is 2.
++        weekdayLabels = WEEKDAY_ROWS.map { row -> weekdays.getOrNull(row + 2).orEmpty() }
++        labelWidth = weekdayLabels.maxOfOrNull { labelPaint.measureText(it) } ?: 0f
++
++        val metrics = labelPaint.fontMetrics
++        monthLabelHeight = (metrics.descent - metrics.ascent) + dp(MONTH_LABEL_BOTTOM_PADDING_DP)
++        monthBaseline = -metrics.ascent + dp(1f)
++    }
++
++    private fun refreshThemeColors() {
++        val fallbackSecondary = if (isDark) 0xFF9AA0A6.toInt() else 0xFF5F6368.toInt()
++        val secondary = resolveThemeColor(android.R.attr.textColorSecondary, fallbackSecondary)
++        labelPaint.color = secondary
++        hintTextPaint.color = secondary
++        hintBackdropPaint.color = colors[0]
++        val accent = resolveThemeColor(android.R.attr.colorAccent, colors[colors.size - 1])
++        outlinePaint.color = (accent and 0x00FFFFFF) or 0xCC000000.toInt()
++    }
++
++    private fun updateContentDescription() {
++        contentDescription = if (hasData) {
++            context.getString(
++                R.string.heatmap_summary_last_year,
++                formatCountCompact(totalCharacters)
++            )
++        } else {
++            context.getString(R.string.heatmap_no_data)
++        }
++    }
++
++    @ColorInt
++    private fun resolveThemeColor(@AttrRes attr: Int, @ColorInt fallback: Int): Int {
++        val value = TypedValue()
++        if (!context.theme.resolveAttribute(attr, value, true)) return fallback
++        return when {
++            value.resourceId != 0 -> ContextCompat.getColor(context, value.resourceId)
++            value.type in TypedValue.TYPE_FIRST_COLOR_INT..TypedValue.TYPE_LAST_COLOR_INT -> value.data
++            else -> fallback
++        }
++    }
++
++    private fun dp(value: Float): Float =
++        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, resources.displayMetrics)
++
++    private fun sp(value: Float): Float =
++        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, value, resources.displayMetrics)
++
++    companion object {
++        /** Number of week columns, matching GitHub's one-year contribution graph. */
++        private const val WEEKS = 53
++
++        private const val DAYS_PER_WEEK = 7
++
++        /** Rows that get a weekday label: Monday, Wednesday, Friday. */
++        private val WEEKDAY_ROWS = intArrayOf(0, 2, 4)
++
++        private const val CELL_SIZE_DP = 11f
++        private const val CELL_GAP_DP = 3f
++        private const val CELL_RADIUS_DP = 2.5f
++        private const val LABEL_GAP_DP = 6f
++        private const val LABEL_TEXT_SP = 10f
++        private const val MONTH_LABEL_BOTTOM_PADDING_DP = 4f
++        private const val HINT_TEXT_SP = 12f
++        private const val HINT_RADIUS_DP = 9f
++        private const val HINT_PADDING_HORIZONTAL_DP = 12f
++        private const val HINT_PADDING_VERTICAL_DP = 5f
++        private const val TODAY_STROKE_DP = 1.4f
++    }
++}
++
++/**
++ * Format a character count for the compact stat chips: grouped small numbers and short
++ * `K`/`M`/`B` suffixes for large ones, so the card never overflows.
++ */
++internal fun formatCountCompact(count: Long): String {
++    val value = count.coerceAtLeast(0L)
++    return when {
++        value < 10_000L -> java.text.NumberFormat.getIntegerInstance(Locale.getDefault())
++            .format(value)
++
++        // The upper bounds leave room for rounding, so 999_999 reads "1.0M" instead of "1000.0K".
++        value < 999_950L -> String.format(Locale.getDefault(), "%.1fK", value / 1_000.0)
++        value < 999_950_000L -> String.format(Locale.getDefault(), "%.1fM", value / 1_000_000.0)
++        else -> String.format(Locale.getDefault(), "%.1fB", value / 1_000_000_000.0)
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPalette.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPalette.kt
+new file mode 100644
+index 00000000..a6135bb2
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPalette.kt
+@@ -0,0 +1,194 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.heatmap
++
++import androidx.annotation.ColorInt
++import androidx.annotation.StringRes
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.data.prefs.ManagedPreferenceEnum
++import kotlin.math.roundToInt
++
++/**
++ * Color ramps for the typing heatmap.
++ *
++ * Every palette yields exactly [COLOR_COUNT] ARGB colors:
++ * index `0` is the empty cell, `1..4` are increasing intensity levels.
++ * Presets have explicit light and dark variants; [Custom] derives its ramp from a user
++ * supplied color by blending it towards the card background while preserving the hue.
++ */
++enum class HeatmapPalette(
++    val storageKey: String,
++    @StringRes override val stringRes: Int,
++    private val presetColors: IntArray?
++) : ManagedPreferenceEnum {
++
++    Github(
++        storageKey = "Github",
++        stringRes = R.string.heatmap_palette_github,
++        presetColors = intArrayOf(
++            // light
++            0xFFEBEDF0.toInt(), 0xFF9BE9A8.toInt(), 0xFF40C463.toInt(),
++            0xFF30A14E.toInt(), 0xFF216E39.toInt(),
++            // dark
++            0xFF2C3137.toInt(), 0xFF0E4429.toInt(), 0xFF006D32.toInt(),
++            0xFF26A641.toInt(), 0xFF39D353.toInt()
++        )
++    ),
++
++    Blue(
++        storageKey = "Blue",
++        stringRes = R.string.heatmap_palette_blue,
++        presetColors = intArrayOf(
++            // light
++            0xFFEBEDF0.toInt(), 0xFFBFDBFE.toInt(), 0xFF93C5FD.toInt(),
++            0xFF3B82F6.toInt(), 0xFF1D4ED8.toInt(),
++            // dark
++            0xFF2C3137.toInt(), 0xFF0C3454.toInt(), 0xFF14568A.toInt(),
++            0xFF1E7FC0.toInt(), 0xFF4FB3F0.toInt()
++        )
++    ),
++
++    Purple(
++        storageKey = "Purple",
++        stringRes = R.string.heatmap_palette_purple,
++        presetColors = intArrayOf(
++            // light
++            0xFFEBEDF0.toInt(), 0xFFE9D5FF.toInt(), 0xFFC4B5FD.toInt(),
++            0xFF8B5CF6.toInt(), 0xFF6D28D9.toInt(),
++            // dark
++            0xFF2C3137.toInt(), 0xFF3B1F6E.toInt(), 0xFF5B21B6.toInt(),
++            0xFF7C3AED.toInt(), 0xFFA78BFA.toInt()
++        )
++    ),
++
++    Orange(
++        storageKey = "Orange",
++        stringRes = R.string.heatmap_palette_orange,
++        presetColors = intArrayOf(
++            // light
++            0xFFEBEDF0.toInt(), 0xFFFED7AA.toInt(), 0xFFFDBA74.toInt(),
++            0xFFF97316.toInt(), 0xFFC2410C.toInt(),
++            // dark
++            0xFF2C3137.toInt(), 0xFF431407.toInt(), 0xFF7C2D12.toInt(),
++            0xFFEA580C.toInt(), 0xFFFB923C.toInt()
++        )
++    ),
++
++    Pink(
++        storageKey = "Pink",
++        stringRes = R.string.heatmap_palette_pink,
++        presetColors = intArrayOf(
++            // light
++            0xFFEBEDF0.toInt(), 0xFFFBCFE8.toInt(), 0xFFF9A8D4.toInt(),
++            0xFFEC4899.toInt(), 0xFFBE185D.toInt(),
++            // dark
++            0xFF2C3137.toInt(), 0xFF4A0E2E.toInt(), 0xFF831747.toInt(),
++            0xFFDB2777.toInt(), 0xFFF472B6.toInt()
++        )
++    ),
++
++    Custom(
++        storageKey = "Custom",
++        stringRes = R.string.heatmap_palette_custom,
++        presetColors = null
++    );
++
++    /**
++     * The five colors of this palette for the current theme.
++     *
++     * @param customColor ARGB color used by [Custom], ignored by presets
++     * @param isDark whether the surrounding UI uses a dark theme
++     */
++    fun colors(@ColorInt customColor: Int, isDark: Boolean): IntArray {
++        val presets = presetColors ?: return customColors(customColor, isDark)
++        val offset = if (isDark) DARK_OFFSET else 0
++        return presets.copyOfRange(offset, offset + COLOR_COUNT)
++    }
++
++    private fun customColors(@ColorInt customColor: Int, isDark: Boolean): IntArray {
++        // Force opacity: the color picker may hand us a translucent value.
++        val opaque = (customColor and 0x00FFFFFF) or ALPHA_OPAQUE
++        val target = if (isDark) DARK_SURFACE else LIGHT_SURFACE
++        // Very light custom colors would wash out on a white card (and very dark ones on a
++        // dark card), so nudge the anchor color until the ramp is visible. On dark themes the
++        // anchor is also brightened a little: the strongest level has to pop on a dark card.
++        val base = when {
++            isDark -> {
++                val visible = if (luminance(opaque) < 0.32f) blend(opaque, WHITE, 0.35f) else opaque
++                blend(visible, WHITE, DARK_ANCHOR_LIGHTENING)
++            }
++
++            luminance(opaque) > 0.72f -> blend(opaque, BLACK, 0.35f)
++            else -> opaque
++        }
++        val ramp = if (isDark) DARK_RAMP else LIGHT_RAMP
++        return intArrayOf(
++            if (isDark) DARK_EMPTY else LIGHT_EMPTY,
++            blend(base, target, ramp[0]),
++            blend(base, target, ramp[1]),
++            blend(base, target, ramp[2]),
++            base
++        )
++    }
++
++    companion object {
++        /** Number of intensity levels above the empty cell. */
++        const val LEVEL_COUNT = 4
++
++        /** Number of colors returned by [colors]. */
++        const val COLOR_COUNT = LEVEL_COUNT + 1
++
++        private const val DARK_OFFSET = COLOR_COUNT
++
++        private const val ALPHA_OPAQUE = 0xFF000000.toInt()
++        private const val WHITE = 0xFFFFFFFF.toInt()
++        private const val BLACK = 0xFF000000.toInt()
++
++        private const val LIGHT_EMPTY = 0xFFEBEDF0.toInt()
++        private const val DARK_EMPTY = 0xFF2C3137.toInt()
++
++        /** Background the custom ramp fades into. */
++        private const val LIGHT_SURFACE = 0xFFFFFFFF.toInt()
++        private const val DARK_SURFACE = 0xFF20252B.toInt()
++
++        /** How much of the background is mixed into levels 1..3 (4 is the pure color). */
++        private val LIGHT_RAMP = floatArrayOf(0.74f, 0.50f, 0.25f)
++        private val DARK_RAMP = floatArrayOf(0.58f, 0.32f, 0.12f)
++
++        /** Dark themes lift the custom anchor so the busiest days still stand out. */
++        private const val DARK_ANCHOR_LIGHTENING = 0.12f
++
++        /**
++         * Resolve a stored palette name.
++         *
++         * Unknown or blank values (for example from an older version) fall back to [Github].
++         */
++        fun fromStorage(raw: String?): HeatmapPalette {
++            val value = raw?.trim()
++            if (value.isNullOrEmpty()) return Github
++            return values().firstOrNull { it.storageKey.equals(value, ignoreCase = true) }
++                ?: Github
++        }
++
++        private fun blend(@ColorInt from: Int, @ColorInt to: Int, fraction: Float): Int {
++            val t = fraction.coerceIn(0f, 1f)
++            val inverse = 1f - t
++            fun channel(shift: Int): Int {
++                val a = (from ushr shift) and 0xFF
++                val b = (to ushr shift) and 0xFF
++                return (a * inverse + b * t).roundToInt().coerceIn(0, 255)
++            }
++            return ALPHA_OPAQUE or (channel(16) shl 16) or (channel(8) shl 8) or channel(0)
++        }
++
++        /** Rough perceived brightness in `0..1`, good enough to pick a visible anchor. */
++        private fun luminance(@ColorInt color: Int): Float {
++            val r = (color ushr 16) and 0xFF
++            val g = (color ushr 8) and 0xFF
++            val b = color and 0xFF
++            return (0.299f * r + 0.587f * g + 0.114f * b) / 255f
++        }
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt
+new file mode 100644
+index 00000000..c351ca7f
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/heatmap/TypingHeatmapPreference.kt
+@@ -0,0 +1,254 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.heatmap
++
++import android.content.Context
++import android.graphics.drawable.GradientDrawable
++import android.util.TypedValue
++import android.view.View
++import android.widget.HorizontalScrollView
++import android.widget.ImageView
++import android.widget.TextView
++import androidx.annotation.ColorInt
++import androidx.annotation.Keep
++import androidx.core.view.isVisible
++import androidx.preference.Preference
++import androidx.preference.PreferenceViewHolder
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.launch
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.data.prefs.AppPrefs
++import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
++import org.fcitx.fcitx5.android.data.stats.TypingStatsManager
++import org.fcitx.fcitx5.android.data.stats.TypingStatsSnapshot
++import org.fcitx.fcitx5.android.utils.isDarkMode
++import java.lang.ref.WeakReference
++import java.text.DateFormat
++import java.util.Date
++import java.util.Locale
++
++/**
++ * Home page card that shows the typing heatmap, three headline metrics and a legend.
++ *
++ * The preference is not backed by [android.content.SharedPreferences] itself; the palette and
++ * the data come from [AppPrefs] and [TypingStatsManager]. Clicking the card (or the header
++ * icon) invokes [onOpenStats].
++ */
++class TypingHeatmapPreference(context: Context) : Preference(context) {
++
++    /** Invoked when the user asks for the statistics screen. */
++    var onOpenStats: (() -> Unit)? = null
++
++    @Keep
++    private val paletteListener = ManagedPreference.OnChangeListener<String> { _, _ -> render() }
++
++    @Keep
++    private val customColorListener = ManagedPreference.OnChangeListener<Int> { _, _ -> render() }
++
++    @Keep
++    private val enabledListener = ManagedPreference.OnChangeListener<Boolean> { _, _ -> render() }
++
++    private var scope: CoroutineScope? = null
++    private var snapshotJob: Job? = null
++    private var boundRoot: WeakReference<View>? = null
++    private var attached: Boolean = false
++
++    /** Scroll the grid to the newest week the first time a row is bound. */
++    private var scrollToRecentPending: Boolean = true
++
++    init {
++        layoutResource = R.layout.preference_typing_heatmap
++        isPersistent = false
++        isIconSpaceReserved = false
++        isSingleLineTitle = false
++        setOnPreferenceClickListener {
++            onOpenStats?.invoke()
++            true
++        }
++    }
++
++    override fun onAttached() {
++        super.onAttached()
++        if (!attached) {
++            attached = true
++            TypingStatsManager.init(context)
++            TypingStatsManager.refresh()
++            val prefs = appPrefs()
++            prefs?.stats?.palette?.registerOnChangeListener(paletteListener)
++            prefs?.stats?.customColor?.registerOnChangeListener(customColorListener)
++            prefs?.stats?.enabled?.registerOnChangeListener(enabledListener)
++            val newScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
++            scope = newScope
++            snapshotJob = newScope.launch {
++                TypingStatsManager.snapshot.collect { if (attached) render() }
++            }
++        }
++        render()
++    }
++
++    override fun onDetached() {
++        attached = false
++        snapshotJob?.cancel()
++        snapshotJob = null
++        scope?.cancel()
++        scope = null
++        val prefs = appPrefs()
++        prefs?.stats?.palette?.unregisterOnChangeListener(paletteListener)
++        prefs?.stats?.customColor?.unregisterOnChangeListener(customColorListener)
++        prefs?.stats?.enabled?.unregisterOnChangeListener(enabledListener)
++        boundRoot = null
++        super.onDetached()
++    }
++
++    override fun onBindViewHolder(holder: PreferenceViewHolder) {
++        super.onBindViewHolder(holder)
++        // The card draws its own outline; preference dividers around it would look stray.
++        holder.setDividerAllowedAbove(false)
++        holder.setDividerAllowedBelow(false)
++        val root = holder.itemView
++        boundRoot = WeakReference(root)
++        scrollToRecentPending = true
++        root.findViewById<ImageView>(R.id.heatmap_open_stats)?.setOnClickListener {
++            onOpenStats?.invoke()
++        }
++        render()
++    }
++
++    /**
++     * Re-read the preferences and the current snapshot and repaint the bound views.
++     *
++     * Safe to call at any time; it is a no-op while the preference is not bound.
++     */
++    fun refresh() {
++        render()
++    }
++
++    private fun render() {
++        val root = boundRoot?.get() ?: return
++        val prefs = appPrefs()
++        val snapshot = TypingStatsManager.snapshot.value
++        val palette = HeatmapPalette.fromStorage(prefs?.stats?.palette?.getValue())
++        val customColor = prefs?.stats?.customColor?.getValue() ?: DEFAULT_CUSTOM_COLOR
++        val enabled = prefs?.stats?.enabled?.getValue() ?: true
++        val isDark = root.context.resources.configuration.isDarkMode()
++
++        root.findViewById<TextView>(R.id.heatmap_title)?.setText(R.string.heatmap_title)
++        root.findViewById<TextView>(R.id.heatmap_summary)?.text = summary(snapshot)
++        root.findViewById<TextView>(R.id.heatmap_paused_hint)?.isVisible = !enabled
++
++        bindMetrics(root, snapshot)
++        bindLegend(root, palette, customColor, isDark)
++
++        root.findViewById<ContributionHeatmapView>(R.id.heatmap_heatmap)?.setData(
++            snapshot.countsByDate(),
++            palette,
++            customColor,
++            isDark
++        )
++
++        if (scrollToRecentPending) {
++            val scroll = root.findViewById<HorizontalScrollView>(R.id.heatmap_scroll)
++            if (scroll != null) {
++                scrollToRecentPending = false
++                scroll.post { scroll.fullScroll(View.FOCUS_RIGHT) }
++            }
++        }
++    }
++
++    private fun bindMetrics(root: View, snapshot: TypingStatsSnapshot) {
++        val totalText = formatCountCompact(snapshot.totalCharacters)
++        val accuracyText = if (snapshot.totalCharacters > 0L) {
++            String.format(Locale.getDefault(), "%.1f%%", snapshot.accuracy * 100f)
++        } else {
++            NO_VALUE
++        }
++        val streakText = snapshot.currentStreak.toString()
++
++        root.findViewById<TextView>(R.id.heatmap_total_value)?.let {
++            it.text = totalText
++            it.contentDescription =
++                context.getString(R.string.heatmap_total_characters) + ": " + totalText
++        }
++        root.findViewById<TextView>(R.id.heatmap_accuracy_value)?.let {
++            it.text = accuracyText
++            it.contentDescription =
++                context.getString(R.string.heatmap_accuracy) + ": " + accuracyText
++        }
++        root.findViewById<TextView>(R.id.heatmap_streak_value)?.let {
++            it.text = streakText
++            it.contentDescription = context.getString(R.string.heatmap_streak) + ": " +
++                context.resources.getQuantityString(
++                    R.plurals.heatmap_days_count,
++                    snapshot.currentStreak.coerceIn(0, 2),
++                    streakText
++                )
++        }
++    }
++
++    private fun bindLegend(
++        root: View,
++        palette: HeatmapPalette,
++        customColor: Int,
++        isDark: Boolean
++    ) {
++        val colors = palette.colors(customColor, isDark)
++        LEGEND_SWATCH_IDS.forEachIndexed { index, id ->
++            val swatch = root.findViewById<View>(id) ?: return@forEachIndexed
++            swatch.background = swatchDrawable(colors[index.coerceIn(0, colors.size - 1)])
++        }
++    }
++
++    private fun summary(snapshot: TypingStatsSnapshot): CharSequence = when {
++        snapshot.totalCharacters > 0L -> context.getString(
++            R.string.heatmap_summary_last_year,
++            formatCountCompact(snapshot.totalCharacters)
++        )
++
++        snapshot.startTime > 0L -> context.getString(
++            R.string.heatmap_summary_since,
++            formatStartTime(snapshot.startTime)
++        )
++
++        else -> context.getString(R.string.heatmap_no_data)
++    }
++
++    private fun formatStartTime(startTime: Long): String {
++        // Be forgiving about values stored as seconds (the contract is epoch millis).
++        val millis = if (startTime in 1L until 100_000_000_000L) startTime * 1_000L else startTime
++        return DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.getDefault())
++            .format(Date(millis))
++    }
++
++    private fun swatchDrawable(@ColorInt color: Int): GradientDrawable =
++        GradientDrawable().apply {
++            shape = GradientDrawable.RECTANGLE
++            cornerRadius = dp(SWATCH_CORNER_RADIUS_DP)
++            setColor(color)
++        }
++
++    private fun dp(value: Float): Float = TypedValue.applyDimension(
++        TypedValue.COMPLEX_UNIT_DIP, value, context.resources.displayMetrics
++    )
++
++    private fun appPrefs(): AppPrefs? = runCatching { AppPrefs.getInstance() }.getOrNull()
++
++    companion object {
++        private val DEFAULT_CUSTOM_COLOR = 0xFF2DA44E.toInt()
++        private const val NO_VALUE = "—"
++        private const val SWATCH_CORNER_RADIUS_DP = 2.5f
++
++        private val LEGEND_SWATCH_IDS = intArrayOf(
++            R.id.heatmap_legend_swatch_1,
++            R.id.heatmap_legend_swatch_2,
++            R.id.heatmap_legend_swatch_3,
++            R.id.heatmap_legend_swatch_4,
++            R.id.heatmap_legend_swatch_5
++        )
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomeCategoryPreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomeCategoryPreference.kt
+new file mode 100644
+index 00000000..ce0c281f
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomeCategoryPreference.kt
+@@ -0,0 +1,29 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.home
++
++import android.content.Context
++import androidx.preference.PreferenceCategory
++import org.fcitx.fcitx5.android.R
++
++/**
++ * Section header for the home page: a small, subtle label with generous spacing above it.
++ *
++ * Uses a custom layout so the sections do not look like a second level of preferences.
++ */
++class HomeCategoryPreference(context: Context, title: CharSequence) : PreferenceCategory(context) {
++
++    init {
++        this.title = title
++        layoutResource = R.layout.preference_home_category
++        isIconSpaceReserved = false
++        isSingleLineTitle = false
++        // A header is a label, not a row: no click, no focus, no pressed state.
++        isSelectable = false
++        // PreferenceCategory is disabled by design; the header is only a label, so keep the
++        // theme color instead of the greyed out disabled variant.
++        setShouldDisableView(false)
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt
+new file mode 100644
+index 00000000..2fe41ac1
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt
+@@ -0,0 +1,150 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.home
++
++import android.content.Context
++import android.content.res.ColorStateList
++import android.graphics.drawable.GradientDrawable
++import android.util.TypedValue
++import android.view.View
++import android.widget.ImageView
++import androidx.annotation.ColorInt
++import androidx.annotation.DrawableRes
++import androidx.annotation.StringRes
++import androidx.core.view.isVisible
++import androidx.preference.Preference
++import androidx.preference.PreferenceGroup
++import androidx.preference.PreferenceViewHolder
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.utils.alpha
++import splitties.resources.styledColor
++
++/**
++ * A home page entry: rounded accent tinted icon container, title, secondary summary and a
++ * subtle chevron.
++ *
++ * The layout keeps the stock [Preference] ids ([android.R.id.title], [android.R.id.summary]),
++ * so click, long press, enabled and dependency handling remains untouched.
++ */
++class HomePreference(context: Context) : Preference(context) {
++
++    /** Icon shown inside the rounded container, or `0` to leave the container out. */
++    @DrawableRes
++    var iconRes: Int = 0
++        set(value) {
++            field = value
++            notifyChanged()
++        }
++
++    /** Optional tint override for the icon (defaults to the theme accent color). */
++    @ColorInt
++    var iconTint: Int? = null
++        set(value) {
++            field = value
++            notifyChanged()
++        }
++
++    init {
++        layoutResource = R.layout.preference_home_entry
++        isIconSpaceReserved = false
++        isSingleLineTitle = false
++    }
++
++    override fun onBindViewHolder(holder: PreferenceViewHolder) {
++        super.onBindViewHolder(holder)
++        val accent = iconTint ?: context.styledColor(android.R.attr.colorAccent)
++        bindIcon(holder, accent)
++        bindChevron(holder)
++    }
++
++    private fun bindIcon(holder: PreferenceViewHolder, @ColorInt accent: Int) {
++        val enabled = isEnabled
++        val container = holder.itemView.findViewById<View>(R.id.home_icon_container)
++        val icon = holder.itemView.findViewById<ImageView>(R.id.home_icon)
++        if (iconRes == 0) {
++            container?.isVisible = false
++            return
++        }
++        container?.let {
++            it.isVisible = true
++            it.background = roundedBackground(accent.alpha(ICON_BACKGROUND_ALPHA))
++            it.alpha = if (enabled) 1f else DISABLED_ALPHA
++        }
++        icon?.apply {
++            setImageResource(iconRes)
++            imageTintList = ColorStateList.valueOf(accent)
++            alpha = if (enabled) 1f else DISABLED_ALPHA
++        }
++    }
++
++    private fun bindChevron(holder: PreferenceViewHolder) {
++        val enabled = isEnabled
++        val chevron = holder.itemView.findViewById<ImageView>(R.id.home_chevron) ?: return
++        // Only entries that actually navigate get the affordance. Disabled entries keep it
++        // (so the row still reads as a link) but dim it.
++        chevron.imageTintList = ColorStateList.valueOf(
++            context.styledColor(android.R.attr.textColorSecondary)
++        )
++        chevron.isVisible = onPreferenceClickListener != null
++        chevron.alpha = if (enabled) 1f else DISABLED_ALPHA
++        // The shared chevron drawable points to the right; mirror it in RTL layouts.
++        val rtl = context.resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
++        chevron.scaleX = if (rtl) -1f else 1f
++    }
++
++    private fun roundedBackground(@ColorInt color: Int): GradientDrawable =
++        GradientDrawable().apply {
++            shape = GradientDrawable.RECTANGLE
++            cornerRadius = dp(ICON_CORNER_RADIUS_DP)
++            setColor(color)
++        }
++
++    private fun dp(value: Float): Float = TypedValue.applyDimension(
++        TypedValue.COMPLEX_UNIT_DIP, value, context.resources.displayMetrics
++    )
++
++    companion object {
++        private const val ICON_BACKGROUND_ALPHA = 0.14f
++        private const val ICON_CORNER_RADIUS_DP = 11f
++        private const val DISABLED_ALPHA = 0.38f
++    }
++}
++
++/**
++ * Adds a [HomePreference] to this group, keeping MainFragment readable.
++ */
++fun PreferenceGroup.addHomePreference(
++    @StringRes title: Int,
++    @StringRes summary: Int,
++    @DrawableRes icon: Int,
++    onClick: (() -> Unit)? = null
++) {
++    addPreference(HomePreference(context).apply {
++        setTitle(title)
++        setSummary(summary)
++        iconRes = icon
++        if (onClick != null) {
++            setOnPreferenceClickListener {
++                onClick()
++                true
++            }
++        }
++    })
++}
++
++/**
++ * An empty, non interactive row used as bottom breathing room. Reuses the category layout,
++ * which leaves just its vertical padding once the (empty) title is hidden.
++ */
++class HomeSpacerPreference(context: Context) : Preference(context) {
++
++    init {
++        layoutResource = R.layout.preference_home_category
++        isSelectable = false
++        isPersistent = false
++        isIconSpaceReserved = false
++        isSingleLineTitle = false
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/SettingsRoute.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/SettingsRoute.kt
+index 0ca9fac6..58b1c27b 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/SettingsRoute.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/SettingsRoute.kt
+@@ -33,6 +33,7 @@ import org.fcitx.fcitx5.android.ui.main.settings.behavior.SymbolSettingsFragment
+ import org.fcitx.fcitx5.android.ui.main.settings.global.GlobalConfigFragment
+ import org.fcitx.fcitx5.android.ui.main.settings.im.InputMethodConfigFragment
+ import org.fcitx.fcitx5.android.ui.main.settings.im.InputMethodListFragment
++import org.fcitx.fcitx5.android.ui.main.settings.stats.TypingStatsFragment
+ import org.fcitx.fcitx5.android.ui.main.settings.theme.ThemeFragment
+ import org.fcitx.fcitx5.android.utils.config.ConfigDescriptor
+ import org.fcitx.fcitx5.android.utils.parcelable
+@@ -80,6 +81,9 @@ sealed class SettingsRoute : Parcelable {
+     @Serializable
+     data object Symbol : SettingsRoute()
+ 
++    @Serializable
++    data object TypingStats : SettingsRoute()
++
+     @Serializable
+     data object Plugin : SettingsRoute()
+ 
+@@ -219,6 +223,9 @@ sealed class SettingsRoute : Parcelable {
+             fragment<SymbolSettingsFragment, Symbol> {
+                 label = ctx.getString(R.string.emoji_and_symbols)
+             }
++            fragment<TypingStatsFragment, TypingStats> {
++                label = ctx.getString(R.string.stats_ui_title)
++            }
+             fragment<PluginFragment, Plugin> {
+                 label = ctx.getString(R.string.plugins)
+             }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapColorPickerDialog.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapColorPickerDialog.kt
+new file mode 100644
+index 00000000..b035d003
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapColorPickerDialog.kt
+@@ -0,0 +1,252 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.settings.stats
++
++import android.content.Context
++import android.content.res.ColorStateList
++import android.graphics.drawable.GradientDrawable
++import android.util.TypedValue
++import android.view.LayoutInflater
++import android.view.View
++import android.view.ViewGroup
++import android.widget.EditText
++import android.widget.FrameLayout
++import android.widget.LinearLayout
++import android.widget.TextView
++import androidx.annotation.ColorInt
++import androidx.appcompat.app.AlertDialog
++import androidx.core.content.ContextCompat
++import androidx.core.view.isVisible
++import androidx.core.widget.doAfterTextChanged
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.ui.main.heatmap.HeatmapPalette
++import org.fcitx.fcitx5.android.utils.isDarkMode
++import java.util.Locale
++
++/**
++ * Dialog that lets the user pick the custom heatmap color.
++ *
++ * Offers a grid of [PRESET_COLORS] and a free-form `#RRGGBB` / `#AARRGGBB` input field with a
++ * live preview of the resulting five heatmap shades. Invalid input never dismisses the dialog,
++ * it only shows an error hint, so a typo cannot clear the stored color.
++ */
++object HeatmapColorPickerDialog {
++
++    /** Number of columns in the preset color grid. */
++    private const val COLUMNS = 6
++
++    private const val CELL_HEIGHT_DP = 42f
++    private const val CELL_MARGIN_DP = 3f
++    private const val CHIP_INSET_DP = 3f
++    private const val CHIP_CORNER_DP = 6f
++
++    /** A mix of saturated colors that all read well on light and dark backgrounds. */
++    private val PRESET_COLORS = intArrayOf(
++        // first row: defaults of the preset palettes
++        0xFF2DA44E.toInt(), // GitHub green
++        0xFF3B82F6.toInt(), // blue
++        0xFF8B5CF6.toInt(), // purple
++        0xFFEC4899.toInt(), // pink
++        0xFFF97316.toInt(), // orange
++        0xFF14B8A6.toInt(), // teal
++        // second row: cool tones
++        0xFF06B6D4.toInt(), // cyan
++        0xFF0EA5E9.toInt(), // sky
++        0xFF6366F1.toInt(), // indigo
++        0xFFA855F7.toInt(), // violet
++        0xFFD946EF.toInt(), // fuchsia
++        0xFF7C3AED.toInt(), // deep violet
++        // third row: warm tones
++        0xFFEF4444.toInt(), // red
++        0xFFF43F5E.toInt(), // rose
++        0xFFB91C1C.toInt(), // deep red
++        0xFFF59E0B.toInt(), // amber
++        0xFFEAB308.toInt(), // yellow
++        0xFF84CC16.toInt(), // lime
++        // fourth row: greens and neutrals
++        0xFF22C55E.toInt(), // green
++        0xFF10B981.toInt(), // emerald
++        0xFF0F766E.toInt(), // deep teal
++        0xFF0E7490.toInt(), // deep cyan
++        0xFF64748B.toInt(), // slate
++        0xFF78716C.toInt(), // stone
++    )
++
++    private val PREVIEW_IDS = intArrayOf(
++        R.id.color_preview_1,
++        R.id.color_preview_2,
++        R.id.color_preview_3,
++        R.id.color_preview_4,
++        R.id.color_preview_5,
++    )
++
++    /**
++     * Show the picker.
++     *
++     * @param currentColor initial color, used as the text field value and the highlighted chip
++     * @param onColorSelected invoked with the validated ARGB color when the user confirms
++     */
++    fun show(context: Context, @ColorInt currentColor: Int, onColorSelected: (Int) -> Unit) {
++        val root = LayoutInflater.from(context).inflate(R.layout.dialog_heatmap_color, null)
++        val input = root.findViewById<EditText>(R.id.color_hex_input)
++        val error = root.findViewById<TextView>(R.id.color_hex_error)
++        val isDark = context.resources.configuration.isDarkMode()
++
++        val cells = ArrayList<Pair<Int, FrameLayout>>(PRESET_COLORS.size)
++
++        fun renderPreview(@ColorInt color: Int) {
++            val colors = HeatmapPalette.Custom.colors(color, isDark)
++            PREVIEW_IDS.forEachIndexed { index, id ->
++                root.findViewById<View>(id)?.backgroundTintList =
++                    ColorStateList.valueOf(colors[index.coerceIn(0, colors.size - 1)])
++            }
++        }
++
++        /** Highlight the chip of [color]; a plain custom hex simply highlights nothing. */
++        fun markSelection(@ColorInt color: Int) {
++            val selected = ContextCompat.getDrawable(context, R.drawable.bg_heatmap_swatch_selected)
++            cells.forEach { (chipColor, cell) ->
++                cell.background = if (chipColor == color) selected else null
++            }
++        }
++
++        fun select(@ColorInt color: Int) {
++            input.setText(formatArgbHex(color))
++            input.setSelection(input.text.length)
++            renderPreview(color)
++            markSelection(color)
++        }
++
++        buildGrid(context, root) { color ->
++            error.isVisible = false
++            select(color)
++        }.also { cells.addAll(it) }
++
++        input.doAfterTextChanged { editable ->
++            error.isVisible = false
++            val parsed = parseArgbHex(editable?.toString())
++            if (parsed != null) {
++                renderPreview(parsed)
++                markSelection(parsed)
++            }
++        }
++
++        select(currentColor)
++
++        val dialog = AlertDialog.Builder(context)
++            .setTitle(R.string.stats_ui_color_dialog_title)
++            .setView(root)
++            .setNegativeButton(android.R.string.cancel, null)
++            .setPositiveButton(android.R.string.ok, null)
++            .create()
++
++        dialog.setOnShowListener {
++            // Override the positive button so invalid input keeps the dialog open.
++            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
++                val parsed = parseArgbHex(input.text?.toString())
++                if (parsed == null) {
++                    error.isVisible = true
++                    input.requestFocus()
++                } else {
++                    onColorSelected(parsed)
++                    dialog.dismiss()
++                }
++            }
++        }
++        dialog.show()
++    }
++
++    /**
++     * Fill [R.id.color_grid] with clickable color chips of [PRESET_COLORS], [COLUMNS] per row.
++     *
++     * @return the created chips as pairs of (color, clickable cell)
++     */
++    private fun buildGrid(
++        context: Context,
++        root: View,
++        onColorClick: (Int) -> Unit,
++    ): List<Pair<Int, FrameLayout>> {
++        val grid = root.findViewById<LinearLayout>(R.id.color_grid)
++        val cells = ArrayList<Pair<Int, FrameLayout>>(PRESET_COLORS.size)
++        val height = dp(context, CELL_HEIGHT_DP).toInt()
++        val margin = dp(context, CELL_MARGIN_DP).toInt()
++        val inset = dp(context, CHIP_INSET_DP).toInt()
++
++        PRESET_COLORS.toList().chunked(COLUMNS).forEach { rowColors ->
++            val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
++            grid.addView(
++                row,
++                LinearLayout.LayoutParams(
++                    ViewGroup.LayoutParams.MATCH_PARENT,
++                    ViewGroup.LayoutParams.WRAP_CONTENT
++                )
++            )
++            rowColors.forEach { color ->
++                val cell = FrameLayout(context).apply {
++                    isClickable = true
++                    isFocusable = true
++                    contentDescription = formatArgbHex(color)
++                    setOnClickListener { onColorClick(color) }
++                }
++                cell.addView(
++                    View(context).apply {
++                        background = GradientDrawable().apply {
++                            shape = GradientDrawable.RECTANGLE
++                            cornerRadius = dp(context, CHIP_CORNER_DP)
++                            setColor(color)
++                        }
++                    },
++                    FrameLayout.LayoutParams(
++                        ViewGroup.LayoutParams.MATCH_PARENT,
++                        ViewGroup.LayoutParams.MATCH_PARENT
++                    ).apply { setMargins(inset, inset, inset, inset) }
++                )
++                row.addView(
++                    cell,
++                    LinearLayout.LayoutParams(0, height, 1f).apply {
++                        setMargins(margin, margin, margin, margin)
++                    }
++                )
++                cells.add(color to cell)
++            }
++            // keep the last row aligned when the preset count is not a multiple of COLUMNS
++            repeat(COLUMNS - rowColors.size) {
++                row.addView(
++                    View(context),
++                    LinearLayout.LayoutParams(0, height, 1f).apply {
++                        setMargins(margin, margin, margin, margin)
++                    }
++                )
++            }
++        }
++        return cells
++    }
++
++    private fun dp(context: Context, value: Float): Float =
++        TypedValue.applyDimension(
++            TypedValue.COMPLEX_UNIT_DIP, value, context.resources.displayMetrics
++        )
++}
++
++/**
++ * Parse `#RRGGBB` or `#AARRGGBB` (the leading `#` is optional, case does not matter).
++ *
++ * @return the ARGB color, or `null` when [raw] is not a valid hex color
++ */
++internal fun parseArgbHex(raw: String?): Int? {
++    val text = raw?.trim()?.removePrefix("#") ?: return null
++    if (text.length != 6 && text.length != 8) return null
++    if (text.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return null
++    val value = text.toLongOrNull(16) ?: return null
++    return if (text.length == 6) (0xFF000000L or value).toInt() else value.toInt()
++}
++
++/** Format [color] as `#RRGGBB`, or `#AARRGGBB` when it is not fully opaque. */
++internal fun formatArgbHex(@ColorInt color: Int): String =
++    if ((color ushr 24) and 0xFF == 0xFF) {
++        String.format(Locale.ROOT, "#%06X", color and 0xFFFFFF)
++    } else {
++        String.format(Locale.ROOT, "#%08X", color)
++    }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt
+new file mode 100644
+index 00000000..e8eea72d
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/HeatmapPalettePreference.kt
+@@ -0,0 +1,137 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.settings.stats
++
++import android.content.Context
++import android.content.res.ColorStateList
++import android.graphics.drawable.GradientDrawable
++import android.util.AttributeSet
++import android.view.View
++import android.widget.TextView
++import androidx.appcompat.app.AlertDialog
++import androidx.preference.Preference
++import androidx.preference.PreferenceViewHolder
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.data.prefs.AppPrefs
++import org.fcitx.fcitx5.android.ui.main.heatmap.HeatmapPalette
++import org.fcitx.fcitx5.android.utils.isDarkMode
++
++/**
++ * Preference row for the heatmap color palette.
++ *
++ * The row shows the title, the name of the current palette (plus the hex value for
++ * [HeatmapPalette.Custom]) and the five actual heatmap shades of the current theme.
++ * Tapping it opens a single-choice list of all [HeatmapPalette] entries.
++ *
++ * The preference is not backed by `SharedPreferences` itself; it reads and writes
++ * `AppPrefs.stats.palette` so the IME and the home page card stay in sync.
++ */
++class HeatmapPalettePreference @JvmOverloads constructor(
++    context: Context,
++    attrs: AttributeSet? = null,
++) : Preference(context, attrs) {
++
++    init {
++        layoutResource = R.layout.preference_heatmap_palette
++        isPersistent = false
++        isSingleLineTitle = false
++        isIconSpaceReserved = false
++        setTitle(R.string.stats_ui_palette)
++        // The custom layout owns the summary text; a non-null placeholder keeps
++        // androidx.preference from hiding the summary row in onBindViewHolder().
++        setSummary("")
++        setOnPreferenceClickListener {
++            showPalettePicker()
++            true
++        }
++    }
++
++    override fun onBindViewHolder(holder: PreferenceViewHolder) {
++        super.onBindViewHolder(holder)
++        bind(holder.itemView)
++    }
++
++    /**
++     * Repaint the bound row from the current preferences.
++     *
++     * Called by the screen after the custom color changed, so the swatches do not keep showing
++     * the previous ramp until the next rebind.
++     */
++    fun refresh() {
++        notifyChanged()
++    }
++
++    private fun bind(root: View) {
++        val prefs = AppPrefs.getInstance().stats
++        val palette = HeatmapPalette.fromStorage(prefs.palette.getValue())
++        val customColor = prefs.customColor.getValue()
++        val isDark = context.resources.configuration.isDarkMode()
++
++        root.findViewById<TextView>(android.R.id.title)?.setText(R.string.stats_ui_palette)
++        root.findViewById<TextView>(android.R.id.summary)?.apply {
++            visibility = View.VISIBLE
++            text = summary(palette, customColor)
++        }
++
++        val colors = palette.colors(customColor, isDark)
++        SWATCH_IDS.forEachIndexed { index, id ->
++            root.findViewById<View>(id)?.backgroundTintList =
++                ColorStateList.valueOf(colors.getOrElse(index) { colors.last() })
++        }
++    }
++
++    /**
++     * `current · other options`, so the row tells both the active palette (not just its color)
++     * and which palettes are available.
++     */
++    private fun summary(palette: HeatmapPalette, customColor: Int): CharSequence {
++        val currentName = context.getString(palette.stringRes)
++        val alternatives = HeatmapPalette.entries
++            .filter { it != palette }
++            .joinToString(" / ") { context.getString(it.stringRes) }
++        val custom = if (palette == HeatmapPalette.Custom) " ${formatArgbHex(customColor)}" else ""
++        return "$currentName$custom · $alternatives"
++    }
++
++    private fun showPalettePicker() {
++        val prefs = AppPrefs.getInstance().stats
++        val palettes = HeatmapPalette.entries
++        val labels = palettes
++            .map { context.getString(it.stringRes) as CharSequence }
++            .toTypedArray()
++        val current = HeatmapPalette.fromStorage(prefs.palette.getValue())
++        AlertDialog.Builder(context)
++            .setTitle(R.string.stats_ui_palette)
++            .setSingleChoiceItems(labels, palettes.indexOf(current)) { dialog, which ->
++                val selected = palettes[which]
++                prefs.palette.setValue(selected.storageKey)
++                dialog.dismiss()
++                notifyChanged()
++            }
++            .setNegativeButton(android.R.string.cancel, null)
++            .show()
++    }
++
++    companion object {
++        private val SWATCH_IDS = intArrayOf(
++            R.id.heatmap_palette_swatch_1,
++            R.id.heatmap_palette_swatch_2,
++            R.id.heatmap_palette_swatch_3,
++            R.id.heatmap_palette_swatch_4,
++            R.id.heatmap_palette_swatch_5,
++        )
++    }
++}
++
++/** A small filled circle used as the icon of the custom color preference. */
++internal fun colorDot(context: Context, color: Int, sizeDp: Float = 18f): GradientDrawable {
++    val size = (sizeDp * context.resources.displayMetrics.density).toInt().coerceAtLeast(1)
++    return GradientDrawable().apply {
++        shape = GradientDrawable.OVAL
++        setColor(color)
++        setStroke((context.resources.displayMetrics.density).toInt().coerceAtLeast(1), 0x33000000)
++        setSize(size, size)
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
+new file mode 100644
+index 00000000..3cc13ed4
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/stats/TypingStatsFragment.kt
+@@ -0,0 +1,297 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.settings.stats
++
++import android.os.Bundle
++import android.view.View
++import androidx.annotation.StringRes
++import androidx.appcompat.app.AlertDialog
++import androidx.lifecycle.Lifecycle
++import androidx.lifecycle.lifecycleScope
++import androidx.lifecycle.repeatOnLifecycle
++import androidx.preference.Preference
++import androidx.preference.PreferenceGroup
++import androidx.preference.SwitchPreferenceCompat
++import kotlinx.coroutines.launch
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.data.prefs.AppPrefs
++import org.fcitx.fcitx5.android.data.stats.TypingStatsManager
++import org.fcitx.fcitx5.android.data.stats.TypingStatsSnapshot
++import org.fcitx.fcitx5.android.ui.common.PaddingPreferenceFragment
++import org.fcitx.fcitx5.android.ui.main.heatmap.HeatmapPalette
++import org.fcitx.fcitx5.android.utils.addCategory
++import org.fcitx.fcitx5.android.utils.toast
++import java.text.NumberFormat
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++import java.time.format.FormatStyle
++import java.time.format.TextStyle
++import java.util.Locale
++
++/**
++ * "Statistics & heatmap" settings screen.
++ *
++ * Read-only overview of the aggregated typing statistics, the last seven days, the heatmap
++ * palette / custom color and the data & privacy section (tracking switch, reset action).
++ *
++ * All values are kept in sync with [TypingStatsManager.snapshot] while the screen is started.
++ */
++class TypingStatsFragment : PaddingPreferenceFragment() {
++
++    private lateinit var totalCharacters: Preference
++    private lateinit var corrections: Preference
++    private lateinit var accuracy: Preference
++    private lateinit var errorRate: Preference
++    private lateinit var activeDays: Preference
++    private lateinit var currentStreak: Preference
++    private lateinit var longestStreak: Preference
++    private lateinit var bestDay: Preference
++    private lateinit var since: Preference
++
++    private val recentDayPreferences = ArrayList<Preference>(RECENT_DAY_COUNT)
++
++    private lateinit var palettePreference: HeatmapPalettePreference
++    private lateinit var customColorPreference: Preference
++    private lateinit var trackingPreference: SwitchPreferenceCompat
++
++    private val statsPrefs
++        get() = AppPrefs.getInstance().stats
++
++    override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
++        val ctx = requireContext()
++        // The manager is idempotent; init also makes sure the "since install" anchor exists.
++        TypingStatsManager.init(ctx)
++        TypingStatsManager.refresh()
++
++        val screen = preferenceManager.createPreferenceScreen(ctx)
++        recentDayPreferences.clear()
++
++        screen.addCategory(R.string.stats_ui_overview) {
++            totalCharacters = addValueRow(R.string.stats_ui_total_chars)
++            corrections = addValueRow(R.string.stats_ui_corrections)
++            accuracy = addValueRow(R.string.stats_ui_accuracy)
++            errorRate = addValueRow(R.string.stats_ui_error_rate)
++            activeDays = addValueRow(R.string.stats_ui_active_days)
++            currentStreak = addValueRow(R.string.stats_ui_current_streak)
++            longestStreak = addValueRow(R.string.stats_ui_longest_streak)
++            bestDay = addValueRow(R.string.stats_ui_best_day)
++            since = addValueRow(R.string.stats_ui_since)
++        }
++
++        screen.addCategory(R.string.stats_ui_recent_7_days) {
++            repeat(RECENT_DAY_COUNT) {
++                recentDayPreferences.add(addValueRow(R.string.stats_ui_today))
++            }
++        }
++
++        screen.addCategory(R.string.stats_ui_appearance) {
++            palettePreference = HeatmapPalettePreference(ctx)
++            addPreference(palettePreference)
++            customColorPreference = Preference(ctx).apply {
++                isPersistent = false
++                isSingleLineTitle = false
++                isIconSpaceReserved = true
++                setTitle(R.string.stats_ui_custom_color)
++                setOnPreferenceClickListener {
++                    HeatmapColorPickerDialog.show(
++                        ctx,
++                        statsPrefs.customColor.getValue()
++                    ) { color ->
++                        statsPrefs.customColor.setValue(color)
++                        // Picking a custom color implies the custom palette.
++                        statsPrefs.palette.setValue(HeatmapPalette.Custom.storageKey)
++                        palettePreference.refresh()
++                        updateCustomColor()
++                    }
++                    true
++                }
++            }
++            addPreference(customColorPreference)
++        }
++
++        screen.addCategory(R.string.stats_ui_data_privacy) {
++            trackingPreference = SwitchPreferenceCompat(ctx).apply {
++                key = statsPrefs.enabled.key
++                setDefaultValue(true)
++                isIconSpaceReserved = false
++                isSingleLineTitle = false
++                setTitle(R.string.stats_ui_tracking)
++                setSummary(R.string.stats_ui_tracking_summary)
++                setOnPreferenceChangeListener { _, newValue ->
++                    // Route through the manager so buffered counts are flushed before pausing.
++                    TypingStatsManager.setEnabled((newValue as? Boolean) == true)
++                    true
++                }
++            }
++            addPreference(trackingPreference)
++
++            addPreference(Preference(ctx).apply {
++                isPersistent = false
++                isSelectable = false
++                isSingleLineTitle = false
++                isIconSpaceReserved = false
++                setTitle(R.string.stats_ui_privacy_title)
++                setSummary(R.string.stats_ui_privacy_summary)
++            })
++
++            addPreference(Preference(ctx).apply {
++                isPersistent = false
++                isSingleLineTitle = false
++                isIconSpaceReserved = false
++                setTitle(R.string.stats_ui_reset)
++                setOnPreferenceClickListener {
++                    confirmReset()
++                    true
++                }
++            })
++        }
++
++        preferenceScreen = screen
++        render(TypingStatsManager.snapshot.value)
++    }
++
++    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
++        super.onViewCreated(view, savedInstanceState)
++        viewLifecycleOwner.lifecycleScope.launch {
++            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
++                TypingStatsManager.snapshot.collect { render(it) }
++            }
++        }
++    }
++
++    /**
++     * Push [snapshot] into the preference rows.
++     *
++     * Called before the screen is attached (from [onCreatePreferences]) as well, so every access
++     * to a preference field must be guarded.
++     */
++    private fun render(snapshot: TypingStatsSnapshot) {
++        if (!::totalCharacters.isInitialized) return
++        val hasData = snapshot.totalCharacters > 0L
++
++        totalCharacters.summary =
++            getString(R.string.stats_ui_chars_unit, formatCount(snapshot.totalCharacters))
++        corrections.summary =
++            getString(R.string.stats_ui_corrections_unit, snapshot.totalCorrections)
++        accuracy.summary = if (hasData) formatPercent(snapshot.accuracy) else noData()
++        errorRate.summary = if (hasData) formatPercent(snapshot.errorRate) else noData()
++        activeDays.summary = getString(R.string.stats_ui_days_unit, snapshot.activeDays)
++        currentStreak.summary = getString(R.string.stats_ui_days_unit, snapshot.currentStreak)
++        longestStreak.summary = getString(R.string.stats_ui_days_unit, snapshot.longestStreak)
++        bestDay.summary = snapshot.bestDay?.let { day ->
++            getString(
++                R.string.stats_ui_best_day_summary,
++                formatIsoDate(day.date),
++                getString(R.string.stats_ui_chars_unit, formatCount(day.characters))
++            )
++        } ?: noData()
++        since.summary = formatStartDate(snapshot.startTime)
++
++        renderRecentDays(snapshot)
++
++        if (::trackingPreference.isInitialized) {
++            val enabled = statsPrefs.enabled.getValue()
++            // setChecked() persists, so only touch it when it actually differs
++            if (trackingPreference.isChecked != enabled) {
++                trackingPreference.isChecked = enabled
++            }
++        }
++        updateCustomColor()
++    }
++
++    private fun renderRecentDays(snapshot: TypingStatsSnapshot) {
++        val today = LocalDate.now()
++        val statsByDate = snapshot.days.associateBy { it.date }
++        recentDayPreferences.forEachIndexed { index, row ->
++            val date = today.minusDays((RECENT_DAY_COUNT - 1 - index).toLong())
++            val dateText = formatDateWithWeekday(date)
++            row.title = if (date == today) {
++                "${getString(R.string.stats_ui_today)} · $dateText"
++            } else {
++                dateText
++            }
++            val stat = statsByDate[date.toString()]
++            row.summary = if (stat == null || stat.characters <= 0L) {
++                noData()
++            } else {
++                getString(
++                    R.string.stats_ui_day_summary,
++                    formatCount(stat.characters),
++                    stat.corrections
++                )
++            }
++        }
++    }
++
++    private fun updateCustomColor() {
++        if (!::customColorPreference.isInitialized) return
++        val color = statsPrefs.customColor.getValue()
++        customColorPreference.setSummary(formatArgbHex(color))
++        customColorPreference.icon = colorDot(requireContext(), color)
++    }
++
++    private fun confirmReset() {
++        val ctx = requireContext()
++        AlertDialog.Builder(ctx)
++            .setTitle(R.string.stats_ui_reset_title)
++            .setMessage(R.string.stats_ui_reset_message)
++            .setNegativeButton(android.R.string.cancel, null)
++            .setPositiveButton(R.string.stats_ui_reset) { _, _ ->
++                TypingStatsManager.reset()
++                // reset() publishes the empty snapshot itself; refresh() covers a concurrent
++                // flush race and keeps the "since" anchor up to date.
++                TypingStatsManager.refresh()
++                ctx.toast(R.string.stats_ui_reset_done)
++            }
++            .show()
++    }
++
++    private fun PreferenceGroup.addValueRow(@StringRes titleRes: Int): Preference =
++        valueRow(titleRes).also { addPreference(it) }
++
++    private fun valueRow(@StringRes titleRes: Int): Preference =
++        Preference(requireContext()).apply {
++            isPersistent = false
++            isSelectable = false
++            isSingleLineTitle = false
++            isIconSpaceReserved = false
++            setTitle(titleRes)
++            setSummary(R.string.stats_ui_no_data)
++        }
++
++    private fun noData(): String = getString(R.string.stats_ui_no_data)
++
++    private fun formatCount(value: Long): String =
++        NumberFormat.getIntegerInstance(Locale.getDefault()).format(value)
++
++    private fun formatPercent(fraction: Float): String =
++        String.format(Locale.getDefault(), "%.1f%%", fraction * 100f)
++
++    private fun formatDate(date: LocalDate): String = date.format(
++        DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(Locale.getDefault())
++    )
++
++    private fun formatDateWithWeekday(date: LocalDate): String {
++        val weekday = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.getDefault())
++        return "${formatDate(date)} · $weekday"
++    }
++
++    private fun formatIsoDate(raw: String): String =
++        runCatching { LocalDate.parse(raw) }.getOrNull()?.let(::formatDate) ?: raw
++
++    private fun formatStartDate(startTime: Long): String {
++        if (startTime <= 0L) return noData()
++        // Be forgiving about values stored as seconds instead of epoch millis.
++        val millis = if (startTime < 100_000_000_000L) startTime * 1_000L else startTime
++        val date = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
++        return formatDate(date)
++    }
++
++    companion object {
++        private const val RECENT_DAY_COUNT = 7
++    }
++}
+diff --git a/app/src/main/res/drawable/bg_heatmap_card.xml b/app/src/main/res/drawable/bg_heatmap_card.xml
+new file mode 100644
+index 00000000..dd86ae22
+--- /dev/null
++++ b/app/src/main/res/drawable/bg_heatmap_card.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Rounded card behind the typing heatmap. Theme attributes keep it readable in light and dark. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++
++    <solid android:color="?attr/colorBackgroundFloating" />
++
++    <corners android:radius="14dp" />
++
++    <stroke
++        android:width="1dp"
++        android:color="?attr/colorControlHighlight" />
++</shape>
+diff --git a/app/src/main/res/drawable/bg_heatmap_stat_chip.xml b/app/src/main/res/drawable/bg_heatmap_stat_chip.xml
+new file mode 100644
+index 00000000..8bd071c2
+--- /dev/null
++++ b/app/src/main/res/drawable/bg_heatmap_stat_chip.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Small pill behind a headline metric (characters / accuracy / streak). -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++
++    <solid android:color="?attr/colorControlHighlight" />
++
++    <corners android:radius="12dp" />
++</shape>
+diff --git a/app/src/main/res/drawable/bg_heatmap_swatch.xml b/app/src/main/res/drawable/bg_heatmap_swatch.xml
+new file mode 100644
+index 00000000..e2dec1f4
+--- /dev/null
++++ b/app/src/main/res/drawable/bg_heatmap_swatch.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  One heatmap shade swatch. The solid color is tinted at runtime via backgroundTintList,
++  the rounded corners stay intact.
++-->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++
++    <solid android:color="#FFFFFFFF" />
++
++    <corners android:radius="3dp" />
++</shape>
+diff --git a/app/src/main/res/drawable/bg_heatmap_swatch_selected.xml b/app/src/main/res/drawable/bg_heatmap_swatch_selected.xml
+new file mode 100644
+index 00000000..2783ca30
+--- /dev/null
++++ b/app/src/main/res/drawable/bg_heatmap_swatch_selected.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Selection ring drawn behind a color chip in the custom color grid.
++  The chip itself is inset, so only this outline is visible around it.
++-->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++
++    <stroke
++        android:width="2dp"
++        android:color="?attr/colorAccent" />
++
++    <corners android:radius="9dp" />
++</shape>
+diff --git a/app/src/main/res/drawable/ic_stats_24.xml b/app/src/main/res/drawable/ic_stats_24.xml
+new file mode 100644
+index 00000000..4e9b0147
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_stats_24.xml
+@@ -0,0 +1,25 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Typing statistics / activity icon (24dp). White by default so callers can tint it,
++  like the other icons in this module.
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <!-- baseline -->
++    <path
++        android:fillColor="#ffffff"
++        android:pathData="M3,19h18v2H3z" />
++    <!-- bars, ascending -->
++    <path
++        android:fillColor="#ffffff"
++        android:pathData="M5,12h3.5v5H5z" />
++    <path
++        android:fillColor="#ffffff"
++        android:pathData="M10.25,8h3.5v9h-3.5z" />
++    <path
++        android:fillColor="#ffffff"
++        android:pathData="M15.5,4h3.5v13h-3.5z" />
++</vector>
+diff --git a/app/src/main/res/layout/dialog_heatmap_color.xml b/app/src/main/res/layout/dialog_heatmap_color.xml
+new file mode 100644
+index 00000000..8a1832b5
+--- /dev/null
++++ b/app/src/main/res/layout/dialog_heatmap_color.xml
+@@ -0,0 +1,115 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Content of the custom heatmap color dialog: live preview of the five shades,
++  a grid of preset colors (filled in programmatically) and a hex input field.
++-->
++<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:fillViewport="true">
++
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:orientation="vertical"
++        android:paddingStart="20dp"
++        android:paddingTop="8dp"
++        android:paddingEnd="20dp"
++        android:paddingBottom="4dp">
++
++        <TextView
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:text="@string/stats_ui_color_preview"
++            android:textColor="?android:attr/textColorSecondary"
++            android:textSize="13sp" />
++
++        <LinearLayout
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="6dp"
++            android:baselineAligned="false"
++            android:orientation="horizontal">
++
++            <View
++                android:id="@+id/color_preview_1"
++                android:layout_width="0dp"
++                android:layout_height="22dp"
++                android:layout_marginEnd="2dp"
++                android:layout_weight="1"
++                android:background="@drawable/bg_heatmap_swatch"
++                android:importantForAccessibility="no" />
++
++            <View
++                android:id="@+id/color_preview_2"
++                android:layout_width="0dp"
++                android:layout_height="22dp"
++                android:layout_marginStart="2dp"
++                android:layout_marginEnd="2dp"
++                android:layout_weight="1"
++                android:background="@drawable/bg_heatmap_swatch"
++                android:importantForAccessibility="no" />
++
++            <View
++                android:id="@+id/color_preview_3"
++                android:layout_width="0dp"
++                android:layout_height="22dp"
++                android:layout_marginStart="2dp"
++                android:layout_marginEnd="2dp"
++                android:layout_weight="1"
++                android:background="@drawable/bg_heatmap_swatch"
++                android:importantForAccessibility="no" />
++
++            <View
++                android:id="@+id/color_preview_4"
++                android:layout_width="0dp"
++                android:layout_height="22dp"
++                android:layout_marginStart="2dp"
++                android:layout_marginEnd="2dp"
++                android:layout_weight="1"
++                android:background="@drawable/bg_heatmap_swatch"
++                android:importantForAccessibility="no" />
++
++            <View
++                android:id="@+id/color_preview_5"
++                android:layout_width="0dp"
++                android:layout_height="22dp"
++                android:layout_marginStart="2dp"
++                android:layout_weight="1"
++                android:background="@drawable/bg_heatmap_swatch"
++                android:importantForAccessibility="no" />
++        </LinearLayout>
++
++        <LinearLayout
++            android:id="@+id/color_grid"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="12dp"
++            android:orientation="vertical" />
++
++        <EditText
++            android:id="@+id/color_hex_input"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="12dp"
++            android:fontFamily="monospace"
++            android:hint="@string/stats_ui_color_hex_hint"
++            android:imeOptions="actionDone"
++            android:inputType="textCapCharacters|textNoSuggestions"
++            android:maxLength="9"
++            android:maxLines="1"
++            android:singleLine="true"
++            android:textColor="?android:attr/textColorPrimary"
++            android:textSize="16sp" />
++
++        <TextView
++            android:id="@+id/color_hex_error"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="4dp"
++            android:text="@string/stats_ui_color_invalid"
++            android:textColor="@color/red_400"
++            android:textSize="12sp"
++            android:visibility="gone" />
++    </LinearLayout>
++</ScrollView>
+diff --git a/app/src/main/res/layout/preference_heatmap_palette.xml b/app/src/main/res/layout/preference_heatmap_palette.xml
+new file mode 100644
+index 00000000..e22158e2
+--- /dev/null
++++ b/app/src/main/res/layout/preference_heatmap_palette.xml
+@@ -0,0 +1,91 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Preference row for the heatmap color palette: title + current palette on the left,
++  the five shades of the ramp on the right. Uses the standard preference item ids so
++  androidx.preference binds title/summary automatically.
++-->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:background="?android:attr/selectableItemBackground"
++    android:clickable="true"
++    android:focusable="true"
++    android:gravity="center_vertical"
++    android:minHeight="56dp"
++    android:orientation="horizontal"
++    android:paddingStart="16dp"
++    android:paddingTop="8dp"
++    android:paddingEnd="16dp"
++    android:paddingBottom="8dp">
++
++    <LinearLayout
++        android:layout_width="0dp"
++        android:layout_height="wrap_content"
++        android:layout_weight="1"
++        android:orientation="vertical">
++
++        <TextView
++            android:id="@android:id/title"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:ellipsize="end"
++            android:maxLines="2"
++            android:textAppearance="?android:attr/textAppearanceListItem"
++            android:textColor="?android:attr/textColorPrimary" />
++
++        <TextView
++            android:id="@android:id/summary"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="2dp"
++            android:textColor="?android:attr/textColorSecondary"
++            android:textSize="14sp" />
++    </LinearLayout>
++
++    <LinearLayout
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_marginStart="12dp"
++        android:gravity="center_vertical"
++        android:orientation="horizontal">
++
++        <View
++            android:id="@+id/heatmap_palette_swatch_1"
++            android:layout_width="12dp"
++            android:layout_height="12dp"
++            android:background="@drawable/bg_heatmap_swatch"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_palette_swatch_2"
++            android:layout_width="12dp"
++            android:layout_height="12dp"
++            android:layout_marginStart="4dp"
++            android:background="@drawable/bg_heatmap_swatch"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_palette_swatch_3"
++            android:layout_width="12dp"
++            android:layout_height="12dp"
++            android:layout_marginStart="4dp"
++            android:background="@drawable/bg_heatmap_swatch"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_palette_swatch_4"
++            android:layout_width="12dp"
++            android:layout_height="12dp"
++            android:layout_marginStart="4dp"
++            android:background="@drawable/bg_heatmap_swatch"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_palette_swatch_5"
++            android:layout_width="12dp"
++            android:layout_height="12dp"
++            android:layout_marginStart="4dp"
++            android:background="@drawable/bg_heatmap_swatch"
++            android:importantForAccessibility="no" />
++    </LinearLayout>
++</LinearLayout>
+diff --git a/app/src/main/res/layout/preference_home_category.xml b/app/src/main/res/layout/preference_home_category.xml
+new file mode 100644
+index 00000000..20cba160
+--- /dev/null
++++ b/app/src/main/res/layout/preference_home_category.xml
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Home page section header. PreferenceCategory binds its title to @android:id/title.
++  Kept deliberately small; the spacing above the label does the grouping.
++-->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:orientation="vertical"
++    android:paddingStart="?android:attr/listPreferredItemPaddingStart"
++    android:paddingTop="20dp"
++    android:paddingEnd="?android:attr/listPreferredItemPaddingEnd"
++    android:paddingBottom="6dp">
++
++    <TextView
++        android:id="@android:id/title"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:letterSpacing="0.06"
++        android:textAllCaps="false"
++        android:textColor="?android:attr/textColorSecondary"
++        android:textSize="13sp"
++        android:textStyle="bold" />
++</LinearLayout>
+diff --git a/app/src/main/res/layout/preference_home_entry.xml b/app/src/main/res/layout/preference_home_entry.xml
+new file mode 100644
+index 00000000..7da7de64
+--- /dev/null
++++ b/app/src/main/res/layout/preference_home_entry.xml
+@@ -0,0 +1,72 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Home page entry: rounded icon container, title, summary and a chevron.
++  Keeps the stock preference ids so androidx.preference binding still works.
++-->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:background="?android:attr/selectableItemBackground"
++    android:baselineAligned="false"
++    android:gravity="center_vertical"
++    android:minHeight="64dp"
++    android:orientation="horizontal"
++    android:paddingStart="?android:attr/listPreferredItemPaddingStart"
++    android:paddingTop="10dp"
++    android:paddingEnd="?android:attr/listPreferredItemPaddingEnd"
++    android:paddingBottom="10dp">
++
++    <!-- Fixed size, accent tinted in HomePreference so it works in light and dark. -->
++    <FrameLayout
++        android:id="@+id/home_icon_container"
++        android:layout_width="38dp"
++        android:layout_height="38dp"
++        android:importantForAccessibility="no">
++
++        <ImageView
++            android:id="@+id/home_icon"
++            android:layout_width="21dp"
++            android:layout_height="21dp"
++            android:layout_gravity="center"
++            android:contentDescription="@null"
++            android:importantForAccessibility="no"
++            android:scaleType="fitCenter" />
++    </FrameLayout>
++
++    <LinearLayout
++        android:layout_width="0dp"
++        android:layout_height="wrap_content"
++        android:layout_marginStart="14dp"
++        android:layout_weight="1"
++        android:orientation="vertical">
++
++        <TextView
++            android:id="@android:id/title"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:ellipsize="end"
++            android:maxLines="2"
++            android:textColor="?android:attr/textColorPrimary"
++            android:textSize="16sp" />
++
++        <TextView
++            android:id="@android:id/summary"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="2dp"
++            android:ellipsize="end"
++            android:maxLines="2"
++            android:textColor="?android:attr/textColorSecondary"
++            android:textSize="13sp" />
++    </LinearLayout>
++
++    <ImageView
++        android:id="@+id/home_chevron"
++        android:layout_width="20dp"
++        android:layout_height="20dp"
++        android:layout_marginStart="8dp"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no"
++        android:scaleType="fitCenter"
++        android:src="@drawable/ic_baseline_keyboard_arrow_right_24" />
++</LinearLayout>
+diff --git a/app/src/main/res/layout/preference_typing_heatmap.xml b/app/src/main/res/layout/preference_typing_heatmap.xml
+new file mode 100644
+index 00000000..1ce8e117
+--- /dev/null
++++ b/app/src/main/res/layout/preference_typing_heatmap.xml
+@@ -0,0 +1,279 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Card for TypingHeatmapPreference: header, headline metrics, the heatmap and the legend.
++  Plain views only, the app theme is AppCompat (not MaterialComponents).
++-->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:layout_marginStart="10dp"
++    android:layout_marginTop="6dp"
++    android:layout_marginEnd="10dp"
++    android:layout_marginBottom="6dp"
++    android:background="@drawable/bg_heatmap_card"
++    android:clipToOutline="true"
++    android:foreground="?android:attr/selectableItemBackground"
++    android:orientation="vertical"
++    android:paddingStart="16dp"
++    android:paddingTop="14dp"
++    android:paddingEnd="16dp"
++    android:paddingBottom="14dp">
++
++    <!-- Header: title + summary on the left, "open statistics" on the right -->
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:gravity="center_vertical"
++        android:orientation="horizontal">
++
++        <LinearLayout
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:orientation="vertical">
++
++            <TextView
++                android:id="@+id/heatmap_title"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:ellipsize="end"
++                android:maxLines="1"
++                android:text="@string/heatmap_title"
++                android:textColor="?android:attr/textColorPrimary"
++                android:textSize="17sp"
++                android:textStyle="bold" />
++
++            <TextView
++                android:id="@+id/heatmap_summary"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="2dp"
++                android:ellipsize="end"
++                android:maxLines="2"
++                android:textColor="?android:attr/textColorSecondary"
++                android:textSize="13sp" />
++        </LinearLayout>
++
++        <ImageView
++            android:id="@+id/heatmap_open_stats"
++            android:layout_width="40dp"
++            android:layout_height="40dp"
++            android:layout_marginStart="8dp"
++            android:background="?android:attr/selectableItemBackgroundBorderless"
++            android:clickable="true"
++            android:contentDescription="@string/heatmap_open_stats"
++            android:focusable="true"
++            android:padding="8dp"
++            android:src="@drawable/ic_baseline_settings_24"
++            android:tint="?android:attr/textColorSecondary" />
++    </LinearLayout>
++
++    <TextView
++        android:id="@+id/heatmap_paused_hint"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="8dp"
++        android:background="@drawable/bg_heatmap_stat_chip"
++        android:paddingStart="10dp"
++        android:paddingTop="4dp"
++        android:paddingEnd="10dp"
++        android:paddingBottom="4dp"
++        android:text="@string/heatmap_stats_paused"
++        android:textColor="?android:attr/textColorSecondary"
++        android:textSize="12sp"
++        android:visibility="gone" />
++
++    <!-- Three compact headline metrics -->
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="12dp"
++        android:baselineAligned="false"
++        android:orientation="horizontal">
++
++        <LinearLayout
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_marginEnd="8dp"
++            android:layout_weight="1"
++            android:background="@drawable/bg_heatmap_stat_chip"
++            android:orientation="vertical"
++            android:paddingStart="10dp"
++            android:paddingTop="8dp"
++            android:paddingEnd="10dp"
++            android:paddingBottom="8dp">
++
++            <TextView
++                android:id="@+id/heatmap_total_value"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:ellipsize="end"
++                android:fontFeatureSettings="'tnum'"
++                android:maxLines="1"
++                android:text="0"
++                android:textColor="?android:attr/textColorPrimary"
++                android:textSize="18sp"
++                android:textStyle="bold" />
++
++            <TextView
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="2dp"
++                android:ellipsize="end"
++                android:maxLines="1"
++                android:text="@string/heatmap_total_characters"
++                android:textColor="?android:attr/textColorSecondary"
++                android:textSize="11sp" />
++        </LinearLayout>
++
++        <LinearLayout
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_marginEnd="8dp"
++            android:layout_weight="1"
++            android:background="@drawable/bg_heatmap_stat_chip"
++            android:orientation="vertical"
++            android:paddingStart="10dp"
++            android:paddingTop="8dp"
++            android:paddingEnd="10dp"
++            android:paddingBottom="8dp">
++
++            <TextView
++                android:id="@+id/heatmap_accuracy_value"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:ellipsize="end"
++                android:fontFeatureSettings="'tnum'"
++                android:maxLines="1"
++                android:text="—"
++                android:textColor="?android:attr/textColorPrimary"
++                android:textSize="18sp"
++                android:textStyle="bold" />
++
++            <TextView
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="2dp"
++                android:ellipsize="end"
++                android:maxLines="1"
++                android:text="@string/heatmap_accuracy"
++                android:textColor="?android:attr/textColorSecondary"
++                android:textSize="11sp" />
++        </LinearLayout>
++
++        <LinearLayout
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:background="@drawable/bg_heatmap_stat_chip"
++            android:orientation="vertical"
++            android:paddingStart="10dp"
++            android:paddingTop="8dp"
++            android:paddingEnd="10dp"
++            android:paddingBottom="8dp">
++
++            <TextView
++                android:id="@+id/heatmap_streak_value"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:ellipsize="end"
++                android:fontFeatureSettings="'tnum'"
++                android:maxLines="1"
++                android:text="0"
++                android:textColor="?android:attr/textColorPrimary"
++                android:textSize="18sp"
++                android:textStyle="bold" />
++
++            <TextView
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="2dp"
++                android:ellipsize="end"
++                android:maxLines="1"
++                android:text="@string/heatmap_streak"
++                android:textColor="?android:attr/textColorSecondary"
++                android:textSize="11sp" />
++        </LinearLayout>
++    </LinearLayout>
++
++    <!-- Scrolls horizontally, the view measures itself to 53 week columns -->
++    <HorizontalScrollView
++        android:id="@+id/heatmap_scroll"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="12dp"
++        android:clipToPadding="false"
++        android:fillViewport="false"
++        android:overScrollMode="never"
++        android:scrollbars="none">
++
++        <org.fcitx.fcitx5.android.ui.main.heatmap.ContributionHeatmapView
++            android:id="@+id/heatmap_heatmap"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content" />
++    </HorizontalScrollView>
++
++    <!-- Less -> More legend -->
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="8dp"
++        android:gravity="end|center_vertical"
++        android:orientation="horizontal">
++
++        <TextView
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:text="@string/heatmap_less"
++            android:textColor="?android:attr/textColorSecondary"
++            android:textSize="11sp" />
++
++        <View
++            android:id="@+id/heatmap_legend_swatch_1"
++            android:layout_width="10dp"
++            android:layout_height="10dp"
++            android:layout_marginStart="4dp"
++            android:background="@color/grey_400"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_legend_swatch_2"
++            android:layout_width="10dp"
++            android:layout_height="10dp"
++            android:layout_marginStart="3dp"
++            android:background="@color/grey_400"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_legend_swatch_3"
++            android:layout_width="10dp"
++            android:layout_height="10dp"
++            android:layout_marginStart="3dp"
++            android:background="@color/grey_400"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_legend_swatch_4"
++            android:layout_width="10dp"
++            android:layout_height="10dp"
++            android:layout_marginStart="3dp"
++            android:background="@color/grey_400"
++            android:importantForAccessibility="no" />
++
++        <View
++            android:id="@+id/heatmap_legend_swatch_5"
++            android:layout_width="10dp"
++            android:layout_height="10dp"
++            android:layout_marginStart="3dp"
++            android:background="@color/grey_400"
++            android:importantForAccessibility="no" />
++
++        <TextView
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginStart="4dp"
++            android:text="@string/heatmap_more"
++            android:textColor="?android:attr/textColorSecondary"
++            android:textSize="11sp" />
++    </LinearLayout>
++</LinearLayout>
+diff --git a/app/src/main/res/values-zh-rCN/strings_heatmap.xml b/app/src/main/res/values-zh-rCN/strings_heatmap.xml
+new file mode 100644
+index 00000000..8b48b99e
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_heatmap.xml
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the typing heatmap home page card (and its palette picker). -->
++<resources>
++    <string name="heatmap_title">输入热力图</string>
++    <string name="heatmap_summary_last_year">累计 %1$s 字</string>
++    <string name="heatmap_summary_since">自 %1$s 起统计</string>
++    <string name="heatmap_total_characters">总字数</string>
++    <string name="heatmap_accuracy">正确率</string>
++    <string name="heatmap_streak">连续输入</string>
++    <string name="heatmap_less">少</string>
++    <string name="heatmap_more">多</string>
++    <string name="heatmap_today">今天</string>
++    <string name="heatmap_day_tooltip">%1$s · %2$s</string>
++    <string name="heatmap_stats_paused">统计已暂停</string>
++    <string name="heatmap_open_stats">打开统计</string>
++    <string name="heatmap_no_data">暂无数据</string>
++    <string name="heatmap_chars_unit">%1$s 个字符</string>
++    <string name="heatmap_days_unit">%1$s 天</string>
++
++    <string name="heatmap_palette_github">GitHub</string>
++    <string name="heatmap_palette_blue">蓝色</string>
++    <string name="heatmap_palette_purple">紫色</string>
++    <string name="heatmap_palette_orange">橙色</string>
++    <string name="heatmap_palette_pink">粉色</string>
++    <string name="heatmap_palette_custom">自定义</string>
++
++    <plurals name="heatmap_chars_count">
++        <item quantity="other">%1$s 个字符</item>
++    </plurals>
++    <plurals name="heatmap_days_count">
++        <item quantity="other">%1$s 天</item>
++    </plurals>
++</resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings_home.xml b/app/src/main/res/values-zh-rCN/strings_home.xml
+new file mode 100644
+index 00000000..6f489598
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_home.xml
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the redesigned home page. Titles are reused from strings.xml. -->
++<resources>
++    <string name="home_category_input">输入</string>
++    <string name="home_category_appearance">外观与交互</string>
++    <string name="home_category_tools">工具与数据</string>
++    <string name="home_category_system">系统</string>
++
++    <string name="home_summary_global">引擎选项、行为与快捷键</string>
++    <string name="home_summary_ime">启用输入法、布局与切换</string>
++    <string name="home_summary_addons">扩展引擎功能的模块</string>
++    <string name="home_summary_theme">配色、背景图片与主题预设</string>
++    <string name="home_summary_keyboard">布局、按键、手势与反馈</string>
++    <string name="home_summary_candidates">样式、大小与行为</string>
++    <string name="home_summary_symbols">表情、符号与特殊字符</string>
++    <string name="home_summary_clipboard">历史记录、建议与敏感内容</string>
++    <string name="home_summary_files">浏览并编辑配置文件</string>
++    <string name="home_summary_plugins">已加载插件与详情</string>
++    <string name="home_summary_stats">输入热力图、正确率与数据重置</string>
++    <string name="home_summary_advanced">实验性与诊断选项</string>
++
++    <string name="home_stats_title">统计与热力图</string>
++</resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings_stats_ui.xml b/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
+new file mode 100644
+index 00000000..f30068bb
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_stats_ui.xml
+@@ -0,0 +1,52 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the typing statistics & heatmap settings screen. -->
++<resources>
++    <string name="stats_ui_title">统计与热力图</string>
++
++    <!-- Overview -->
++    <string name="stats_ui_overview">概览</string>
++    <string name="stats_ui_total_chars">累计字数</string>
++    <string name="stats_ui_corrections">修正字数</string>
++    <string name="stats_ui_accuracy">正确率</string>
++    <string name="stats_ui_error_rate">错误率</string>
++    <string name="stats_ui_active_days">活跃天数</string>
++    <string name="stats_ui_current_streak">当前连续</string>
++    <string name="stats_ui_longest_streak">最长连续</string>
++    <string name="stats_ui_best_day">最佳单日</string>
++    <string name="stats_ui_since">开始统计于</string>
++
++    <!-- Last 7 days -->
++    <string name="stats_ui_recent_7_days">最近 7 天</string>
++    <string name="stats_ui_today">今天</string>
++
++    <!-- Appearance -->
++    <string name="stats_ui_appearance">外观</string>
++    <string name="stats_ui_palette">配色方案</string>
++    <string name="stats_ui_custom_color">自定义颜色</string>
++
++    <!-- Data & privacy -->
++    <string name="stats_ui_data_privacy">数据与隐私</string>
++    <string name="stats_ui_tracking">记录输入统计</string>
++    <string name="stats_ui_tracking_summary">仅保存汇总计数，关闭后将暂停记录</string>
++    <string name="stats_ui_privacy_title">隐私说明</string>
++    <string name="stats_ui_privacy_summary">仅在本地保存汇总计数，绝不保存任何输入内容。</string>
++    <string name="stats_ui_reset">重置统计</string>
++    <string name="stats_ui_reset_title">重置统计？</string>
++    <string name="stats_ui_reset_message">将删除所有已记录的统计数据，并从今天重新计算统计起始日期。此操作无法撤销。</string>
++    <string name="stats_ui_reset_done">统计已重置</string>
++
++    <!-- Values and units -->
++    <string name="stats_ui_no_data">—</string>
++    <string name="stats_ui_chars_unit">%1$s 字</string>
++    <string name="stats_ui_corrections_unit">%1$d 次</string>
++    <string name="stats_ui_days_unit">%1$d 天</string>
++    <string name="stats_ui_day_summary">%1$s 字 · 修正 %2$d 次</string>
++    <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
++
++    <!-- Custom color dialog -->
++    <string name="stats_ui_color_dialog_title">选择自定义颜色</string>
++    <string name="stats_ui_color_preview">预览</string>
++    <string name="stats_ui_color_hex_hint">#RRGGBB 或 #AARRGGBB</string>
++    <string name="stats_ui_color_invalid">请输入有效的十六进制颜色，例如 #2DA44E</string>
++    <string name="stats_ui_color_custom">自定义</string>
++</resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings_heatmap.xml b/app/src/main/res/values-zh-rTW/strings_heatmap.xml
+new file mode 100644
+index 00000000..38ee8492
+--- /dev/null
++++ b/app/src/main/res/values-zh-rTW/strings_heatmap.xml
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the typing heatmap home page card (and its palette picker). -->
++<resources>
++    <string name="heatmap_title">輸入熱力圖</string>
++    <string name="heatmap_summary_last_year">累計 %1$s 字</string>
++    <string name="heatmap_summary_since">自 %1$s 起統計</string>
++    <string name="heatmap_total_characters">總字數</string>
++    <string name="heatmap_accuracy">正確率</string>
++    <string name="heatmap_streak">連續輸入</string>
++    <string name="heatmap_less">少</string>
++    <string name="heatmap_more">多</string>
++    <string name="heatmap_today">今天</string>
++    <string name="heatmap_day_tooltip">%1$s · %2$s</string>
++    <string name="heatmap_stats_paused">統計已暫停</string>
++    <string name="heatmap_open_stats">開啟統計</string>
++    <string name="heatmap_no_data">尚無資料</string>
++    <string name="heatmap_chars_unit">%1$s 個字元</string>
++    <string name="heatmap_days_unit">%1$s 天</string>
++
++    <string name="heatmap_palette_github">GitHub</string>
++    <string name="heatmap_palette_blue">藍色</string>
++    <string name="heatmap_palette_purple">紫色</string>
++    <string name="heatmap_palette_orange">橘色</string>
++    <string name="heatmap_palette_pink">粉紅色</string>
++    <string name="heatmap_palette_custom">自訂</string>
++
++    <plurals name="heatmap_chars_count">
++        <item quantity="other">%1$s 個字元</item>
++    </plurals>
++    <plurals name="heatmap_days_count">
++        <item quantity="other">%1$s 天</item>
++    </plurals>
++</resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings_home.xml b/app/src/main/res/values-zh-rTW/strings_home.xml
+new file mode 100644
+index 00000000..7c200c93
+--- /dev/null
++++ b/app/src/main/res/values-zh-rTW/strings_home.xml
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the redesigned home page. Titles are reused from strings.xml. -->
++<resources>
++    <string name="home_category_input">輸入</string>
++    <string name="home_category_appearance">外觀與互動</string>
++    <string name="home_category_tools">工具與資料</string>
++    <string name="home_category_system">系統</string>
++
++    <string name="home_summary_global">引擎選項、行為與快速鍵</string>
++    <string name="home_summary_ime">啟用輸入法、設定與切換</string>
++    <string name="home_summary_addons">擴充引擎功能的模組</string>
++    <string name="home_summary_theme">配色、背景圖片與主題預設</string>
++    <string name="home_summary_keyboard">版面配置、按鍵、手勢與回饋</string>
++    <string name="home_summary_candidates">樣式、大小與行為</string>
++    <string name="home_summary_symbols">表情、符號與特殊字元</string>
++    <string name="home_summary_clipboard">歷史記錄、建議與敏感內容</string>
++    <string name="home_summary_files">瀏覽並編輯設定檔</string>
++    <string name="home_summary_plugins">已載入外掛與詳細資料</string>
++    <string name="home_summary_stats">輸入熱力圖、正確率與資料重設</string>
++    <string name="home_summary_advanced">實驗性與診斷選項</string>
++
++    <string name="home_stats_title">統計與熱力圖</string>
++</resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings_stats_ui.xml b/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
+new file mode 100644
+index 00000000..c52006b9
+--- /dev/null
++++ b/app/src/main/res/values-zh-rTW/strings_stats_ui.xml
+@@ -0,0 +1,52 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the typing statistics & heatmap settings screen. -->
++<resources>
++    <string name="stats_ui_title">統計與熱力圖</string>
++
++    <!-- Overview -->
++    <string name="stats_ui_overview">總覽</string>
++    <string name="stats_ui_total_chars">累計字數</string>
++    <string name="stats_ui_corrections">修正字數</string>
++    <string name="stats_ui_accuracy">正確率</string>
++    <string name="stats_ui_error_rate">錯誤率</string>
++    <string name="stats_ui_active_days">活躍天數</string>
++    <string name="stats_ui_current_streak">目前連續</string>
++    <string name="stats_ui_longest_streak">最長連續</string>
++    <string name="stats_ui_best_day">最佳單日</string>
++    <string name="stats_ui_since">開始統計於</string>
++
++    <!-- Last 7 days -->
++    <string name="stats_ui_recent_7_days">最近 7 天</string>
++    <string name="stats_ui_today">今天</string>
++
++    <!-- Appearance -->
++    <string name="stats_ui_appearance">外觀</string>
++    <string name="stats_ui_palette">配色方案</string>
++    <string name="stats_ui_custom_color">自訂顏色</string>
++
++    <!-- Data & privacy -->
++    <string name="stats_ui_data_privacy">資料與隱私</string>
++    <string name="stats_ui_tracking">記錄輸入統計</string>
++    <string name="stats_ui_tracking_summary">僅儲存彙總計數，關閉後將暫停記錄</string>
++    <string name="stats_ui_privacy_title">隱私說明</string>
++    <string name="stats_ui_privacy_summary">僅在本機儲存彙總計數，絕不儲存任何輸入內容。</string>
++    <string name="stats_ui_reset">重設統計</string>
++    <string name="stats_ui_reset_title">重設統計？</string>
++    <string name="stats_ui_reset_message">將刪除所有已記錄的統計資料，並從今天重新計算統計起始日期。此操作無法復原。</string>
++    <string name="stats_ui_reset_done">統計已重設</string>
++
++    <!-- Values and units -->
++    <string name="stats_ui_no_data">—</string>
++    <string name="stats_ui_chars_unit">%1$s 字</string>
++    <string name="stats_ui_corrections_unit">%1$d 次</string>
++    <string name="stats_ui_days_unit">%1$d 天</string>
++    <string name="stats_ui_day_summary">%1$s 字 · 修正 %2$d 次</string>
++    <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
++
++    <!-- Custom color dialog -->
++    <string name="stats_ui_color_dialog_title">選擇自訂顏色</string>
++    <string name="stats_ui_color_preview">預覽</string>
++    <string name="stats_ui_color_hex_hint">#RRGGBB 或 #AARRGGBB</string>
++    <string name="stats_ui_color_invalid">請輸入有效的十六進位顏色，例如 #2DA44E</string>
++    <string name="stats_ui_color_custom">自訂</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_heatmap.xml b/app/src/main/res/values/strings_heatmap.xml
+new file mode 100644
+index 00000000..335b3cfd
+--- /dev/null
++++ b/app/src/main/res/values/strings_heatmap.xml
+@@ -0,0 +1,35 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the typing heatmap home page card (and its palette picker). -->
++<resources>
++    <string name="heatmap_title">Typing heatmap</string>
++    <string name="heatmap_summary_last_year">Total %1$s characters</string>
++    <string name="heatmap_summary_since">Stats since %1$s</string>
++    <string name="heatmap_total_characters">Characters</string>
++    <string name="heatmap_accuracy">Accuracy</string>
++    <string name="heatmap_streak">Streak</string>
++    <string name="heatmap_less">Less</string>
++    <string name="heatmap_more">More</string>
++    <string name="heatmap_today">Today</string>
++    <string name="heatmap_day_tooltip">%1$s · %2$s</string>
++    <string name="heatmap_stats_paused">Statistics are paused</string>
++    <string name="heatmap_open_stats">Open statistics</string>
++    <string name="heatmap_no_data">No data yet</string>
++    <string name="heatmap_chars_unit">%1$s characters</string>
++    <string name="heatmap_days_unit">%1$s days</string>
++
++    <string name="heatmap_palette_github">GitHub</string>
++    <string name="heatmap_palette_blue">Blue</string>
++    <string name="heatmap_palette_purple">Purple</string>
++    <string name="heatmap_palette_orange">Orange</string>
++    <string name="heatmap_palette_pink">Pink</string>
++    <string name="heatmap_palette_custom">Custom</string>
++
++    <plurals name="heatmap_chars_count">
++        <item quantity="one">%1$s character</item>
++        <item quantity="other">%1$s characters</item>
++    </plurals>
++    <plurals name="heatmap_days_count">
++        <item quantity="one">%1$s day</item>
++        <item quantity="other">%1$s days</item>
++    </plurals>
++</resources>
+diff --git a/app/src/main/res/values/strings_home.xml b/app/src/main/res/values/strings_home.xml
+new file mode 100644
+index 00000000..2541d9a2
+--- /dev/null
++++ b/app/src/main/res/values/strings_home.xml
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the redesigned home page. Titles are reused from strings.xml. -->
++<resources>
++    <string name="home_category_input">Input</string>
++    <string name="home_category_appearance">Appearance &amp; interaction</string>
++    <string name="home_category_tools">Tools &amp; data</string>
++    <string name="home_category_system">System</string>
++
++    <string name="home_summary_global">Engine options, behavior and hotkeys</string>
++    <string name="home_summary_ime">Enable, arrange and switch input methods</string>
++    <string name="home_summary_addons">Modules that extend the engine</string>
++    <string name="home_summary_theme">Colors, background image and presets</string>
++    <string name="home_summary_keyboard">Layout, keys, gestures and feedback</string>
++    <string name="home_summary_candidates">Style, size and behavior</string>
++    <string name="home_summary_symbols">Emoji, symbols and special characters</string>
++    <string name="home_summary_clipboard">History, suggestions and sensitive content</string>
++    <string name="home_summary_files">Browse and edit config files</string>
++    <string name="home_summary_plugins">Loaded plugins and their details</string>
++    <string name="home_summary_stats">Typing heatmap, accuracy and data reset</string>
++    <string name="home_summary_advanced">Experimental and diagnostic options</string>
++
++    <string name="home_stats_title">Statistics &amp; heatmap</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_stats_ui.xml b/app/src/main/res/values/strings_stats_ui.xml
+new file mode 100644
+index 00000000..0cc7dc71
+--- /dev/null
++++ b/app/src/main/res/values/strings_stats_ui.xml
+@@ -0,0 +1,52 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for the typing statistics & heatmap settings screen. -->
++<resources>
++    <string name="stats_ui_title">Statistics &amp; heatmap</string>
++
++    <!-- Overview -->
++    <string name="stats_ui_overview">Overview</string>
++    <string name="stats_ui_total_chars">Total characters</string>
++    <string name="stats_ui_corrections">Corrected characters</string>
++    <string name="stats_ui_accuracy">Accuracy</string>
++    <string name="stats_ui_error_rate">Error rate</string>
++    <string name="stats_ui_active_days">Active days</string>
++    <string name="stats_ui_current_streak">Current streak</string>
++    <string name="stats_ui_longest_streak">Longest streak</string>
++    <string name="stats_ui_best_day">Best day</string>
++    <string name="stats_ui_since">Tracking since</string>
++
++    <!-- Last 7 days -->
++    <string name="stats_ui_recent_7_days">Last 7 days</string>
++    <string name="stats_ui_today">Today</string>
++
++    <!-- Appearance -->
++    <string name="stats_ui_appearance">Appearance</string>
++    <string name="stats_ui_palette">Color palette</string>
++    <string name="stats_ui_custom_color">Custom color</string>
++
++    <!-- Data & privacy -->
++    <string name="stats_ui_data_privacy">Data &amp; privacy</string>
++    <string name="stats_ui_tracking">Record typing statistics</string>
++    <string name="stats_ui_tracking_summary">Stores aggregated counts only; turning this off pauses recording</string>
++    <string name="stats_ui_privacy_title">Privacy</string>
++    <string name="stats_ui_privacy_summary">Only aggregated counts are stored locally. The text you type is never saved.</string>
++    <string name="stats_ui_reset">Reset statistics</string>
++    <string name="stats_ui_reset_title">Reset statistics?</string>
++    <string name="stats_ui_reset_message">All recorded statistics will be deleted and the tracking start date restarts from today. This cannot be undone.</string>
++    <string name="stats_ui_reset_done">Statistics reset</string>
++
++    <!-- Values and units -->
++    <string name="stats_ui_no_data">—</string>
++    <string name="stats_ui_chars_unit">%1$s characters</string>
++    <string name="stats_ui_corrections_unit">%1$d corrections</string>
++    <string name="stats_ui_days_unit">%1$d days</string>
++    <string name="stats_ui_day_summary">%1$s characters · %2$d corrections</string>
++    <string name="stats_ui_best_day_summary">%1$s · %2$s</string>
++
++    <!-- Custom color dialog -->
++    <string name="stats_ui_color_dialog_title">Pick a custom color</string>
++    <string name="stats_ui_color_preview">Preview</string>
++    <string name="stats_ui_color_hex_hint">#RRGGBB or #AARRGGBB</string>
++    <string name="stats_ui_color_invalid">Enter a valid hex color, for example #2DA44E</string>
++    <string name="stats_ui_color_custom">Custom</string>
++</resources>
+diff --git a/app/src/test/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMathTest.kt b/app/src/test/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMathTest.kt
+new file mode 100644
+index 00000000..172f64f8
+--- /dev/null
++++ b/app/src/test/java/org/fcitx/fcitx5/android/data/stats/TypingStatsMathTest.kt
+@@ -0,0 +1,258 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.stats
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.LocalDate
++
++/**
++ * JVM-only tests: [TypingStatsMath] must not depend on the Android framework.
++ */
++class TypingStatsMathTest {
++
++    private val today: LocalDate = LocalDate.of(2026, 11, 14)
++
++    private fun daysAgo(days: Long): LocalDate = today.minusDays(days)
++
++    // region countCharacters
++
++    @Test
++    fun countCharactersOfEmptyText() {
++        assertEquals(0, TypingStatsMath.countCharacters(""))
++    }
++
++    @Test
++    fun countCharactersOfPlainAscii() {
++        assertEquals(5, TypingStatsMath.countCharacters("hello"))
++    }
++
++    @Test
++    fun countCharactersExcludesWhitespace() {
++        assertEquals(10, TypingStatsMath.countCharacters(" hello\tworld\n"))
++        assertEquals(0, TypingStatsMath.countCharacters(" \t\n\r"))
++        assertEquals(2, TypingStatsMath.countCharacters("a b"))
++    }
++
++    @Test
++    fun countCharactersExcludesIsoControlCharacters() {
++        assertEquals(2, TypingStatsMath.countCharacters("a\u0000b\u0007"))
++        assertEquals(0, TypingStatsMath.countCharacters("\u0000\u0001\u001F\u007F"))
++    }
++
++    @Test
++    fun countCharactersCountsCodePointsNotChars() {
++        // U+1F600 GRINNING FACE is a single code point in UTF-16 surrogate pair form
++        assertEquals(1, TypingStatsMath.countCharacters("\uD83D\uDE00"))
++        assertEquals(3, TypingStatsMath.countCharacters("a\uD83D\uDE00b"))
++        // counting code points, not grapheme clusters: combining acute is its own code point
++        assertEquals(2, TypingStatsMath.countCharacters("e\u0301"))
++    }
++
++    @Test
++    fun countCharactersCountsCjk() {
++        assertEquals(3, TypingStatsMath.countCharacters("\u4F60\u597D\u5417"))
++    }
++
++    @Test
++    fun countCharactersHandlesStringBuilder() {
++        assertEquals(3, TypingStatsMath.countCharacters(StringBuilder("a b c")))
++    }
++
++    // endregion
++
++    // region accuracy / errorRate
++
++    @Test
++    fun accuracyWithoutAnyInputIsPerfect() {
++        assertEquals(1f, TypingStatsMath.accuracy(0L, 0L), 1e-6f)
++        assertEquals(0f, TypingStatsMath.errorRate(0L, 0L), 1e-6f)
++    }
++
++    @Test
++    fun accuracyWithoutCorrectionsIsPerfect() {
++        assertEquals(1f, TypingStatsMath.accuracy(42L, 0L), 1e-6f)
++    }
++
++    @Test
++    fun accuracyAccountsForCorrections() {
++        assertEquals(0.75f, TypingStatsMath.accuracy(3L, 1L), 1e-6f)
++        assertEquals(0.25f, TypingStatsMath.errorRate(3L, 1L), 1e-6f)
++        assertEquals(0.5f, TypingStatsMath.accuracy(10L, 10L), 1e-6f)
++    }
++
++    @Test
++    fun accuracyWithoutCharactersIsZero() {
++        assertEquals(0f, TypingStatsMath.accuracy(0L, 7L), 1e-6f)
++        assertEquals(1f, TypingStatsMath.errorRate(0L, 7L), 1e-6f)
++    }
++
++    @Test
++    fun accuracyIsClamped() {
++        // corrupted rows must not produce values outside 0..1
++        assertEquals(0f, TypingStatsMath.accuracy(-5L, 10L), 1e-6f)
++        assertEquals(1f, TypingStatsMath.accuracy(10L, -5L), 1e-6f)
++    }
++
++    @Test
++    fun accuracyDoesNotOverflowOnHugeCounts() {
++        val result = TypingStatsMath.accuracy(Long.MAX_VALUE, Long.MAX_VALUE)
++        assertEquals(0.5f, result, 1e-6f)
++    }
++
++    // endregion
++
++    // region currentStreak
++
++    @Test
++    fun currentStreakWithoutActivity() {
++        assertEquals(0, TypingStatsMath.currentStreak(emptySet(), today))
++    }
++
++    @Test
++    fun currentStreakOfSingleDay() {
++        assertEquals(1, TypingStatsMath.currentStreak(setOf(today), today))
++    }
++
++    @Test
++    fun currentStreakEndingToday() {
++        val active = setOf(today, daysAgo(1), daysAgo(2))
++        assertEquals(3, TypingStatsMath.currentStreak(active, today))
++    }
++
++    @Test
++    fun currentStreakEndingYesterdayWhenTodayIsIdle() {
++        val active = setOf(daysAgo(1), daysAgo(2))
++        assertEquals(2, TypingStatsMath.currentStreak(active, today))
++    }
++
++    @Test
++    fun currentStreakStopsAtFirstGap() {
++        val active = setOf(today, daysAgo(2), daysAgo(3), daysAgo(4))
++        assertEquals(1, TypingStatsMath.currentStreak(active, today))
++    }
++
++    @Test
++    fun currentStreakIsZeroWhenLastTwoDaysAreIdle() {
++        val active = setOf(daysAgo(2), daysAgo(3))
++        assertEquals(0, TypingStatsMath.currentStreak(active, today))
++    }
++
++    @Test
++    fun currentStreakIgnoresFutureDates() {
++        val active = setOf(today.plusDays(1), daysAgo(1))
++        assertEquals(1, TypingStatsMath.currentStreak(active, today))
++    }
++
++    // endregion
++
++    // region longestStreak
++
++    @Test
++    fun longestStreakWithoutActivity() {
++        assertEquals(0, TypingStatsMath.longestStreak(emptySet()))
++    }
++
++    @Test
++    fun longestStreakOfSingleDay() {
++        assertEquals(1, TypingStatsMath.longestStreak(setOf(today)))
++    }
++
++    @Test
++    fun longestStreakOfConsecutiveDays() {
++        val active = setOf(today, daysAgo(1), daysAgo(2), daysAgo(3))
++        assertEquals(4, TypingStatsMath.longestStreak(active))
++    }
++
++    @Test
++    fun longestStreakPicksTheLongestRun() {
++        // run of 2 (today, yesterday), gap, run of 4
++        val active = setOf(
++            today, daysAgo(1),
++            daysAgo(3), daysAgo(4), daysAgo(5), daysAgo(6),
++            daysAgo(10)
++        )
++        assertEquals(4, TypingStatsMath.longestStreak(active))
++    }
++
++    @Test
++    fun longestStreakHandlesUnsortedInput() {
++        val active = setOf(daysAgo(6), daysAgo(4), daysAgo(5), today, daysAgo(1))
++        assertEquals(3, TypingStatsMath.longestStreak(active))
++    }
++
++    // endregion
++
++    // region heatmapLevels
++
++    @Test
++    fun heatmapLevelsOfEmptyMap() {
++        assertTrue(TypingStatsMath.heatmapLevels(emptyMap()).isEmpty())
++    }
++
++    @Test
++    fun heatmapLevelsOfZeroAndNegativeCountsAreZero() {
++        val counts = mapOf(today to 0L, daysAgo(1) to -5L, daysAgo(2) to 10L)
++        val levels = TypingStatsMath.heatmapLevels(counts)
++        assertEquals(0, levels.getValue(today))
++        assertEquals(0, levels.getValue(daysAgo(1)))
++        assertEquals(4, levels.getValue(daysAgo(2)))
++    }
++
++    @Test
++    fun heatmapLevelsOfAllZeroCountsAreZero() {
++        val counts = mapOf(today to 0L, daysAgo(1) to 0L)
++        val levels = TypingStatsMath.heatmapLevels(counts)
++        assertEquals(mapOf(today to 0, daysAgo(1) to 0), levels)
++    }
++
++    @Test
++    fun heatmapLevelsScaleAgainstTheGlobalMaximum() {
++        val counts = (1..9).associate { daysAgo(it.toLong()) to it.toLong() }
++        val levels = TypingStatsMath.heatmapLevels(counts, maxLevel = 4)
++        // 1 + floor(3 * count / 9)
++        assertEquals(1, levels.getValue(daysAgo(1)))
++        assertEquals(1, levels.getValue(daysAgo(2)))
++        assertEquals(2, levels.getValue(daysAgo(3)))
++        assertEquals(3, levels.getValue(daysAgo(6)))
++        assertEquals(4, levels.getValue(daysAgo(9)))
++    }
++
++    @Test
++    fun heatmapLevelsUseExactIntegerBoundaries() {
++        // 1 + floor(3 * 2 / 6) == 2, floating point arithmetic would yield 1 here
++        val counts = mapOf(daysAgo(1) to 2L, daysAgo(2) to 6L)
++        val levels = TypingStatsMath.heatmapLevels(counts, maxLevel = 4)
++        assertEquals(2, levels.getValue(daysAgo(1)))
++        assertEquals(4, levels.getValue(daysAgo(2)))
++    }
++
++    @Test
++    fun heatmapLevelsRespectCustomMaximumLevel() {
++        val counts = mapOf(daysAgo(1) to 1L, daysAgo(2) to 2L, daysAgo(3) to 10L)
++        val levels = TypingStatsMath.heatmapLevels(counts, maxLevel = 1)
++        assertEquals(1, levels.getValue(daysAgo(1)))
++        assertEquals(1, levels.getValue(daysAgo(2)))
++        assertEquals(1, levels.getValue(daysAgo(3)))
++    }
++
++    @Test
++    fun heatmapLevelsWithNonPositiveMaximumLevelAreZero() {
++        val counts = mapOf(today to 5L)
++        assertEquals(mapOf(today to 0), TypingStatsMath.heatmapLevels(counts, maxLevel = 0))
++        assertEquals(mapOf(today to 0), TypingStatsMath.heatmapLevels(counts, maxLevel = -1))
++    }
++
++    @Test
++    fun heatmapLevelsNeverExceedMaximumLevel() {
++        val counts = mapOf(today to Long.MAX_VALUE, daysAgo(1) to 1L)
++        val levels = TypingStatsMath.heatmapLevels(counts, maxLevel = 4)
++        assertEquals(4, levels.getValue(today))
++        assertEquals(1, levels.getValue(daysAgo(1)))
++    }
++
++    // endregion
++}
+diff --git a/app/src/test/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPaletteTest.kt b/app/src/test/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPaletteTest.kt
+new file mode 100644
+index 00000000..fedc41ef
+--- /dev/null
++++ b/app/src/test/java/org/fcitx/fcitx5/android/ui/main/heatmap/HeatmapPaletteTest.kt
+@@ -0,0 +1,128 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.ui.main.heatmap
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * JVM-only tests for the pure palette math. The Android views are intentionally not touched.
++ */
++class HeatmapPaletteTest {
++
++    private fun alpha(color: Int): Int = (color ushr 24) and 0xFF
++
++    private fun luma(color: Int): Float {
++        val red = (color ushr 16) and 0xFF
++        val green = (color ushr 8) and 0xFF
++        val blue = color and 0xFF
++        return (0.299f * red + 0.587f * green + 0.114f * blue) / 255f
++    }
++
++    @Test
++    fun everyPaletteReturnsFiveOpaqueColors() {
++        val custom = 0xFF2DA44E.toInt()
++        for (palette in HeatmapPalette.values()) {
++            for (isDark in booleanArrayOf(false, true)) {
++                val colors = palette.colors(custom, isDark)
++                assertEquals("$palette (dark=$isDark) color count", HeatmapPalette.COLOR_COUNT, colors.size)
++                colors.forEach { color ->
++                    assertEquals("$palette (dark=$isDark) must be opaque", 0xFF, alpha(color))
++                }
++            }
++        }
++    }
++
++    @Test
++    fun presetRampsHaveDistinctLevels() {
++        for (palette in HeatmapPalette.values()) {
++            if (palette == HeatmapPalette.Custom) continue
++            for (isDark in booleanArrayOf(false, true)) {
++                val colors = palette.colors(0, isDark)
++                assertEquals(
++                    "$palette (dark=$isDark) has duplicate levels",
++                    colors.size,
++                    colors.toSet().size
++                )
++            }
++        }
++    }
++
++    @Test
++    fun customPaletteBlendsTowardsTheBackground() {
++        val custom = 0xFF2DA44E.toInt()
++        val light = HeatmapPalette.Custom.colors(custom, false)
++
++        assertEquals(HeatmapPalette.COLOR_COUNT, light.size)
++        assertEquals("the strongest level is the chosen color", custom, light[4])
++        assertTrue("empty cell is the lightest", luma(light[0]) > luma(light[1]))
++        assertTrue("levels get darker", luma(light[1]) > luma(light[2]))
++        assertTrue("levels get darker", luma(light[2]) > luma(light[3]))
++        assertTrue("levels get darker", luma(light[3]) > luma(light[4]))
++    }
++
++    @Test
++    fun customPaletteDarkVariantIsSeparateRamp() {
++        val custom = 0xFF2DA44E.toInt()
++        val light = HeatmapPalette.Custom.colors(custom, false)
++        val dark = HeatmapPalette.Custom.colors(custom, true)
++
++        assertNotEquals("empty cells differ per theme", light[0], dark[0])
++        assertNotEquals("the strongest level is brightened on dark", light[4], dark[4])
++        assertTrue(luma(dark[1]) < luma(dark[2]))
++        assertTrue(luma(dark[2]) < luma(dark[3]))
++        assertTrue(luma(dark[3]) < luma(dark[4]))
++    }
++
++    @Test
++    fun customPaletteForcesOpaqueColors() {
++        val translucent = 0x802DA44E.toInt()
++        val colors = HeatmapPalette.Custom.colors(translucent, false)
++        colors.forEach { assertEquals(0xFF, alpha(it)) }
++        assertEquals(0xFF2DA44E.toInt(), colors[4])
++    }
++
++    @Test
++    fun customPaletteKeepsVeryLightColorsVisible() {
++        val colors = HeatmapPalette.Custom.colors(0xFFFFFFF0.toInt(), isDark = false)
++        for (level in 1..4) {
++            assertNotEquals("level $level must stand out from the empty cell", colors[0], colors[level])
++        }
++    }
++
++    @Test
++    fun lightAndDarkPresetRampsDiffer() {
++        for (palette in HeatmapPalette.values()) {
++            if (palette == HeatmapPalette.Custom) continue
++            val light = palette.colors(0, false)
++            val dark = palette.colors(0, true)
++            assertEquals(light.size, dark.size)
++            for (level in light.indices) {
++                assertNotEquals("$palette level $level", light[level], dark[level])
++            }
++        }
++    }
++
++    @Test
++    fun fromStorageFallsBackToGithub() {
++        assertEquals(HeatmapPalette.Github, HeatmapPalette.fromStorage(null))
++        assertEquals(HeatmapPalette.Github, HeatmapPalette.fromStorage(""))
++        assertEquals(HeatmapPalette.Github, HeatmapPalette.fromStorage("   "))
++        assertEquals(HeatmapPalette.Github, HeatmapPalette.fromStorage("chartreuse"))
++        assertEquals(HeatmapPalette.Blue, HeatmapPalette.fromStorage("Blue"))
++        assertEquals(HeatmapPalette.Blue, HeatmapPalette.fromStorage("blue"))
++        assertEquals(HeatmapPalette.Custom, HeatmapPalette.fromStorage(" Custom "))
++    }
++
++    @Test
++    fun storageKeysRoundTrip() {
++        for (palette in HeatmapPalette.values()) {
++            assertEquals(palette, HeatmapPalette.fromStorage(palette.storageKey))
++            assertEquals(palette, HeatmapPalette.fromStorage(palette.name))
++        }
++    }
++}

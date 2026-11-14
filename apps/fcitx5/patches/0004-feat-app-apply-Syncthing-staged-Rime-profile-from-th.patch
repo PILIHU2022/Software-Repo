@@ -1,4 +1,4 @@
-From 3798787cc78a2dc91261afab3bad95cd0b7a3743 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 31 Oct 2026 23:09:56 +0800
 Subject: [PATCH] feat(app): apply Syncthing-staged Rime profile from the app

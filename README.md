@@ -42,7 +42,7 @@ code.
 | --- | --- | --- | --- | --- |
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `effbf0d` | 19 | `0.21.4-patchwork` (6811) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
-| Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 4 | `0.1.3-patchwork` (11202, arm64-v8a) |
+| Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 10 | `0.1.3-patchwork` (11203, arm64-v8a) |
 | BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 19 | `0.8.3` (linux/windows x86) |
 
 The three Android apps are published in F-Droid. **BaiduNetGo is not**: it is a
@@ -70,7 +70,7 @@ settings hub with seven preset themes (including Catppuccin) and a configurable
 card layout. See [`docs/design/tilla-calendar.md`](docs/design/tilla-calendar.md).
 
 **Fcitx5 for Android** — the Fcitx5 input method framework and engines on
-Android, built from upstream `master` plus four patches: an
+Android, built from upstream `master` plus ten patches: an
 `MANAGE_EXTERNAL_STORAGE` permission so librime can write a shared-storage
 `sync_dir` (for example `Download/Rime-Sync`), a built-in Rime/Fcitx5
 configuration file manager and UTF-8 editor with stale `.temp.userdb` cleanup at
@@ -83,7 +83,20 @@ bridge copies `Download/Rime-Sync/Rime-Arch` into it on demand, removes
 -n org.fcitx.fcitx5.android/.receiver.RimeImportReceiver` (no-op when nothing
 changed). One patch lets `build-logic` honour a downstream
 `PATCHWORK_REVISION`; it is inert when the variable is unset, so upstream builds
-are unaffected. Only `arm64-v8a` is published (upstream produces per-ABI APKs
+are unaffected.
+
+The 11xx patch wave adds a GitHub-style typing heatmap and statistics to the
+app: the main settings page now opens with a 53-week contribution card
+(customisable palette, tap-a-cell tooltip with the day's character count), the
+IME records committed characters and corrections into a small Room database
+(counts only, never text, password fields skipped), and a compact
+“Statistics & heatmap” page exposes the palette, the tracking switch and reset.
+Settings sub-pages render as Material 3 surface cards with a 64 dp top app bar
+(dynamic colour on Android 12+, baseline M3 palette below), the whole settings
+home page is regrouped into Input / Appearance & interaction / Tools & data /
+System, and auto backups zip `shared_prefs` + `databases` once per version bump
+(three kept) with a restore entry under Advanced, so settings, clipboard history
+and typing statistics survive future updates. Only `arm64-v8a` is published (upstream produces per-ABI APKs
 and no universal APK), and the APK is
 about 52 MB.
 
@@ -113,7 +126,7 @@ https://software.sparkzh.top/repo
 
 The index returns HTTP 200, and `index-v2.json` lists
 `de.dbauer.expensetracker` **6806**, `com.atharok.screentime` **1303** and
-`org.fcitx.fcitx5.android` **11202**.
+`org.fcitx.fcitx5.android` **11203**.
 Landing page: <https://software.sparkzh.top/>. The GitHub Pages URL
 <https://pilihu2022.github.io/Software-Repo/repo> redirects to this domain.
 
@@ -234,7 +247,7 @@ every downstream commit bumps `versionCode` even when upstream did not change.
 | --- | --- | --- | --- |
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 9 | `6809` / `"0.21.4-patchwork"` |
-| Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 2 | `11202` / `"0.1.3-patchwork"` |
+| Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 3 | `11203` / `"0.1.3-patchwork"` |
 
 For fcitx5 the upstream code is itself ABI-dependent
 (`baseVersionCode × 10 + ABI id`, where arm64-v8a is 2), so the full formula is:
@@ -262,7 +275,7 @@ with the arm64 build.
 ├── apps/
 │   ├── expenses/{app.conf,patches/}     # 0001..0018, KEEP_ABIS=ARM
 │   ├── screentime/{app.conf,patches/}   # 0001..0011, KEEP_ABIS=ARM
-│   └── fcitx5/{app.conf,patches/}       # 0001..0003
+│   └── fcitx5/{app.conf,patches/}       # 0001..0010
 ├── desktop/
 │   ├── baidunetgo/{app.conf,patches/}   # 0001..0019, x86 desktop build
 │   └── .build-state.json                # last upstream commit built
@@ -315,7 +328,7 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-app.sh expenses --no-build    # fetch + patch + rewrite version
 ./scripts/build-app.sh expenses              # full build into dist/
 ./scripts/build-app.sh screentime --out dist
-./scripts/build-app.sh fcitx5 --no-build     # fetch + patches, no submodules (11202)
+./scripts/build-app.sh fcitx5 --no-build     # fetch + patches, no submodules (11203)
 ./scripts/build-app.sh fcitx5 --out ../.toolchain/tmp/fcitx5-dist
 ./scripts/check-upstream.sh                  # JSON status; --all/--apps select apps
 ./scripts/publish-fdroid.sh --apk-dir dist   # rebuild fdroid/repo + index
@@ -402,7 +415,7 @@ exported by hand as above (the workflow rebuilds it within 10 days, or run
 out of sync) and is suitable for CI or a local pre-commit check. For expenses
 and screentime, if the clone is not on the `patchwork` branch, the script reads
 the queue from that branch via `git archive` and never modifies the clone. For
-fcitx5 it exports from `feat/rime-sync-manager`, and if the clone is unavailable
+fcitx5 it exports from `feat/typing-heatmap`, and if the clone is unavailable
 it falls back to the staged queue in `../.toolchain/tmp/fcitx5-patches`
 (override with `FCITX5_PATCHES_DIR`; `FCITX5_BRANCH` and `FCITX5_BASE` select
 the branch and base).

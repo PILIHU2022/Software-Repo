@@ -1,0 +1,1856 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 17:29:27 +0800
+Subject: [PATCH] feat(app): Material 3 settings sub-pages and update-safe auto
+ backups
+
+- Host MainActivity on Theme.Material3Expressive.DynamicColors.DayNight
+  with a preferenceTheme overlay: settings sub-pages (Global Options,
+  Advanced, statistics, ...) render as rounded MD3 surface-container
+  cards with MD3 typography, headers and 64dp toolbar. The IME and the
+  other activities keep their existing themes.
+- Resolve theme colors through a ColorStateList-tolerant helper, because
+  MD3 maps android:textColorSecondary etc. to a ColorStateList which the
+  previous code rejected (crash on the home page under MD3).
+- Back up shared prefs and databases once per version upgrade, keep the
+  three newest ZIPs, and add Settings > Advanced rows to inspect and
+  restore the latest backup, so settings, clipboard history and typing
+  statistics survive future updates.
+- Pluralize statistics counts (characters/corrections/days) and clarify
+  the corrected-character summary.
+
+Built as 0.1.3-patchwork (versionCode 11209, arm64-v8a) and verified on
+a OnePlus PJF110 running Android 15.
+---
+ app/src/main/AndroidManifest.xml              |   3 +-
+ .../fcitx/fcitx5/android/FcitxApplication.kt  |   4 +
+ .../fcitx5/android/data/UserDataManager.kt    |  53 ++-
+ .../android/data/backup/AutoBackupManager.kt  | 362 ++++++++++++++++++
+ .../android/data/backup/AutoBackupPolicy.kt   | 117 ++++++
+ .../android/ui/common/BaseDynamicListUi.kt    |   7 +-
+ .../android/ui/common/DynamicListEntryUi.kt   |  11 +-
+ .../ui/common/DynamicListTouchCallback.kt     |   5 +-
+ .../android/ui/main/EditDeleteMenuProvider.kt |   5 +-
+ .../fcitx5/android/ui/main/MainActivity.kt    |   4 +
+ .../android/ui/main/home/HomePreference.kt    |   5 +-
+ .../ui/main/settings/KeyPreferenceUi.kt       |   7 +-
+ .../main/settings/QuickPhraseListFragment.kt  |   5 +-
+ .../ui/main/settings/TableFilesSelectionUi.kt |   5 +-
+ .../behavior/AdvancedSettingsFragment.kt      |  53 +++
+ .../ui/main/settings/theme/ThemeFragment.kt   |   3 +-
+ .../fcitx5/android/utils/PreferenceScreen.kt  |   3 +-
+ .../fcitx/fcitx5/android/utils/Splitties.kt   |  37 +-
+ .../res/drawable/bg_md3_preference_card.xml   |  19 +
+ app/src/main/res/layout/activity_main.xml     |  17 +-
+ .../res/layout/preference_category_m3.xml     |  38 ++
+ app/src/main/res/layout/preference_m3.xml     |  82 ++++
+ app/src/main/res/values-night/themes.xml      |  33 ++
+ .../main/res/values-zh-rCN/strings_backup.xml |  14 +
+ .../main/res/values-zh-rTW/strings_backup.xml |  14 +
+ app/src/main/res/values/strings_backup.xml    |  14 +
+ app/src/main/res/values/styles_md3.xml        | 121 ++++++
+ app/src/main/res/values/themes.xml            |  38 ++
+ .../data/backup/AutoBackupPolicyTest.kt       | 242 ++++++++++++
+ 29 files changed, 1287 insertions(+), 34 deletions(-)
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupManager.kt
+ create mode 100644 app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicy.kt
+ create mode 100644 app/src/main/res/drawable/bg_md3_preference_card.xml
+ create mode 100644 app/src/main/res/layout/preference_category_m3.xml
+ create mode 100644 app/src/main/res/layout/preference_m3.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_backup.xml
+ create mode 100644 app/src/main/res/values-zh-rTW/strings_backup.xml
+ create mode 100644 app/src/main/res/values/strings_backup.xml
+ create mode 100644 app/src/main/res/values/styles_md3.xml
+ create mode 100644 app/src/test/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicyTest.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index f95ae9df..dc14181b 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -92,7 +92,8 @@
+         <activity
+             android:name=".ui.main.MainActivity"
+             android:exported="true"
+-            android:launchMode="singleTask">
++            android:launchMode="singleTask"
++            android:theme="@style/Theme.FcitxAppTheme.Md3">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+ 
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt b/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt
+index 5af2ee83..4e89e93b 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/FcitxApplication.kt
+@@ -19,6 +19,7 @@ import kotlinx.coroutines.CoroutineName
+ import kotlinx.coroutines.MainScope
+ import kotlinx.coroutines.plus
+ import org.fcitx.fcitx5.android.daemon.FcitxDaemon
++import org.fcitx.fcitx5.android.data.backup.AutoBackupManager
+ import org.fcitx.fcitx5.android.data.clipboard.ClipboardManager
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.data.stats.TypingStatsManager
+@@ -134,6 +135,9 @@ class FcitxApplication : Application() {
+             Timber.d("Last pid is $lastPid. Set it to current pid: $currentPid")
+             setValue(currentPid)
+         }
++        // Pre-upgrade auto backup: must run before any manager opens its SQLite database,
++        // so the copied shared_prefs/databases/external dirs are consistent.
++        AutoBackupManager.maybeBackupOnUpgrade(ctx)
+         ClipboardManager.init(ctx)
+         TypingStatsManager.init(ctx)
+         ThemeManager.init(resources.configuration)
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/UserDataManager.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/UserDataManager.kt
+index 39a31ab6..1d6789d3 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/data/UserDataManager.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/UserDataManager.kt
+@@ -57,14 +57,24 @@ object UserDataManager {
+     private val recentlyUsedDir = appContext.filesDir.resolve(RecentlyUsed.DIR_NAME)
+ 
+     @OptIn(ExperimentalSerializationApi::class)
+-    fun export(dest: OutputStream, timestamp: Long = System.currentTimeMillis()) = runCatching {
++    private fun writeSnapshot(
++        sharedPrefs: File,
++        databases: File,
++        external: File?,
++        dest: OutputStream,
++        timestamp: Long
++    ) = runCatching {
+         ZipOutputStream(dest.buffered()).use { zipStream ->
+             // shared_prefs
+-            writeFileTree(sharedPrefsDir, "shared_prefs", zipStream)
++            writeFileTree(sharedPrefs, "shared_prefs", zipStream)
+             // databases
+-            writeFileTree(dataBasesDir, "databases", zipStream)
+-            // external
+-            writeFileTree(externalDir, "external", zipStream)
++            writeFileTree(databases, "databases", zipStream)
++            // external is optional: automatic backups only protect shared_prefs and databases,
++            // a ZIP without an "external/" entry simply leaves the current external data alone
++            // when imported
++            if (external != null) {
++                writeFileTree(external, "external", zipStream)
++            }
+             // recently_used moved to SharedPreference and shoud not be exported
+             // metadata
+             zipStream.putNextEntry(ZipEntry("metadata.json"))
+@@ -80,6 +90,39 @@ object UserDataManager {
+         }
+     }
+ 
++    /**
++     * @param includeExternal whether to include the external app files dir (Rime config,
++     * dictionaries, themes). `false` produces the same ZIP layout minus the `external/` entries,
++     * which imports cleanly and leaves the external data untouched.
++     */
++    fun export(
++        dest: OutputStream,
++        timestamp: Long = System.currentTimeMillis(),
++        includeExternal: Boolean = true
++    ) = writeSnapshot(
++        sharedPrefsDir,
++        dataBasesDir,
++        if (includeExternal) externalDir else null,
++        dest,
++        timestamp
++    )
++
++    /**
++     * Same ZIP layout and [Metadata] as [export], but reads the data trees from
++     * [sharedPrefs]/[databases]/[external] instead of the live app dirs.
++     *
++     * [external] may be `null` to omit the external tree (automatic backups only protect prefs
++     * and databases; Rime data is large and survives same-package `install -r` upgrades).
++     * The output is a normal user data ZIP, importable with [import] and by older app versions.
++     */
++    fun exportSnapshot(
++        sharedPrefs: File,
++        databases: File,
++        external: File?,
++        dest: OutputStream,
++        timestamp: Long = System.currentTimeMillis()
++    ) = writeSnapshot(sharedPrefs, databases, external, dest, timestamp)
++
+     private fun copyDir(source: File, target: File) {
+         val exists = source.exists()
+         val isDir = source.isDirectory
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupManager.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupManager.kt
+new file mode 100644
+index 00000000..324ec2af
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupManager.kt
+@@ -0,0 +1,362 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.backup
++
++import android.content.Context
++import android.os.Build
++import androidx.core.content.edit
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.launch
++import kotlinx.serialization.json.Json
++import org.fcitx.fcitx5.android.R
++import org.fcitx.fcitx5.android.data.UserDataManager
++import org.fcitx.fcitx5.android.utils.formatDateTime
++import org.fcitx.fcitx5.android.utils.userManager
++import org.fcitx.fcitx5.android.utils.versionCodeCompat
++import timber.log.Timber
++import java.io.File
++import java.util.concurrent.atomic.AtomicBoolean
++import java.util.zip.ZipFile
++
++/**
++ * Keeps a few automatic ZIP backups of the user data (shared prefs, databases and the external
++ * app files dir) and can restore the newest one.
++ *
++ * A backup is created once per app version upgrade, before any of the data-dir managers open
++ * their SQLite databases, so the copy is consistent. It intentionally contains only the small,
++ * update-safe state (`shared_prefs` and `databases`: settings, clipboard, typing statistics).
++ * The external files dir (Rime config, dictionaries, themes) is several dozen MB and is preserved
++ * by a same-package/same-signature `install -r` upgrade, so it is not copied automatically; the
++ * manual "Export user data" still includes it.
++ *
++ * The ZIP layout is the regular [UserDataManager] user data ZIP (minus the `external/` entries),
++ * therefore it can also be imported through Settings > Advanced > Import user data (or by older
++ * app versions), and importing it leaves the current external data untouched.
++ *
++ * Everything here is best effort: failures are logged and the app keeps running.
++ */
++object AutoBackupManager {
++
++    private const val PREFS_NAME = "auto_backup"
++    private const val KEY_LAST_BACKED_UP_VERSION = "last_backed_up_version_code"
++    private const val OWN_PREFS_FILE_NAME = PREFS_NAME + ".xml"
++
++    private const val BACKUP_DIR_NAME = "auto_backup"
++    private const val STAGING_DIR_NAME = "auto_backup_staging"
++    private const val PARTIAL_SUFFIX = ".part"
++
++    private const val METADATA_ENTRY_NAME = "metadata.json"
++
++    /**
++     * Snapshots up to this size are zipped on the calling (main) thread so the backup file
++     * exists immediately. Automatic backups only contain prefs and databases, so this is the
++     * normal path; it is only exceeded by a very large clipboard history.
++     */
++    private const val MAX_SYNCHRONOUS_ZIP_BYTES = 8L * 1024L * 1024L
++
++    private val json = Json { ignoreUnknownKeys = true }
++
++    /** Background zip work; only used after the synchronously copied snapshot is complete. */
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++
++    /** At most one backup attempt per process. */
++    private val attempted = AtomicBoolean(false)
++
++    // region public API
++
++    /**
++     * Create a pre-upgrade backup if the installed version changed since the last backup.
++     *
++     * Must be called after `AppPrefs.init()` and before `ClipboardManager.init()` /
++     * `TypingStatsManager.init()`, so no SQLite database is open yet while the dirs are copied.
++     * Never throws.
++     */
++    fun maybeBackupOnUpgrade(context: Context) {
++        if (!attempted.compareAndSet(false, true)) {
++            Timber.d("Auto backup already handled in this process")
++            return
++        }
++        try {
++            val appContext = context.applicationContext ?: context
++            if (isDirectBoot(appContext)) {
++                Timber.d("Auto backup skipped: direct boot mode")
++                return
++            }
++            val currentVersion = currentVersionCode(appContext)
++            if (currentVersion == null) {
++                Timber.w("Auto backup skipped: unknown versionCode")
++                return
++            }
++            cleanStaleArtifacts(appContext)
++            val lastVersion = readLastBackedUpVersion(appContext)
++            if (!AutoBackupPolicy.shouldBackup(lastVersion, currentVersion)) {
++                if (currentVersion < lastVersion) {
++                    Timber.i(
++                        "Auto backup skipped: downgrade (last=$lastVersion current=$currentVersion)"
++                    )
++                } else {
++                    Timber.d("Auto backup skipped: already backed up for version $currentVersion")
++                }
++                return
++            }
++            val dataDir = File(appContext.applicationInfo.dataDir)
++            val sharedPrefs = File(dataDir, "shared_prefs")
++            val databases = File(dataDir, "databases")
++            val databaseFileSizes = listFilesOf(databases)
++                .filter { it.isFile && it.length() > 0L }
++                .map { it.length() }
++            val sharedPrefsFileNames = listFilesOf(sharedPrefs)
++                .filter { it.isFile }
++                .map { it.name }
++            val defaultPrefsFileName = defaultSharedPrefsFileName(appContext)
++            if (!AutoBackupPolicy.isMeaningfulBackup(
++                    databaseFileSizes = databaseFileSizes,
++                    sharedPrefsFileNames = sharedPrefsFileNames,
++                    defaultSharedPrefsFileName = defaultPrefsFileName,
++                    ignoredSharedPrefsFileNames = setOf(OWN_PREFS_FILE_NAME)
++                )
++            ) {
++                Timber.i("Auto backup skipped: no meaningful user data yet (fresh install?)")
++                // Nothing to protect, but do not re-check on every launch of this version.
++                writeLastBackedUpVersion(appContext, currentVersion)
++                return
++            }
++            val staging = stagingDir(appContext)
++            if (staging.exists() && !staging.deleteRecursively()) {
++                Timber.w("Cannot clean stale auto backup staging dir ${staging.path}")
++            }
++            if (!staging.mkdirs() && !staging.isDirectory) {
++                Timber.w("Auto backup skipped: cannot create staging dir ${staging.path}")
++                return
++            }
++            // Snapshot synchronously, while databases are still closed. Only the small state is
++            // copied: a few hundred KB at most, never the huge Rime data in the external dir.
++            if (!copyTree(sharedPrefs, File(staging, "shared_prefs")) ||
++                !copyTree(databases, File(staging, "databases"))
++            ) {
++                Timber.w("Auto backup skipped: failed to copy the data dirs")
++                staging.deleteRecursively()
++                return
++            }
++            val timestamp = System.currentTimeMillis()
++            val fileName = AutoBackupPolicy.backupFileName(currentVersion, timestamp)
++            val finish = {
++                try {
++                    zipSnapshot(appContext, staging, fileName, timestamp)
++                    writeLastBackedUpVersion(appContext, currentVersion)
++                    prune(appContext)
++                } catch (t: Throwable) {
++                    Timber.e(t, "Auto backup failed")
++                } finally {
++                    staging.deleteRecursively()
++                }
++            }
++            val snapshotBytes = databaseFileSizes.sum() +
++                    listFilesOf(sharedPrefs).filter { it.isFile }.sumOf { it.length() }
++            if (snapshotBytes <= MAX_SYNCHRONOUS_ZIP_BYTES) {
++                // Small data set: finish right away so the backup exists immediately.
++                finish()
++            } else {
++                // Large clipboard history: deflating it here would delay app start.
++                Timber.d("Auto backup zip deferred to background (${snapshotBytes} bytes)")
++                scope.launch { finish() }
++            }
++        } catch (t: Throwable) {
++            // a broken backup must never take the app down
++            Timber.e(t, "Auto backup failed")
++        }
++    }
++
++    /** The newest automatic backup, or `null` if there is none. */
++    fun latestBackup(context: Context): File? = listBackups(context).firstOrNull()
++
++    /** All automatic backups, newest first. */
++    fun listBackups(context: Context): List<File> {
++        val appContext = context.applicationContext ?: context
++        val files = backupDir(appContext).listFiles { file ->
++            file.isFile && AutoBackupPolicy.parseBackupFileName(file.name) != null
++        } ?: return emptyList()
++        return files.sortedWith(
++            compareByDescending<File> {
++                AutoBackupPolicy.parseBackupFileName(it.name)?.timestamp ?: it.lastModified()
++            }.thenByDescending { it.name }
++        )
++    }
++
++    /**
++     * Localized one line summary of the newest backup (date, app version, size),
++     * or `null` when there is no backup yet.
++     */
++    fun backupSummary(context: Context): String? {
++        val appContext = context.applicationContext ?: context
++        val backup = latestBackup(appContext) ?: return null
++        val parsed = AutoBackupPolicy.parseBackupFileName(backup.name)
++        val metadata = readMetadata(backup)
++        val time = metadata?.exportTime ?: parsed?.timestamp ?: backup.lastModified()
++        val version = metadata?.versionName?.takeIf { it.isNotBlank() }
++            ?: parsed?.versionCode?.toString()
++            ?: "?"
++        return appContext.getString(
++            R.string.backup_summary_format,
++            formatDateTime(time),
++            version,
++            AutoBackupPolicy.formatSize(backup.length())
++        )
++    }
++
++    /**
++     * Import the newest automatic backup. The caller is responsible for stopping fcitx before
++     * calling this and for restarting the app afterwards (see the existing import user data flow).
++     */
++    fun restoreLatest(context: Context): Result<File> = runCatching {
++        val appContext = context.applicationContext ?: context
++        val backup = latestBackup(appContext)
++            ?: error(appContext.getString(R.string.backup_restore_no_backup))
++        backup.inputStream().use { input ->
++            UserDataManager.import(input).getOrThrow()
++        }
++        backup
++    }
++
++    // endregion
++
++    // region internals
++
++    private fun isDirectBoot(context: Context): Boolean =
++        Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !context.userManager.isUserUnlocked
++
++    private fun backupDir(context: Context) = File(context.filesDir, BACKUP_DIR_NAME)
++
++    /**
++     * File name of the default [android.content.SharedPreferences] created by
++     * `PreferenceManager.getDefaultSharedPreferences()`, which is `<packageName>_preferences.xml`.
++     * It always exists after the first run, so it does not count as user data on its own.
++     */
++    private fun defaultSharedPrefsFileName(context: Context) =
++        context.packageName + "_preferences.xml"
++
++    private fun stagingDir(context: Context) = File(context.cacheDir, STAGING_DIR_NAME)
++
++    private fun prefs(context: Context) =
++        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
++
++    private fun readLastBackedUpVersion(context: Context): Long = try {
++        prefs(context).getLong(KEY_LAST_BACKED_UP_VERSION, AutoBackupPolicy.NO_VERSION)
++    } catch (t: Throwable) {
++        Timber.w(t, "Cannot read last backed up version")
++        AutoBackupPolicy.NO_VERSION
++    }
++
++    private fun writeLastBackedUpVersion(context: Context, versionCode: Long) {
++        try {
++            prefs(context).edit(commit = true) {
++                putLong(KEY_LAST_BACKED_UP_VERSION, versionCode)
++            }
++        } catch (t: Throwable) {
++            Timber.w(t, "Cannot persist last backed up version")
++        }
++    }
++
++    private fun currentVersionCode(context: Context): Long? = try {
++        context.packageManager.getPackageInfo(context.packageName, 0).versionCodeCompat
++    } catch (t: Throwable) {
++        Timber.e(t, "Cannot determine current versionCode")
++        null
++    }
++
++    private fun listFilesOf(dir: File): List<File> {
++        if (!dir.isDirectory) return emptyList()
++        return dir.listFiles()?.toList() ?: emptyList()
++    }
++
++    private fun copyTree(source: File, target: File): Boolean {
++        if (!source.isDirectory) {
++            Timber.d("Skip copying missing data dir ${source.path}")
++            return true
++        }
++        return try {
++            source.copyRecursively(target, overwrite = true)
++        } catch (t: Throwable) {
++            Timber.e(t, "Failed to copy ${source.path} to ${target.path}")
++            false
++        }
++    }
++
++    private fun cleanStaleArtifacts(context: Context) {
++        try {
++            val staging = stagingDir(context)
++            if (staging.exists()) staging.deleteRecursively()
++            backupDir(context).listFiles { file ->
++                file.isFile && file.name.endsWith(PARTIAL_SUFFIX)
++            }?.forEach { partial ->
++                if (!partial.delete()) Timber.w("Cannot delete stale ${partial.path}")
++            }
++        } catch (t: Throwable) {
++            Timber.w(t, "Failed to clean stale auto backup artifacts")
++        }
++    }
++
++    private fun zipSnapshot(context: Context, staging: File, fileName: String, timestamp: Long) {
++        val dir = backupDir(context)
++        if (!dir.isDirectory && !dir.mkdirs()) {
++            error("Cannot create auto backup dir ${dir.path}")
++        }
++        val partial = File(dir, fileName + PARTIAL_SUFFIX)
++        if (partial.exists()) partial.delete()
++        try {
++            partial.outputStream().buffered().use { output ->
++                UserDataManager.exportSnapshot(
++                    sharedPrefs = File(staging, "shared_prefs"),
++                    databases = File(staging, "databases"),
++                    // Rime data in the external dir is huge and survives `install -r`, so the
++                    // automatic backup deliberately omits it (manual export still includes it).
++                    external = null,
++                    dest = output,
++                    timestamp = timestamp
++                ).getOrThrow()
++            }
++            val target = File(dir, fileName)
++            if (!partial.renameTo(target)) {
++                error("Cannot move ${partial.path} to ${target.path}")
++            }
++            Timber.i("Auto backup created: ${target.name} (${target.length()} bytes)")
++        } catch (t: Throwable) {
++            partial.delete()
++            throw t
++        }
++    }
++
++    private fun prune(context: Context, keep: Int = AutoBackupPolicy.MAX_BACKUPS) {
++        try {
++            val dir = backupDir(context)
++            val namesNewestFirst = listBackups(context).map { it.name }
++            AutoBackupPolicy.filesToPrune(namesNewestFirst, keep).forEach { name ->
++                val file = File(dir, name)
++                if (file.delete()) {
++                    Timber.d("Pruned old auto backup: $name")
++                } else {
++                    Timber.w("Cannot delete old auto backup: $name")
++                }
++            }
++        } catch (t: Throwable) {
++            Timber.w(t, "Failed to prune old auto backups")
++        }
++    }
++
++    private fun readMetadata(file: File): UserDataManager.Metadata? = try {
++        ZipFile(file).use { zip ->
++            val entry = zip.getEntry(METADATA_ENTRY_NAME) ?: return null
++            val text = zip.getInputStream(entry).bufferedReader().use { it.readText() }
++            json.decodeFromString<UserDataManager.Metadata>(text)
++        }
++    } catch (t: Throwable) {
++        Timber.w(t, "Cannot read metadata from ${file.name}")
++        null
++    }
++
++    // endregion
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicy.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicy.kt
+new file mode 100644
+index 00000000..283a0ffc
+--- /dev/null
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicy.kt
+@@ -0,0 +1,117 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.backup
++
++import java.util.Locale
++
++/**
++ * Pure (Android-free) decision helpers behind [AutoBackupManager].
++ *
++ * Everything in here must stay free of Android framework classes so that it can be unit tested
++ * on the JVM, see `AutoBackupPolicyTest`.
++ */
++object AutoBackupPolicy {
++
++    /** How many automatic backups are kept on disk. */
++    const val MAX_BACKUPS = 3
++
++    /** Marker value meaning "no version has ever been backed up". */
++    const val NO_VERSION = -1L
++
++    private const val FILE_PREFIX = "fcitx5-data"
++    private const val FILE_EXTENSION = ".zip"
++
++    private val fileNameRegex =
++        Regex("""^${Regex.escape(FILE_PREFIX)}-(\d+)-(\d+)${Regex.escape(FILE_EXTENSION)}$""")
++
++    /** Parsed parts of an automatic backup file name. */
++    data class BackupName(val versionCode: Long, val timestamp: Long)
++
++    /**
++     * Whether the current app version should trigger a backup.
++     *
++     * Only upgrades (and the first launch after a fresh install, where the marker is [NO_VERSION])
++     * are backed up. Re-launching the same version or downgrading never creates a new backup.
++     */
++    fun shouldBackup(lastBackedUpVersion: Long, currentVersion: Long): Boolean =
++        currentVersion > lastBackedUpVersion
++
++    /**
++     * @param sortedNewestFirst backup file names, newest first
++     * @param keep number of newest backups to retain
++     * @return names that should be deleted, oldest first
++     */
++    fun filesToPrune(sortedNewestFirst: List<String>, keep: Int): List<String> {
++        val effectiveKeep = keep.coerceAtLeast(0)
++        if (sortedNewestFirst.size <= effectiveKeep) return emptyList()
++        return sortedNewestFirst.subList(effectiveKeep, sortedNewestFirst.size).toList()
++    }
++
++    /**
++     * Human readable file size, e.g. `0 B`, `512 B`, `1.5 KB`, `12.0 MB`.
++     * Locale independent so that it is stable in tests and predictable in the UI summary.
++     */
++    fun formatSize(bytes: Long): String {
++        if (bytes <= 0L) return "0 B"
++        val units = arrayOf("B", "KB", "MB", "GB", "TB")
++        var value = bytes.toDouble()
++        var unit = 0
++        while (value >= 1024.0 && unit < units.lastIndex) {
++            value /= 1024.0
++            unit++
++        }
++        return if (unit == 0) {
++            "$bytes ${units[0]}"
++        } else {
++            String.format(Locale.ROOT, "%.1f %s", value, units[unit])
++        }
++    }
++
++    /** Automatic backups are skipped on a fresh install; a database file above this is data. */
++    const val MIN_MEANINGFUL_DATABASE_BYTES = 8L * 1024L
++
++    private const val PREFS_FILE_SUFFIX = ".xml"
++
++    /**
++     * A backup is only worth creating when there is real user state to protect:
++     *
++     * - at least one non-empty database file larger than [MIN_MEANINGFUL_DATABASE_BYTES]
++     *   (clipboard history or typing statistics; an essentially empty ClipboardDatabase is
++     *   usually smaller than that), or
++     * - a shared preferences file other than the app's default preferences file (e.g. recently
++     *   used picker items). The default preferences file always exists after the first run, so
++     *   it alone says nothing. Our own marker file must be passed in
++     *   [ignoredSharedPrefsFileNames].
++     *
++     * This is deliberately conservative: it is fine to skip a backup on a brand-new install.
++     *
++     * Pure function so that the heuristic can be tested on the JVM.
++     */
++    fun isMeaningfulBackup(
++        databaseFileSizes: List<Long>,
++        sharedPrefsFileNames: List<String>,
++        defaultSharedPrefsFileName: String,
++        ignoredSharedPrefsFileNames: Set<String> = emptySet()
++    ): Boolean {
++        if (databaseFileSizes.any { it > MIN_MEANINGFUL_DATABASE_BYTES }) return true
++        return sharedPrefsFileNames.any { name ->
++            name.endsWith(PREFS_FILE_SUFFIX) &&
++                    name != defaultSharedPrefsFileName &&
++                    name !in ignoredSharedPrefsFileNames
++        }
++    }
++
++    /** File name used for automatic backups, e.g. `fcitx5-data-20312-1763000000000.zip`. */
++    fun backupFileName(versionCode: Long, timestamp: Long): String =
++        "$FILE_PREFIX-$versionCode-$timestamp$FILE_EXTENSION"
++
++    /** @return parsed [BackupName] or `null` if [name] is not an automatic backup file name. */
++    fun parseBackupFileName(name: String): BackupName? {
++        val match = fileNameRegex.matchEntire(name) ?: return null
++        val versionCode = match.groupValues[1].toLongOrNull() ?: return null
++        val timestamp = match.groupValues[2].toLongOrNull() ?: return null
++        return BackupName(versionCode, timestamp)
++    }
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/common/BaseDynamicListUi.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/common/BaseDynamicListUi.kt
+index c79d2ac8..26dc91ce 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/common/BaseDynamicListUi.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/common/BaseDynamicListUi.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.common
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.annotation.SuppressLint
+ import android.app.AlertDialog
+ import android.content.Context
+@@ -75,7 +76,7 @@ abstract class BaseDynamicListUi<T>(
+ 
+     protected val fab = view(::FloatingActionButton) {
+         imageDrawable = drawable(R.drawable.ic_baseline_plus_24)!!.apply {
+-            setTint(styledColor(android.R.attr.colorForegroundInverse))
++            setTint(styledColorCompat(android.R.attr.colorForegroundInverse))
+         }
+     }
+ 
+@@ -295,7 +296,7 @@ abstract class BaseDynamicListUi<T>(
+     }
+ 
+     override val root = coordinatorLayout {
+-        backgroundColor = styledColor(android.R.attr.colorBackground)
++        backgroundColor = styledColorCompat(android.R.attr.colorBackground)
+         add(recyclerView, defaultLParams {
+             height = matchParent
+             width = matchParent
+@@ -371,4 +372,4 @@ abstract class BaseDynamicListUi<T>(
+         updateFAB()
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListEntryUi.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListEntryUi.kt
+index 07599149..fdc8988c 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListEntryUi.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListEntryUi.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.common
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.content.Context
+ import android.view.View
+ import android.view.ViewGroup
+@@ -39,7 +40,7 @@ class DynamicListEntryUi(override val ctx: Context) : Ui {
+ 
+     val handleImage = imageView {
+         imageDrawable = drawable(R.drawable.ic_baseline_drag_handle_24)!!.apply {
+-            setTint(styledColor(android.R.attr.colorAccent))
++            setTint(styledColorCompat(android.R.attr.colorAccent))
+         }
+         setPaddingDp(3, 0, 3, 0)
+     }
+@@ -56,20 +57,20 @@ class DynamicListEntryUi(override val ctx: Context) : Ui {
+     val editButton = imageButton {
+         background = styledDrawable(android.R.attr.selectableItemBackground)
+         imageDrawable = drawable(R.drawable.ic_baseline_edit_24)!!.apply {
+-            setTint(styledColor(android.R.attr.colorControlNormal))
++            setTint(styledColorCompat(android.R.attr.colorControlNormal))
+         }
+     }
+ 
+     val settingsButton = imageButton {
+         background = styledDrawable(android.R.attr.selectableItemBackground)
+         imageDrawable = drawable(R.drawable.ic_baseline_settings_24)!!.apply {
+-            setTint(styledColor(android.R.attr.colorControlNormal))
++            setTint(styledColorCompat(android.R.attr.colorControlNormal))
+         }
+     }
+ 
+     override val root: View = constraintLayout {
+         layoutParams = ViewGroup.LayoutParams(matchParent, wrapContent)
+-        backgroundColor = styledColor(android.R.attr.colorBackground)
++        backgroundColor = styledColorCompat(android.R.attr.colorBackground)
+         minHeight = styledDimenPxSize(android.R.attr.listPreferredItemHeightSmall)
+ 
+         val paddingStart = styledDimenPxSize(android.R.attr.listPreferredItemPaddingStart)
+@@ -117,4 +118,4 @@ class DynamicListEntryUi(override val ctx: Context) : Ui {
+             endOfParent()
+         })
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListTouchCallback.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListTouchCallback.kt
+index 33891bd6..369d7f60 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListTouchCallback.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/common/DynamicListTouchCallback.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.common
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.content.Context
+ import android.graphics.Bitmap
+ import android.graphics.Canvas
+@@ -38,7 +39,7 @@ open class DynamicListTouchCallback<T>(
+ 
+     private val deleteIcon: Bitmap by lazy {
+         ctx.drawable(R.drawable.ic_baseline_delete_24)!!.apply {
+-            setTint(ctx.styledColor(android.R.attr.colorBackground))
++            setTint(ctx.styledColorCompat(android.R.attr.colorBackground))
+         }.toBitmap()
+     }
+ 
+@@ -148,4 +149,4 @@ open class DynamicListTouchCallback<T>(
+         // interaction is over, time to reset our elevation
+         reset = true
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/EditDeleteMenuProvider.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/EditDeleteMenuProvider.kt
+index 25a69951..e88a6a50 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/EditDeleteMenuProvider.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/EditDeleteMenuProvider.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.content.Context
+ import android.view.Menu
+ import android.view.MenuInflater
+@@ -25,7 +26,7 @@ class EditDeleteMenuProvider<T>(
+     lifecycleOwner: LifecycleOwner,
+ ) : MenuProvider where T : MenuHost, T : Context {
+ 
+-    private val tint = menuHost.styledColor(android.R.attr.colorControlNormal)
++    private val tint = menuHost.styledColorCompat(android.R.attr.colorControlNormal)
+ 
+     init {
+         buttonMode.observe(lifecycleOwner) { menuHost.invalidateMenu() }
+@@ -52,4 +53,4 @@ class EditDeleteMenuProvider<T>(
+     }
+ 
+     override fun onMenuItemSelected(menuItem: MenuItem): Boolean = false
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
+index 652f4ff3..79fa22cd 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
+@@ -21,6 +21,7 @@ import androidx.core.view.updateLayoutParams
+ import androidx.navigation.NavController
+ import androidx.navigation.NavDestination.Companion.hasRoute
+ import androidx.navigation.fragment.NavHostFragment
++import com.google.android.material.color.DynamicColors
+ import org.fcitx.fcitx5.android.BuildConfig
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+@@ -42,6 +43,9 @@ class MainActivity : AppCompatActivity() {
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        // Material 3 dynamic color (Android 12+); older devices keep the theme's baseline
++        // Material 3 palette. MainActivity is the only activity on Theme.FcitxAppTheme.Md3.
++        DynamicColors.applyToActivityIfAvailable(this)
+         enableEdgeToEdge()
+         val binding = ActivityMainBinding.inflate(layoutInflater)
+         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, windowInsets ->
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt
+index 2fe41ac1..f53f0c56 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/home/HomePreference.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main.home
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.content.Context
+ import android.content.res.ColorStateList
+ import android.graphics.drawable.GradientDrawable
+@@ -54,7 +55,7 @@ class HomePreference(context: Context) : Preference(context) {
+ 
+     override fun onBindViewHolder(holder: PreferenceViewHolder) {
+         super.onBindViewHolder(holder)
+-        val accent = iconTint ?: context.styledColor(android.R.attr.colorAccent)
++        val accent = iconTint ?: context.styledColorCompat(android.R.attr.colorAccent)
+         bindIcon(holder, accent)
+         bindChevron(holder)
+     }
+@@ -85,7 +86,7 @@ class HomePreference(context: Context) : Preference(context) {
+         // Only entries that actually navigate get the affordance. Disabled entries keep it
+         // (so the row still reads as a link) but dim it.
+         chevron.imageTintList = ColorStateList.valueOf(
+-            context.styledColor(android.R.attr.textColorSecondary)
++            context.styledColorCompat(android.R.attr.textColorSecondary)
+         )
+         chevron.isVisible = onPreferenceClickListener != null
+         chevron.alpha = if (enabled) 1f else DISABLED_ALPHA
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/KeyPreferenceUi.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/KeyPreferenceUi.kt
+index 9bbdaffd..24d2f306 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/KeyPreferenceUi.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/KeyPreferenceUi.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main.settings
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.content.Context
+ import android.view.KeyEvent
+ import android.view.inputmethod.EditorInfo
+@@ -72,7 +73,7 @@ class KeyPreferenceUi(override val ctx: Context) : Ui {
+                 if (checked) android.R.attr.colorAccent else android.R.attr.colorBackgroundFloating
+             )
+             setTextColor(
+-                ctx.styledColor(
++                ctx.styledColorCompat(
+                     if (checked) android.R.attr.colorForegroundInverse else android.R.attr.colorForeground
+                 )
+             )
+@@ -112,7 +113,7 @@ class KeyPreferenceUi(override val ctx: Context) : Ui {
+     private val clearButton = imageButton {
+         background = styledDrawable(android.R.attr.actionBarItemBackground)
+         imageDrawable = drawable(R.drawable.ic_baseline_delete_24)!!.apply {
+-            setTint(styledColor(android.R.attr.colorControlNormal))
++            setTint(styledColorCompat(android.R.attr.colorControlNormal))
+         }
+         setOnClickListener {
+             setKey(Key.None)
+@@ -175,4 +176,4 @@ class KeyPreferenceUi(override val ctx: Context) : Ui {
+     companion object {
+         val ModifierRegex = Regex("Control|Alt|Shift")
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/QuickPhraseListFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/QuickPhraseListFragment.kt
+index 96c66cd3..8ac80c06 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/QuickPhraseListFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/QuickPhraseListFragment.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main.settings
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.app.AlertDialog
+ import android.app.NotificationChannel
+ import android.app.NotificationManager
+@@ -127,7 +128,7 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
+                     }
+                 }
+                 imageDrawable = drawable(icon)!!.apply {
+-                    setTint(styledColor(android.R.attr.colorControlNormal))
++                    setTint(styledColorCompat(android.R.attr.colorControlNormal))
+                 }
+             }
+         ) {
+@@ -354,4 +355,4 @@ class QuickPhraseListFragment : Fragment(), OnItemChangedListener<QuickPhrase> {
+         private var IMPORT_ID = 0
+         const val CHANNEL_ID = "quickphrase"
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/TableFilesSelectionUi.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/TableFilesSelectionUi.kt
+index d57140e0..0ff731af 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/TableFilesSelectionUi.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/TableFilesSelectionUi.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main.settings
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.content.Context
+ import android.view.ViewGroup
+ import androidx.annotation.StringRes
+@@ -37,13 +38,13 @@ class TableFilesSelectionUi(override val ctx: Context) : Ui {
+ 
+         val title = textView {
+             textAppearance = ctx.resolveThemeAttribute(android.R.attr.textAppearanceListItem)
+-            setTextColor(styledColor(android.R.attr.textColorPrimary))
++            setTextColor(styledColorCompat(android.R.attr.textColorPrimary))
+             setText(titleRes)
+         }
+ 
+         val summary = textView {
+             textAppearance = ctx.resolveThemeAttribute(android.R.attr.textAppearanceSmall)
+-            setTextColor(styledColor(android.R.attr.textColorSecondary))
++            setTextColor(styledColorCompat(android.R.attr.textColorSecondary))
+             setText(R.string.table_file_placeholder)
+         }
+ 
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
+index e4fef847..c3df182b 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/behavior/AdvancedSettingsFragment.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main.settings.behavior
+ 
++import android.content.Context
+ import android.os.Build
+ import android.os.Bundle
+ import androidx.activity.result.ActivityResultLauncher
+@@ -19,12 +20,14 @@ import kotlinx.coroutines.withContext
+ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.daemon.FcitxDaemon
+ import org.fcitx.fcitx5.android.data.UserDataManager
++import org.fcitx.fcitx5.android.data.backup.AutoBackupManager
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.data.prefs.ManagedPreferenceFragment
+ import org.fcitx.fcitx5.android.ui.common.withLoadingDialog
+ import org.fcitx.fcitx5.android.ui.files.StoragePermission
+ import org.fcitx.fcitx5.android.ui.main.MainViewModel
+ import org.fcitx.fcitx5.android.utils.AppUtil
++import org.fcitx.fcitx5.android.utils.addCategory
+ import org.fcitx.fcitx5.android.utils.addPreference
+ import org.fcitx.fcitx5.android.utils.buildDocumentsProviderIntent
+ import org.fcitx.fcitx5.android.utils.buildPrimaryStorageIntent
+@@ -173,5 +176,55 @@ class AdvancedSettingsFragment : ManagedPreferenceFragment(AppPrefs.getInstance(
+                 .setNegativeButton(android.R.string.cancel, null)
+                 .show()
+         }
++        // Automatic pre-upgrade backups: read-only summary + restore action
++        val backupSummary = AutoBackupManager.backupSummary(ctx)
++        screen.addCategory(R.string.backup_category) {
++            addPreference(
++                R.string.backup_latest_title,
++                backupSummary ?: ctx.getString(R.string.backup_latest_summary_none)
++            )
++            addPreference(
++                R.string.backup_restore_title,
++                if (backupSummary == null) {
++                    R.string.backup_restore_summary_none
++                } else {
++                    R.string.backup_restore_summary
++                },
++                onClick = { restoreLatestBackup(ctx) }
++            )
++        }
++    }
++
++    private fun restoreLatestBackup(ctx: Context) {
++        if (AutoBackupManager.latestBackup(ctx) == null) {
++            ctx.toast(R.string.backup_restore_no_backup)
++            return
++        }
++        AlertDialog.Builder(ctx)
++            .setIconAttribute(android.R.attr.alertDialogIcon)
++            .setTitle(R.string.backup_restore_title)
++            .setMessage(R.string.backup_restore_confirm_message)
++            .setPositiveButton(android.R.string.ok) { _, _ ->
++                lifecycleScope.withLoadingDialog(ctx) {
++                    try {
++                        // stop fcitx before overwriting the data files
++                        FcitxDaemon.stopFcitx()
++                        withContext(Dispatchers.IO) {
++                            AutoBackupManager.restoreLatest(ctx).getOrThrow()
++                        }
++                        AppUtil.showRestartNotification(ctx)
++                        ctx.toast(R.string.backup_restore_done)
++                        // delay exit to ensure Notification and Toast have been created
++                        delay(400L)
++                        AppUtil.exit()
++                    } catch (e: Exception) {
++                        // restart fcitx in case restoring failed
++                        FcitxDaemon.startFcitx()
++                        ctx.importErrorDialog(e)
++                    }
++                }
++            }
++            .setNegativeButton(android.R.string.cancel, null)
++            .show()
+     }
+ }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
+index dd1ed6af..5011c9d4 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/settings/theme/ThemeFragment.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.ui.main.settings.theme
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.os.Build
+ import android.os.Bundle
+ import android.view.LayoutInflater
+@@ -95,7 +96,7 @@ class ThemeFragment : Fragment() {
+                 centerHorizontally()
+                 bottomOfParent()
+             })
+-            backgroundColor = styledColor(android.R.attr.colorPrimary)
++            backgroundColor = styledColorCompat(android.R.attr.colorPrimary)
+             elevation = dp(4f)
+         }
+ 
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/utils/PreferenceScreen.kt b/app/src/main/java/org/fcitx/fcitx5/android/utils/PreferenceScreen.kt
+index 7349edcc..2b1113a0 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/utils/PreferenceScreen.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/utils/PreferenceScreen.kt
+@@ -4,6 +4,7 @@
+  */
+ package org.fcitx.fcitx5.android.utils
+ 
++import org.fcitx.fcitx5.android.utils.styledColorCompat
+ import android.content.Context
+ import androidx.annotation.DrawableRes
+ import androidx.annotation.StringRes
+@@ -40,7 +41,7 @@ fun Preference.setup(
+         isIconSpaceReserved = false
+     } else {
+         setIcon(context.drawable(icon)?.apply {
+-            setTint(context.styledColor(android.R.attr.colorControlNormal))
++            setTint(context.styledColorCompat(android.R.attr.colorControlNormal))
+         })
+     }
+     onClick?.also {
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/utils/Splitties.kt b/app/src/main/java/org/fcitx/fcitx5/android/utils/Splitties.kt
+index 7eef84e5..b3e7fa01 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/utils/Splitties.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/utils/Splitties.kt
+@@ -10,6 +10,7 @@ package org.fcitx.fcitx5.android.utils
+ import android.content.Context
+ import android.util.TypedValue
+ import android.view.View
++import androidx.core.content.ContextCompat
+ import androidx.annotation.AttrRes
+ import androidx.annotation.ColorInt
+ import androidx.constraintlayout.widget.ConstraintLayout
+@@ -34,9 +35,43 @@ inline fun Ui.styledFloat(@AttrRes attrRes: Int) = ctx.styledFloat(attrRes)
+ inline val ConstraintLayout.LayoutParams.unset
+     get() = ConstraintLayout.LayoutParams.UNSET
+ 
++/**
++ * Resolve a theme attribute that may point at a color, a color state list or an
++ * `@android:color` reference. Material 3 themes resolve e.g. `android:textColorSecondary`
++ * to a ColorStateList, which [styledColor] rejects with an IllegalArgumentException.
++ *
++ * Falls back to [defaultValue] when the attribute cannot be resolved at all.
++ */
++@ColorInt
++fun Context.styledColorCompat(@AttrRes attrRes: Int, @ColorInt defaultValue: Int = 0): Int {
++    val value = TypedValue()
++    if (!theme.resolveAttribute(attrRes, value, true)) return defaultValue
++    if (value.resourceId != 0) {
++        runCatching {
++            ContextCompat.getColorStateList(this, value.resourceId)?.defaultColor
++        }.getOrNull()?.let { return it }
++        runCatching { ContextCompat.getColor(this, value.resourceId) }
++            .getOrNull()?.let { return it }
++        return defaultValue
++    }
++    return if (value.type in TypedValue.TYPE_FIRST_COLOR_INT..TypedValue.TYPE_LAST_COLOR_INT) {
++        value.data
++    } else {
++        defaultValue
++    }
++}
++
++@Suppress("NOTHING_TO_INLINE")
++inline fun View.styledColorCompat(@AttrRes attrRes: Int, @ColorInt defaultValue: Int = 0) =
++    context.styledColorCompat(attrRes, defaultValue)
++
++@Suppress("NOTHING_TO_INLINE")
++inline fun Ui.styledColorCompat(@AttrRes attrRes: Int, @ColorInt defaultValue: Int = 0) =
++    ctx.styledColorCompat(attrRes, defaultValue)
++
+ @ColorInt
+ fun Context.styledColorOrDefault(@AttrRes attrRes: Int, @ColorInt defaultValue: Int) =
+-    runCatching { styledColor(attrRes) }.getOrDefault(defaultValue)
++    runCatching { styledColor(attrRes) }.getOrElse { styledColorCompat(attrRes, defaultValue) }
+ 
+ @Suppress("NOTHING_TO_INLINE")
+ inline fun View.styledColorOrDefault(@AttrRes attrRes: Int, @ColorInt defaultValue: Int) =
+diff --git a/app/src/main/res/drawable/bg_md3_preference_card.xml b/app/src/main/res/drawable/bg_md3_preference_card.xml
+new file mode 100644
+index 00000000..3c61f581
+--- /dev/null
++++ b/app/src/main/res/drawable/bg_md3_preference_card.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Material 3 surface container for a settings row (MainActivity settings sub-pages).
++
++  Rounded 16dp card filled with ?attr/colorSurfaceContainerLow and outlined with a
++  hairline ?attr/colorOutlineVariant stroke, so the row reads as a filled MD3 surface
++  container instead of a full-bleed list item. Consumed by layout/preference_m3.xml.
++-->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++
++    <solid android:color="?attr/colorSurfaceContainerLow" />
++
++    <corners android:radius="16dp" />
++
++    <stroke
++        android:width="1dp"
++        android:color="?attr/colorOutlineVariant" />
++</shape>
+diff --git a/app/src/main/res/layout/activity_main.xml b/app/src/main/res/layout/activity_main.xml
+index 8abb7224..5490cc09 100644
+--- a/app/src/main/res/layout/activity_main.xml
++++ b/app/src/main/res/layout/activity_main.xml
+@@ -6,15 +6,24 @@
+     android:layout_height="match_parent"
+     tools:context=".ui.main.MainActivity">
+ 
+-    <androidx.appcompat.widget.Toolbar
++    <!--
++      Material 3 app bar: a MaterialToolbar on the MD3 surface color with MD3 title and
++      navigation icon colors and no resting elevation. This layout is only inflated by
++      MainActivity (which runs on Theme.FcitxAppTheme.Md3), so the Material toolbar is
++      safe here. MainActivity drives the elevation through MainViewModel.toolbarShadow
++      (4dp when enabled, 0dp on the theme page).
++    -->
++    <com.google.android.material.appbar.MaterialToolbar
+         android:id="@+id/toolbar"
+         android:layout_width="match_parent"
+         android:layout_height="wrap_content"
+-        android:background="?android:attr/colorPrimary"
+-        android:elevation="4dp"
++        android:background="?attr/colorSurface"
++        android:elevation="0dp"
+         app:layout_constraintEnd_toEndOf="parent"
+         app:layout_constraintStart_toStartOf="parent"
+-        app:layout_constraintTop_toTopOf="parent" />
++        app:layout_constraintTop_toTopOf="parent"
++        app:navigationIconTint="?attr/colorOnSurface"
++        app:titleTextColor="?attr/colorOnSurface" />
+ 
+     <androidx.fragment.app.FragmentContainerView
+         android:id="@+id/nav_host_fragment"
+diff --git a/app/src/main/res/layout/preference_category_m3.xml b/app/src/main/res/layout/preference_category_m3.xml
+new file mode 100644
+index 00000000..1d185a2b
+--- /dev/null
++++ b/app/src/main/res/layout/preference_category_m3.xml
+@@ -0,0 +1,38 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Material 3 category header for the settings sub-pages hosted by MainActivity.
++
++  A plain label (no card, no ripple): titleSmall typography in ?attr/colorPrimary with
++  generous spacing above the first row of a group. androidx.preference binds
++  @android:id/title (and the optional @android:id/summary); both stay stock ids.
++  Selected through ThemeOverlay.Fcitx.Md3.Preference (values/styles_md3.xml).
++-->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:background="@android:color/transparent"
++    android:orientation="vertical"
++    android:paddingStart="24dp"
++    android:paddingTop="20dp"
++    android:paddingEnd="24dp"
++    android:paddingBottom="8dp">
++
++    <TextView
++        android:id="@android:id/title"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:ellipsize="end"
++        android:maxLines="2"
++        android:textAppearance="?attr/textAppearanceTitleSmall"
++        android:textColor="?attr/colorPrimary" />
++
++    <TextView
++        android:id="@android:id/summary"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="2dp"
++        android:ellipsize="end"
++        android:maxLines="2"
++        android:textAppearance="?attr/textAppearanceBodySmall"
++        android:textColor="?attr/colorOnSurfaceVariant" />
++</LinearLayout>
+diff --git a/app/src/main/res/layout/preference_m3.xml b/app/src/main/res/layout/preference_m3.xml
+new file mode 100644
+index 00000000..7598a086
+--- /dev/null
++++ b/app/src/main/res/layout/preference_m3.xml
+@@ -0,0 +1,82 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Material 3 settings row for the preferences hosted by MainActivity.
++
++  A rounded surface-container card (12dp side margins, 4dp vertical margins, 16dp inner
++  padding, 72dp minimum height) with MD3 typography: bodyLarge/onSurface title and
++  bodyMedium/onSurfaceVariant summary. The stock @android:id/title, @android:id/summary
++  and @android:id/widget_frame ids are kept so androidx.preference can bind any
++  Preference subclass (switch, checkbox, list/edit-text dialog preference, ...).
++
++  The ripple comes from @android:attr/selectableItemBackground on the foreground and is
++  clipped to the 16dp corner radius; the card background provides the outline.
++  Selected through ThemeOverlay.Fcitx.Md3.Preference (values/styles_md3.xml).
++-->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:layout_marginStart="12dp"
++    android:layout_marginTop="4dp"
++    android:layout_marginEnd="12dp"
++    android:layout_marginBottom="4dp"
++    android:background="@drawable/bg_md3_preference_card"
++    android:baselineAligned="false"
++    android:clipToOutline="true"
++    android:foreground="?android:attr/selectableItemBackground"
++    android:gravity="center_vertical"
++    android:minHeight="72dp"
++    android:orientation="horizontal"
++    android:paddingStart="16dp"
++    android:paddingTop="12dp"
++    android:paddingEnd="16dp"
++    android:paddingBottom="12dp">
++
++    <LinearLayout
++        android:layout_width="0dp"
++        android:layout_height="wrap_content"
++        android:layout_weight="1"
++        android:orientation="vertical">
++
++        <TextView
++            android:id="@android:id/title"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:ellipsize="end"
++            android:maxLines="2"
++            android:textAppearance="?attr/textAppearanceBodyLarge"
++            android:textColor="?attr/colorOnSurface" />
++
++        <TextView
++            android:id="@android:id/summary"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="2dp"
++            android:ellipsize="end"
++            android:maxLines="3"
++            android:textAppearance="?attr/textAppearanceBodyMedium"
++            android:textColor="?attr/colorOnSurfaceVariant" />
++    </LinearLayout>
++
++    <!--
++      Optional trailing icon (androidx.preference binds android.R.id.icon here when a
++      Preference sets one, e.g. the custom-color dot on the statistics page). It measures
++      0x0 when unset, so it does not indent the other rows.
++    -->
++    <ImageView
++        android:id="@android:id/icon"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:adjustViewBounds="true"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no"
++        android:scaleType="centerInside" />
++
++    <!-- Preference inflates android:widgetLayout (switch / checkbox / ...) in here. -->
++    <LinearLayout
++        android:id="@android:id/widget_frame"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_marginStart="12dp"
++        android:gravity="end|center_vertical"
++        android:orientation="vertical" />
++</LinearLayout>
+diff --git a/app/src/main/res/values-night/themes.xml b/app/src/main/res/values-night/themes.xml
+index e616379f..cf7e0000 100644
+--- a/app/src/main/res/values-night/themes.xml
++++ b/app/src/main/res/values-night/themes.xml
+@@ -10,6 +10,39 @@
+         <item name="colorLogVerbose">@color/grey_400</item>
+     </style>
+ 
++    <!--
++      Night variant of the Material 3 theme used by MainActivity only. The parent is the
++      same DayNight theme: under values-night it resolves to the Material 3 dark palette.
++      Only the app specific log colors and the system bar icon appearance differ.
++    -->
++    <style name="Theme.FcitxAppTheme.Md3" parent="Theme.Material3Expressive.DynamicColors.DayNight.NoActionBar">
++        <!-- app specific attributes read by the log view -->
++        <item name="colorLogFatal">@color/red_A700</item>
++        <item name="colorLogError">@color/red_400</item>
++        <item name="colorLogWarning">@color/yellow_500</item>
++        <item name="colorLogInfo">@color/blue_500</item>
++        <item name="colorLogDebug">@color/grey_400</item>
++        <item name="colorLogVerbose">@color/grey_400</item>
++
++        <!-- MD3 styling for the androidx.preference widgets of the sub-pages -->
++        <item name="preferenceTheme">@style/ThemeOverlay.Fcitx.Md3.Preference</item>
++        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Fcitx.Md3.Dialog</item>
++
++        <!--
++          Keep the AppCompat / platform accent attributes in sync with the MD3 primary
++          role; the home page rows tint their icon container from android:colorAccent.
++        -->
++        <item name="colorAccent">?attr/colorPrimary</item>
++        <item name="android:colorAccent">?attr/colorPrimary</item>
++        <item name="android:colorPrimary">?attr/colorPrimary</item>
++
++        <!-- MainActivity calls enableEdgeToEdge(): draw behind the system bars. -->
++        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
++        <item name="android:statusBarColor">@android:color/transparent</item>
++        <item name="android:navigationBarColor">@android:color/transparent</item>
++        <item name="android:windowLightStatusBar">false</item>
++    </style>
++
+     <style name="Theme.DialogTheme" parent="@android:style/Theme.DeviceDefault.Dialog" />
+ 
+     <style name="InputViewSnackbarTheme" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+diff --git a/app/src/main/res/values-zh-rCN/strings_backup.xml b/app/src/main/res/values-zh-rCN/strings_backup.xml
+new file mode 100644
+index 00000000..d3e835e4
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_backup.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- 自动升级备份与恢复相关字符串 -->
++<resources>
++    <string name="backup_category">自动备份</string>
++    <string name="backup_latest_title">最近备份</string>
++    <string name="backup_latest_summary_none">暂无备份——下次更新前会自动备份设置与输入统计</string>
++    <string name="backup_summary_format">%1$s · v%2$s · %3$s</string>
++    <string name="backup_restore_title">恢复最近备份</string>
++    <string name="backup_restore_summary">用最新副本恢复设置、剪贴板与输入统计，当前数据会被替换。</string>
++    <string name="backup_restore_summary_none">暂无可用备份</string>
++    <string name="backup_restore_confirm_message">小企鹅输入法会在每次更新前自动备份设置、剪贴板与输入统计，并保留最近 3 份。Rime 词典、主题等应用存储中的其他文件不包含在自动备份中，更新后会保留。\n\n恢复会用最新备份替换当前数据并重启应用。继续吗？</string>
++    <string name="backup_restore_no_backup">暂无自动备份</string>
++    <string name="backup_restore_done">已恢复备份，正在重启…</string>
++</resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings_backup.xml b/app/src/main/res/values-zh-rTW/strings_backup.xml
+new file mode 100644
+index 00000000..b9b7a977
+--- /dev/null
++++ b/app/src/main/res/values-zh-rTW/strings_backup.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- 自動升級備份與還原相關字串 -->
++<resources>
++    <string name="backup_category">自動備份</string>
++    <string name="backup_latest_title">最近備份</string>
++    <string name="backup_latest_summary_none">尚無備份——下次更新前會自動備份設定與輸入統計</string>
++    <string name="backup_summary_format">%1$s · v%2$s · %3$s</string>
++    <string name="backup_restore_title">還原最近備份</string>
++    <string name="backup_restore_summary">用最新副本還原設定、剪貼簿與輸入統計，目前資料會被取代。</string>
++    <string name="backup_restore_summary_none">尚無可用備份</string>
++    <string name="backup_restore_confirm_message">小企鵝輸入法會在每次更新前自動備份設定、剪貼簿與輸入統計，並保留最近 3 份。Rime 詞庫、主題等應用程式儲存空間中的其他檔案不包含在自動備份中，更新後會保留。\n\n還原會用最新備份取代目前資料並重新啟動應用程式。繼續嗎？</string>
++    <string name="backup_restore_no_backup">尚無自動備份</string>
++    <string name="backup_restore_done">已還原備份，正在重新啟動…</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_backup.xml b/app/src/main/res/values/strings_backup.xml
+new file mode 100644
+index 00000000..6d458f34
+--- /dev/null
++++ b/app/src/main/res/values/strings_backup.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Strings for automatic pre-upgrade backups and restoring them. -->
++<resources>
++    <string name="backup_category">Auto backup</string>
++    <string name="backup_latest_title">Latest backup</string>
++    <string name="backup_latest_summary_none">No backup yet — settings and statistics are backed up automatically before the next update</string>
++    <string name="backup_summary_format">%1$s · v%2$s · %3$s</string>
++    <string name="backup_restore_title">Restore latest backup</string>
++    <string name="backup_restore_summary">Restores settings, clipboard history and typing statistics from the newest copy; current data is replaced.</string>
++    <string name="backup_restore_summary_none">No backup available yet</string>
++    <string name="backup_restore_confirm_message">Fcitx5 keeps the last 3 copies of your settings, clipboard history and typing statistics, created automatically before each update. Rime dictionaries, themes and other files in the app storage are not included; they are preserved across updates.\n\nRestoring replaces the current data with the newest backup and restarts the app. Continue?</string>
++    <string name="backup_restore_no_backup">No auto backup available yet</string>
++    <string name="backup_restore_done">Backup restored, restarting…</string>
++</resources>
+diff --git a/app/src/main/res/values/styles_md3.xml b/app/src/main/res/values/styles_md3.xml
+new file mode 100644
+index 00000000..8e87a27f
+--- /dev/null
++++ b/app/src/main/res/values/styles_md3.xml
+@@ -0,0 +1,121 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  Material 3 preference styles for the settings UI hosted by MainActivity.
++
++  androidx.preference resolves its widget styles through the theme attribute
++  `preferenceTheme`; PreferenceFragmentCompat applies that overlay to the activity theme in
++  onCreate. Everything here therefore hangs off ThemeOverlay.Fcitx.Md3.Preference, which is
++  referenced from Theme.FcitxAppTheme.Md3 (values/themes.xml, values-night/themes.xml).
++
++  Each custom style keeps the stock `*.Material` behaviour (widgets, dialogs, icon handling)
++  and only swaps the row layout for the MD3 card / header and disables the list dividers.
++  Seekbar and dropdown preference styles are intentionally left untouched: they ship their
++  own complete layouts and would need full replacements to look like cards.
++-->
++<resources>
++
++    <!-- Applied to MainActivity through <item name="preferenceTheme">. -->
++    <style name="ThemeOverlay.Fcitx.Md3.Preference" parent="PreferenceThemeOverlay">
++        <item name="preferenceStyle">@style/Preference.Fcitx.Md3</item>
++        <item name="preferenceCategoryStyle">@style/Preference.Fcitx.Md3.Category</item>
++        <item name="switchPreferenceStyle">@style/Preference.Fcitx.Md3.Switch</item>
++        <item name="switchPreferenceCompatStyle">@style/Preference.Fcitx.Md3.SwitchCompat</item>
++        <item name="dialogPreferenceStyle">@style/Preference.Fcitx.Md3.Dialog</item>
++        <item name="editTextPreferenceStyle">@style/Preference.Fcitx.Md3.EditText</item>
++        <item name="checkBoxPreferenceStyle">@style/Preference.Fcitx.Md3.CheckBox</item>
++        <item name="preferenceFragmentListStyle">@style/PreferenceFragmentList.Fcitx.Md3</item>
++        <item name="preferenceFragmentCompatStyle">@style/PreferenceFragment.Fcitx.Md3</item>
++        <item name="preferenceFragmentStyle">@style/PreferenceFragment.Fcitx.Md3</item>
++    </style>
++
++    <!-- Plain rows (also used by ListPreference / custom DialogPreference subclasses). -->
++    <style name="Preference.Fcitx.Md3" parent="Preference.Material">
++        <item name="android:layout">@layout/preference_m3</item>
++        <item name="allowDividerAbove">false</item>
++        <item name="allowDividerBelow">false</item>
++        <item name="singleLineTitle">false</item>
++        <item name="iconSpaceReserved">false</item>
++    </style>
++
++    <!-- Section headers: label only, no card, no divider. -->
++    <style name="Preference.Fcitx.Md3.Category" parent="Preference.Category.Material">
++        <item name="android:layout">@layout/preference_category_m3</item>
++        <item name="allowDividerAbove">false</item>
++        <item name="allowDividerBelow">false</item>
++        <item name="iconSpaceReserved">false</item>
++    </style>
++
++    <!-- Switch preferences: the widget frame picks up the MD3 SwitchCompat styling. -->
++    <style name="Preference.Fcitx.Md3.Switch" parent="Preference.SwitchPreference.Material">
++        <item name="android:layout">@layout/preference_m3</item>
++        <item name="allowDividerAbove">false</item>
++        <item name="allowDividerBelow">false</item>
++        <item name="singleLineTitle">false</item>
++        <item name="iconSpaceReserved">false</item>
++    </style>
++
++    <style name="Preference.Fcitx.Md3.SwitchCompat" parent="Preference.SwitchPreferenceCompat.Material">
++        <item name="android:layout">@layout/preference_m3</item>
++        <item name="allowDividerAbove">false</item>
++        <item name="allowDividerBelow">false</item>
++        <item name="singleLineTitle">false</item>
++        <item name="iconSpaceReserved">false</item>
++    </style>
++
++    <style name="Preference.Fcitx.Md3.Dialog" parent="Preference.DialogPreference.Material">
++        <item name="android:layout">@layout/preference_m3</item>
++        <item name="allowDividerAbove">false</item>
++        <item name="allowDividerBelow">false</item>
++        <item name="singleLineTitle">false</item>
++        <item name="iconSpaceReserved">false</item>
++    </style>
++
++    <style name="Preference.Fcitx.Md3.EditText" parent="Preference.DialogPreference.EditTextPreference.Material">
++        <item name="android:layout">@layout/preference_m3</item>
++        <item name="allowDividerAbove">false</item>
++        <item name="allowDividerBelow">false</item>
++        <item name="singleLineTitle">false</item>
++        <item name="iconSpaceReserved">false</item>
++    </style>
++
++    <style name="Preference.Fcitx.Md3.CheckBox" parent="Preference.CheckBoxPreference.Material">
++        <item name="android:layout">@layout/preference_m3</item>
++        <item name="allowDividerAbove">false</item>
++        <item name="allowDividerBelow">false</item>
++        <item name="singleLineTitle">false</item>
++        <item name="iconSpaceReserved">false</item>
++    </style>
++
++    <!--
++      RecyclerView style of PreferenceFragmentCompat (preference_recyclerview.xml uses
++      style="?attr/preferenceFragmentListStyle"). Note: that library layout hardcodes
++      android:paddingTop/Bottom="0dp", which wins over a style, so the vertical breathing
++      room comes from the 3dp row margins and the 20dp category padding instead.
++    -->
++    <style name="PreferenceFragmentList.Fcitx.Md3" parent="PreferenceFragmentList.Material">
++        <item name="android:background">?attr/colorSurface</item>
++        <item name="android:clipToPadding">false</item>
++        <item name="android:paddingStart">0dp</item>
++        <item name="android:paddingEnd">0dp</item>
++        <item name="android:paddingLeft">0dp</item>
++        <item name="android:paddingRight">0dp</item>
++        <item name="android:scrollbars">vertical</item>
++    </style>
++
++    <!--
++      PreferenceFragmentCompat reads the item divider from preferenceFragmentCompatStyle.
++      The MD3 rows are separate cards, so the Material list divider is removed entirely.
++    -->
++    <style name="PreferenceFragment.Fcitx.Md3" parent="PreferenceFragment.Material">
++        <item name="android:divider">@null</item>
++        <item name="android:dividerHeight">0dp</item>
++        <item name="allowDividerAfterLastItem">false</item>
++    </style>
++
++    <!--
++      MaterialAlertDialogBuilder only. AppCompat's AlertDialog (used by the preference
++      dialogs and MainActivity) keeps the theme's AppCompat compatible `alertDialogTheme`
++      from the Material 3 base theme on purpose - see the report for why.
++    -->
++    <style name="ThemeOverlay.Fcitx.Md3.Dialog" parent="ThemeOverlay.Material3Expressive.MaterialAlertDialog" />
++</resources>
+diff --git a/app/src/main/res/values/themes.xml b/app/src/main/res/values/themes.xml
+index d020aaf2..ada6a2d9 100644
+--- a/app/src/main/res/values/themes.xml
++++ b/app/src/main/res/values/themes.xml
+@@ -10,6 +10,44 @@
+         <item name="colorLogVerbose">@color/grey_700</item>
+     </style>
+ 
++    <!--
++      Material 3 theme for MainActivity only: the settings home page and every settings
++      sub-page it hosts. The application theme, the input view and the other activities
++      keep Theme.FcitxAppTheme / their own themes.
++
++      Parent is the Expressive DayNight theme with dynamic color support; MainActivity
++      calls DynamicColors.applyToActivityIfAvailable() so Android 12+ picks up the system
++      palette while older devices fall back to the baseline Material 3 colors.
++      Preference styling is wired through `preferenceTheme` (values/styles_md3.xml).
++    -->
++    <style name="Theme.FcitxAppTheme.Md3" parent="Theme.Material3Expressive.DynamicColors.DayNight.NoActionBar">
++        <!-- app specific attributes read by the log view -->
++        <item name="colorLogFatal">@color/red_A700</item>
++        <item name="colorLogError">@color/red_400</item>
++        <item name="colorLogWarning">@color/yellow_800</item>
++        <item name="colorLogInfo">@color/blue_500</item>
++        <item name="colorLogDebug">@color/grey_700</item>
++        <item name="colorLogVerbose">@color/grey_700</item>
++
++        <!-- MD3 styling for the androidx.preference widgets of the sub-pages -->
++        <item name="preferenceTheme">@style/ThemeOverlay.Fcitx.Md3.Preference</item>
++        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Fcitx.Md3.Dialog</item>
++
++        <!--
++          Keep the AppCompat / platform accent attributes in sync with the MD3 primary
++          role; the home page rows tint their icon container from android:colorAccent.
++        -->
++        <item name="colorAccent">?attr/colorPrimary</item>
++        <item name="android:colorAccent">?attr/colorPrimary</item>
++        <item name="android:colorPrimary">?attr/colorPrimary</item>
++
++        <!-- MainActivity calls enableEdgeToEdge(): draw behind the system bars. -->
++        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
++        <item name="android:statusBarColor">@android:color/transparent</item>
++        <item name="android:navigationBarColor">@android:color/transparent</item>
++        <item name="android:windowLightStatusBar">true</item>
++    </style>
++
+     <style name="Theme.InputViewTheme" parent="@android:style/Theme.DeviceDefault.Settings" />
+ 
+     <style name="Theme.DialogTheme" parent="@android:style/Theme.DeviceDefault.Light.Dialog" />
+diff --git a/app/src/test/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicyTest.kt b/app/src/test/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicyTest.kt
+new file mode 100644
+index 00000000..92a11e80
+--- /dev/null
++++ b/app/src/test/java/org/fcitx/fcitx5/android/data/backup/AutoBackupPolicyTest.kt
+@@ -0,0 +1,242 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * SPDX-FileCopyrightText: Copyright 2026 Fcitx5 for Android Contributors
++ */
++package org.fcitx.fcitx5.android.data.backup
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * JVM-only tests: [AutoBackupPolicy] must not depend on the Android framework.
++ */
++class AutoBackupPolicyTest {
++
++    // region shouldBackup
++
++    @Test
++    fun shouldBackupOnFirstLaunchEver() {
++        assertTrue(AutoBackupPolicy.shouldBackup(AutoBackupPolicy.NO_VERSION, 1L))
++        assertTrue(AutoBackupPolicy.shouldBackup(AutoBackupPolicy.NO_VERSION, 20312L))
++    }
++
++    @Test
++    fun shouldBackupOnNewerVersion() {
++        assertTrue(AutoBackupPolicy.shouldBackup(100L, 101L))
++        assertTrue(AutoBackupPolicy.shouldBackup(0L, 1L))
++        assertTrue(AutoBackupPolicy.shouldBackup(1L, Long.MAX_VALUE))
++    }
++
++    @Test
++    fun shouldNotBackupOnSameVersion() {
++        // at most one backup per installed version
++        assertFalse(AutoBackupPolicy.shouldBackup(101L, 101L))
++        assertFalse(AutoBackupPolicy.shouldBackup(1L, 1L))
++    }
++
++    @Test
++    fun shouldNotBackupOnDowngrade() {
++        assertFalse(AutoBackupPolicy.shouldBackup(101L, 100L))
++        assertFalse(AutoBackupPolicy.shouldBackup(20312L, 20311L))
++    }
++
++    // endregion
++
++    // region filesToPrune
++
++    private fun names(count: Int): List<String> =
++        (1..count).map { AutoBackupPolicy.backupFileName(it.toLong(), it * 1_000L) }
++            .reversed() // newest first: higher index = newer
++
++    @Test
++    fun pruneKeepsThreeNewestBackups() {
++        val newestFirst = names(5) // version 5, 4, 3, 2, 1
++        val pruned = AutoBackupPolicy.filesToPrune(newestFirst, 3)
++        assertEquals(2, pruned.size)
++        // the two oldest ones go, newest three stay
++        assertEquals(newestFirst.subList(3, 5), pruned)
++    }
++
++    @Test
++    fun pruneDoesNothingWhenAtMostKeep() {
++        assertEquals(emptyList<String>(), AutoBackupPolicy.filesToPrune(emptyList(), 3))
++        assertEquals(
++            emptyList<String>(),
++            AutoBackupPolicy.filesToPrune(names(1), 3)
++        )
++        assertEquals(
++            emptyList<String>(),
++            AutoBackupPolicy.filesToPrune(names(3), 3)
++        )
++    }
++
++    @Test
++    fun pruneWithZeroKeepDeletesEverything() {
++        val newestFirst = names(3)
++        assertEquals(newestFirst, AutoBackupPolicy.filesToPrune(newestFirst, 0))
++        // negative keep is treated like zero instead of producing a negative index
++        assertEquals(newestFirst, AutoBackupPolicy.filesToPrune(newestFirst, -1))
++    }
++
++    @Test
++    fun pruneOfSingleBackupWithKeepOne() {
++        assertEquals(emptyList<String>(), AutoBackupPolicy.filesToPrune(names(1), 1))
++    }
++
++    // endregion
++
++    // region formatSize
++
++    @Test
++    fun formatSizeOfZeroAndNegative() {
++        assertEquals("0 B", AutoBackupPolicy.formatSize(0L))
++        assertEquals("0 B", AutoBackupPolicy.formatSize(-1L))
++    }
++
++    @Test
++    fun formatSizeOfBytes() {
++        assertEquals("1 B", AutoBackupPolicy.formatSize(1L))
++        assertEquals("512 B", AutoBackupPolicy.formatSize(512L))
++        assertEquals("1023 B", AutoBackupPolicy.formatSize(1023L))
++    }
++
++    @Test
++    fun formatSizeOfKilobytes() {
++        assertEquals("1.0 KB", AutoBackupPolicy.formatSize(1024L))
++        assertEquals("1.5 KB", AutoBackupPolicy.formatSize(1536L))
++        assertEquals("10.0 KB", AutoBackupPolicy.formatSize(10L * 1024L))
++    }
++
++    @Test
++    fun formatSizeOfMegabytesAndGigabytes() {
++        assertEquals("1.0 MB", AutoBackupPolicy.formatSize(1024L * 1024L))
++        assertEquals("5.0 MB", AutoBackupPolicy.formatSize(5L * 1024L * 1024L))
++        assertEquals("3.0 GB", AutoBackupPolicy.formatSize(3L * 1024L * 1024L * 1024L))
++    }
++
++    @Test
++    fun formatSizeHasNoThousandsSeparatorThatWouldConfuseTheUi() {
++        assertEquals("1023 B", AutoBackupPolicy.formatSize(1023L))
++        assertTrue(AutoBackupPolicy.formatSize(12L * 1024L * 1024L).endsWith(" MB"))
++    }
++
++    // endregion
++
++    // region file names
++
++    @Test
++    fun backupFileNameRoundTrips() {
++        val name = AutoBackupPolicy.backupFileName(20312L, 1_763_000_000_000L)
++        assertEquals("fcitx5-data-20312-1763000000000.zip", name)
++        val parsed = AutoBackupPolicy.parseBackupFileName(name)
++        assertEquals(AutoBackupPolicy.BackupName(20312L, 1_763_000_000_000L), parsed)
++    }
++
++    @Test
++    fun parseRejectsForeignFileNames() {
++        assertNull(AutoBackupPolicy.parseBackupFileName("fcitx5-data-1.zip"))
++        assertNull(AutoBackupPolicy.parseBackupFileName("fcitx5-data-1-2.zip.part"))
++        assertNull(AutoBackupPolicy.parseBackupFileName("fcitx5-data-a-b.zip"))
++        assertNull(AutoBackupPolicy.parseBackupFileName("fcitx5-android_2026-11-14T04:00:00Z.zip"))
++        assertNull(AutoBackupPolicy.parseBackupFileName(""))
++    }
++
++    // endregion
++
++    // region isMeaningfulBackup
++
++    private val defaultPrefs = "org.fcitx.fcitx5.android_preferences.xml"
++    private val ownMarkerPrefs = "auto_backup.xml"
++
++    @Test
++    fun freshInstallIsNotMeaningful() {
++        // no databases and no prefs at all
++        assertFalse(AutoBackupPolicy.isMeaningfulBackup(emptyList(), emptyList(), defaultPrefs))
++        // the default prefs file is written on the first run, so it alone is not data
++        assertFalse(
++            AutoBackupPolicy.isMeaningfulBackup(
++                emptyList(),
++                listOf(defaultPrefs),
++                defaultPrefs
++            )
++        )
++        // a freshly created (almost empty) database is not enough either
++        assertFalse(
++            AutoBackupPolicy.isMeaningfulBackup(
++                listOf(0L, 4_096L, 8_192L),
++                listOf(defaultPrefs),
++                defaultPrefs
++            )
++        )
++    }
++
++    @Test
++    fun ownMarkerPrefsIsNotMeaningful() {
++        assertFalse(
++            AutoBackupPolicy.isMeaningfulBackup(
++                emptyList(),
++                listOf(defaultPrefs, ownMarkerPrefs),
++                defaultPrefs,
++                ignoredSharedPrefsFileNames = setOf(ownMarkerPrefs)
++            )
++        )
++    }
++
++    @Test
++    fun largeDatabaseIsMeaningful() {
++        assertTrue(
++            AutoBackupPolicy.isMeaningfulBackup(
++                listOf(AutoBackupPolicy.MIN_MEANINGFUL_DATABASE_BYTES + 1L),
++                emptyList(),
++                defaultPrefs
++            )
++        )
++        assertTrue(
++            AutoBackupPolicy.isMeaningfulBackup(
++                listOf(0L, 1_024L, 64L * 1024L),
++                emptyList(),
++                defaultPrefs
++            )
++        )
++    }
++
++    @Test
++    fun databaseExactlyAtThresholdIsNotMeaningful() {
++        // "larger than" the threshold, not "at least"
++        assertFalse(
++            AutoBackupPolicy.isMeaningfulBackup(
++                listOf(AutoBackupPolicy.MIN_MEANINGFUL_DATABASE_BYTES),
++                emptyList(),
++                defaultPrefs
++            )
++        )
++    }
++
++    @Test
++    fun nonDefaultSharedPrefsFileIsMeaningful() {
++        assertTrue(
++            AutoBackupPolicy.isMeaningfulBackup(
++                emptyList(),
++                listOf(defaultPrefs, "picker_recently_used.xml"),
++                defaultPrefs
++            )
++        )
++    }
++
++    @Test
++    fun nonXmlFilesInPrefsDirAreIgnored() {
++        assertFalse(
++            AutoBackupPolicy.isMeaningfulBackup(
++                emptyList(),
++                listOf(defaultPrefs, "$ownMarkerPrefs.bak", "some.tmp"),
++                defaultPrefs,
++                ignoredSharedPrefsFileNames = setOf(ownMarkerPrefs)
++            )
++        )
++    }
++
++    // endregion
++}
