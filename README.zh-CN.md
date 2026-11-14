@@ -143,11 +143,12 @@ watchdog 和 1 小时轮询窗口都已删除：每天一次的带闸门运行�
 上游提交，并在下一个窗口重试新 head。桌面 x86 构建则是另一条独立的
 `baidunetgo.yml`。
 
-构建按 app 分开：推送只重建 `apps/<app>/**` 有改动的那个 app（`scripts/**` 或
-工作流改动会重建全部三个；无法确定 before 的强制推送回退为全部三个）。定时运行只
-重建上游 SHA 变化的 app。手动触发可用 `app` 输入只构建一个 app，或用 `app=all` +
-`force` 全量重建。fcitx5 任务还会额外释放约 10 GB runner 磁盘、安装
-`extra-cmake-modules`/`gettext` 以及 NDK 28.0.13004108、CMake 3.31.6、
+构建按 app 分开：推送只重建 `apps/<app>/**` 有改动的那个 app。只改
+`scripts/**` 或工作流不会重建任何 app（需要把共享改动铺到全部 app 时，手动触发并
+勾 `force`）；无法确定 before 的强制推送也不重建，因此文档/CI 推送不会误启动耗时的
+fcitx5 任务。定时运行只重建上游 SHA 变化的 app。手动触发可用 `app` 输入只构建一个
+app，或用 `app=all` + `force` 全量重建。fcitx5 任务还会额外释放约 10 GB runner
+磁盘、安装 `extra-cmake-modules`/`gettext` 以及 NDK 28.0.13004108、CMake 3.31.6、
 build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 
 1. **check** —— `scripts/check-upstream.sh` 先过 10 天闸门，再对比上游分支的
@@ -200,7 +201,7 @@ versionName = "<上游 versionName>-patchwork"
 | 应用 | 上游 versionCode / versionName | 应用目录提交数 | 构建结果 |
 | --- | --- | --- | --- |
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 8 | `6808` / `"0.21.4-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 9 | `6809` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112`（arm64-v8a）/ `"0.1.3"` | 2 | `11202` / `"0.1.3-patchwork"` |
 
 fcitx5 的上游 versionCode 本身就按 ABI 区分（`baseVersionCode × 10 + ABI id`，

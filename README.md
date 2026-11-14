@@ -167,8 +167,10 @@ and the next window retries the new head. The Windows/Linux x86 desktop build is
 the separate `baidunetgo.yml` (see below).
 
 Builds are per app: a push rebuilds only the apps whose `apps/<app>/**` paths
-changed (a `scripts/**` or workflow change rebuilds all three; an unknown/forced
-push falls back to all three). Scheduled runs rebuild only the apps whose
+changed. A shared `scripts/**` or workflow change alone rebuilds nothing
+(dispatch with `force` when a shared change must be rolled out) and a force push
+whose before-SHA is unknown rebuilds nothing, so a docs/CI push cannot start the
+expensive fcitx5 leg by accident. Scheduled runs rebuild only the apps whose
 upstream SHA changed. Manual dispatch can target one app with the `app` input,
 or rebuild everything with `app=all` + `force`. The fcitx5 leg additionally
 frees ~10 GB of runner disk, installs `extra-cmake-modules`/`gettext` plus the
@@ -231,7 +233,7 @@ every downstream commit bumps `versionCode` even when upstream did not change.
 | App | Upstream versionCode / versionName | App-dir commits | Result |
 | --- | --- | --- | --- |
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 8 | `6808` / `"0.21.4-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 9 | `6809` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 2 | `11202` / `"0.1.3-patchwork"` |
 
 For fcitx5 the upstream code is itself ABI-dependent

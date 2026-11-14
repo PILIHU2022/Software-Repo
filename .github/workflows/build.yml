@@ -78,10 +78,13 @@ jobs:
           fi
           echo "due=$due" >> "$GITHUB_OUTPUT"
 
-      # Decide which apps to build:
-      #  * push  -> only the apps whose apps/<app>/** paths changed in this push;
-      #            a change to scripts/** or a workflow rebuilds all of them;
-      #            unknown/forced pushes fall back to all of them for safety;
+      # Decide which apps to build (one runner leg per app that changed):
+      #  * push  -> only the apps whose apps/<app>/** paths changed in this push.
+      #             A shared scripts/** or workflow change alone rebuilds
+      #             nothing: rolling a shared change out to every app is a
+      #             manual dispatch (`force`), so a docs/CI push cannot start
+      #             the expensive fcitx5 leg. A force push whose before-SHA is
+      #             unknown also rebuilds nothing (dispatch if needed).
       #  * dispatch -> the selected app (or all with force);
       #  * schedule -> only apps whose upstream SHA changed.
       - name: Resolve build matrix
@@ -105,8 +108,6 @@ jobs:
           # App list comes from apps/*/app.conf, so adding an app needs no
           # workflow edit.
           mapfile -t ALL_APPS < <(find apps -mindepth 2 -maxdepth 2 -name app.conf | LC_ALL=C sort | cut -d/ -f2)
-          all_apps="$(printf '%s ' "${ALL_APPS[@]}")"
-          all_apps="${all_apps%"${all_apps##*[! ]}"}"
           args=()
           if [[ "$EVENT" == "push" ]]; then
             selected=""
@@ -114,6 +115,7 @@ jobs:
                && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
               changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" || true)"
               pick=()
+              shared=()
               while IFS= read -r path; do
                 case "$path" in
                   apps/*/*)
@@ -121,15 +123,24 @@ jobs:
                     app="${app%%/*}"
                     printf '%s\n' "${ALL_APPS[@]}" | grep -Fxq "$app" && pick+=("$app")
                     ;;
-                  scripts/*|.github/workflows/*) pick=("${ALL_APPS[@]}"); break ;;
+                  scripts/*|.github/workflows/*) shared+=("$path") ;;
                 esac
               done <<<"$changed_files"
               if [[ ${#pick[@]} -gt 0 ]]; then
                 selected="$(printf '%s\n' "${pick[@]}" | sort -u | paste -sd' ' -)"
               fi
+              if [[ ${#shared[@]} -gt 0 && -z "$selected" ]]; then
+                printf '::notice title=No app rebuilt::Only shared files changed (%s); no apps/<app>/ path did, so nothing is rebuilt. Dispatch "Patchwork build" with force when a shared change must be rolled out.\n' "${shared[*]}"
+              fi
+            else
+              echo "::warning title=No app rebuilt::The pushed commits cannot be diffed (force push or unknown before-SHA); nothing is rebuilt. Run the workflow manually with force if this push changed an app."
             fi
-            # Unknown before-SHA (force push) or a non-app change: rebuild all.
-            [[ -n "$selected" ]] || selected="$all_apps"
+            if [[ -z "$selected" ]]; then
+              echo "No app directory changed in this push; skipping every build."
+              echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+              echo "any_changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "Push changed these apps: $selected"
             args=(--apps "$selected")
           elif [[ "$EVENT" == "workflow_dispatch" ]]; then
