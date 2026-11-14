@@ -39,7 +39,7 @@ issue，而不是继续发布过期代码。
 | --- | --- | --- | --- | --- |
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `11cc955` | 19 | `0.21.4-patchwork` (6811) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
-| Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 4 | `0.1.3-patchwork`（11202，arm64-v8a） |
+| Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 10 | `0.1.3-patchwork`（11203，arm64-v8a） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 19 | `0.8.3`（linux/windows x86） |
 
 三个 Android 应用发布在 F-Droid。**BaiduNetGo 不发布**：它是 Go/MyGo 桌面程序，
