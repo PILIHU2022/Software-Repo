@@ -12,8 +12,8 @@ non-exhaustive.
 ---
  .../expensetracker/shared/model/database/ExpenseRepository.kt | 2 +-
  .../shared/model/database/RecurringExpenseDatabase.kt         | 4 ++--
- .../expensetracker/shared/ui/settings/SettingsMainScreen.kt   | 1 +
- 3 files changed, 4 insertions(+), 3 deletions(-)
+ .../expensetracker/shared/ui/settings/SettingsMainScreen.kt   | 2 ++
+ 3 files changed, 5 insertions(+), 3 deletions(-)
 
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/ExpenseRepository.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/ExpenseRepository.kt
 index 4291f1a..d00ab60 100644
@@ -51,10 +51,18 @@ index fa004bc..6aae176 100644
                      )
                  }
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
-index 2c1d14f..f999bae 100644
+index 2c1d14f..fa69f2c 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
-@@ -143,6 +143,7 @@ fun SettingsMainScreen(
+@@ -76,6 +76,7 @@ import recurringexpensetracker.shared.generated.resources.settings_notifications
+ import recurringexpensetracker.shared.generated.resources.settings_notifications_subtitle
+ import recurringexpensetracker.shared.generated.resources.settings_notifications_upcoming
+ import recurringexpensetracker.shared.generated.resources.settings_security_biometric_lock
++import recurringexpensetracker.shared.generated.resources.settings_start_analytics
+ import recurringexpensetracker.shared.generated.resources.settings_show_converted_currency
+ import recurringexpensetracker.shared.generated.resources.settings_system_default
+ import recurringexpensetracker.shared.generated.resources.settings_theme_mode
+@@ -143,6 +144,7 @@ fun SettingsMainScreen(
                      DefaultTab.Home -> stringResource(Res.string.bottom_nav_home)
                      DefaultTab.Upcoming -> stringResource(Res.string.bottom_nav_upcoming)
                      DefaultTab.Calendar -> stringResource(Res.string.bottom_nav_calendar)
