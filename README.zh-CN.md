@@ -37,8 +37,8 @@ issue，而不是继续发布过期代码。
 
 | 应用 | 上游（分支） | 上游提交 | 补丁数 | 构建版本 |
 | --- | --- | --- | --- | --- |
-| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `effbf0d` | 18 | `0.21.4-patchwork-fallback-effbf0d` (6806) |
-| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1303，arm64-v8a） |
+| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `effbf0d` | 18 | `0.21.4-patchwork-fallback-effbf0d` (6808) |
+| ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 4 | `0.1.3-patchwork`（11202，arm64-v8a） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 19 | `0.8.3`（linux/windows x86） |
 
