@@ -410,9 +410,10 @@ jobs:
             sdkmanager --channel=3 --install "platform-tools" "build-tools;37.0.0"
           fi
 
-      # Artifacts are downloaded without merge-multiple, so each matrix leg
-      # lands in dist/patchwork-<app>/. publish-fdroid.sh searches
-      # recursively, which also keeps the per-app build-info.txt files apart.
+      # Several artifacts land in dist/patchwork-<app>/ each; a lone artifact is
+      # extracted flat into dist/. Both layouts are fine: publish-fdroid.sh
+      # searches recursively, and the publish step finds each app's
+      # build-info.txt by its `app=` line rather than by directory name.
       - name: Download APK artifacts
         id: download
         continue-on-error: true
@@ -464,8 +465,13 @@ jobs:
           state='{}'
           while IFS=$'\t' read -r app sha; do
             [[ -n "$app" ]] || continue
-            info="dist/patchwork-$app/build-info.txt"
-            if [[ -n "$(find "dist/patchwork-$app" -type f -name '*.apk' -print -quit 2>/dev/null)" ]]; then
+            # A multi-artifact download lands in dist/patchwork-<app>/, but a
+            # single-artifact download is extracted flat into dist/. Locate
+            # this app's build-info.txt by its own `app=` line so either layout
+            # is recorded, and take the APK name from that same file.
+            info="$(grep -rlx --include='build-info.txt' "app=$app" dist 2>/dev/null | head -n 1)"
+            apk_name="$(sed -n 's/^apk=//p' "$info" 2>/dev/null | head -n 1)"
+            if [[ -n "$info" && -n "$apk_name" && -f "$(dirname "$info")/$apk_name" ]]; then
               fallback="$(sed -n 's/^upstream_fallback=//p' "$info" 2>/dev/null | head -n 1)"
               built_sha="$(sed -n 's/^upstream_commit=//p' "$info" 2>/dev/null | head -n 1)"
               if [[ "$fallback" == "1" ]]; then
@@ -480,7 +486,7 @@ jobs:
               fi
               state="$(jq -c --arg app "$app" --arg sha "$record_sha" '. + {($app): $sha}' <<<"$state")"
             else
-              echo "::warning::No APK for '$app' (build failed or artifact missing); keeping previous build state"
+              echo "::warning::No build-info.txt or APK for '$app' (build failed or artifact missing); keeping previous build state"
             fi
           done < <(jq -r '.include[]? | [.app, .sha] | @tsv' <<<"$MATRIX")
           printf 'Build state: %s\n' "$state"
