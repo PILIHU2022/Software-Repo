@@ -37,7 +37,7 @@ issue，而不是继续发布过期代码。
 
 | 应用 | 上游（分支） | 上游提交 | 补丁数 | 构建版本 |
 | --- | --- | --- | --- | --- |
-| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `effbf0d` | 19 | `0.21.4-patchwork` (6811) |
+| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `11cc955` | 19 | `0.21.4-patchwork` (6811) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 4 | `0.1.3-patchwork`（11202，arm64-v8a） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 19 | `0.8.3`（linux/windows x86） |
@@ -201,7 +201,7 @@ versionName = "<上游 versionName>-patchwork"
 | 应用 | 上游 versionCode / versionName | 应用目录提交数 | 构建结果 |
 | --- | --- | --- | --- |
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 9 | `6809` / `"0.21.4-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112`（arm64-v8a）/ `"0.1.3"` | 2 | `11202` / `"0.1.3-patchwork"` |
 
 fcitx5 的上游 versionCode 本身就按 ABI 区分（`baseVersionCode × 10 + ABI id`，

@@ -40,7 +40,7 @@ code.
 
 | App | Upstream (branch) | Upstream revision | Patches | Built version |
 | --- | --- | --- | --- | --- |
-| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `effbf0d` | 19 | `0.21.4-patchwork` (6811) |
+| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `11cc955` | 19 | `0.21.4-patchwork` (6811) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 10 | `0.1.3-patchwork` (11203, arm64-v8a) |
 | BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 19 | `0.8.3` (linux/windows x86) |
@@ -246,7 +246,7 @@ every downstream commit bumps `versionCode` even when upstream did not change.
 | App | Upstream versionCode / versionName | App-dir commits | Result |
 | --- | --- | --- | --- |
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
-| RecurringExpenseTracker | `68` / `"0.21.4"` | 9 | `6809` / `"0.21.4-patchwork"` |
+| RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 3 | `11203` / `"0.1.3-patchwork"` |
 
 For fcitx5 the upstream code is itself ABI-dependent
