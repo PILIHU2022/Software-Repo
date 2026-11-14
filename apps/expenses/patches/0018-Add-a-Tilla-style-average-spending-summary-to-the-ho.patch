@@ -17,10 +17,10 @@ Pin a full-width summary card to the bottom of the home screen, using the dark #
  create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/ui/home/HomeSpendingSummaryMathTest.kt
 
 diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-index b9bce35..c48079b 100644
+index 6520045..eb6aa23 100644
 --- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
 +++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-@@ -118,7 +118,11 @@
+@@ -151,7 +151,11 @@
  
      <!-- Tilla style home & service icons -->
      <string name="home_summary_total">总支出</string>
@@ -33,10 +33,10 @@ index b9bce35..c48079b 100644
          <item quantity="one">%1$d 天</item>
          <item quantity="other">%1$d 天</item>
 diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
-index afb583f..77c3eaf 100644
+index 2422533..4993c90 100644
 --- a/shared/src/commonMain/composeResources/values/strings.xml
 +++ b/shared/src/commonMain/composeResources/values/strings.xml
-@@ -213,7 +213,11 @@
+@@ -215,7 +215,11 @@
  
      <!-- Tilla style home & service icons -->
      <string name="home_summary_total">Total expenses</string>
@@ -49,7 +49,7 @@ index afb583f..77c3eaf 100644
          <item quantity="one">%1$d DAY</item>
          <item quantity="other">%1$d DAYS</item>
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
-index 4b9bff1..79fb56c 100644
+index 7a6eddf..96ce155 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
 @@ -55,12 +55,16 @@ import de.dbauer.expensetracker.shared.data.UpcomingPane
@@ -69,7 +69,7 @@ index 4b9bff1..79fb56c 100644
  import de.dbauer.expensetracker.shared.ui.settings.SettingsScreen
  import de.dbauer.expensetracker.shared.ui.tags.TagsScreen
  import de.dbauer.expensetracker.shared.ui.theme.ExpenseTrackerThemePreview
-@@ -105,6 +109,7 @@ fun MainContent(
+@@ -106,6 +110,7 @@ fun MainContent(
      onDeferredStartRouteApplied: () -> Unit = {},
      mainNavigationViewModel: MainNavigationViewModel = koinViewModel<MainNavigationViewModel>(),
      whatsNew: IWhatsNew = koinInject<IWhatsNew>(),
@@ -77,7 +77,7 @@ index 4b9bff1..79fb56c 100644
  ) {
      val navController = rememberNavController()
      val backStackEntry by navController.currentBackStackEntryAsState()
-@@ -114,6 +119,9 @@ fun MainContent(
+@@ -115,6 +120,9 @@ fun MainContent(
      val selectedFilter by homeViewModel.selectedFilter.collectAsState()
      val sortMode by homeViewModel.selectedSortMode.collectAsState()
      val sortReverse by homeViewModel.sortReverse.collectAsState()
@@ -87,7 +87,7 @@ index 4b9bff1..79fb56c 100644
  
      var isSearchActive by rememberSaveable { mutableStateOf(false) }
  
-@@ -155,6 +163,20 @@ fun MainContent(
+@@ -156,6 +164,20 @@ fun MainContent(
      Scaffold(
          modifier = modifier,
          containerColor = MaterialTheme.colorScheme.background,

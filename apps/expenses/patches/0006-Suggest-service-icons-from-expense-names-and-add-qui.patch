@@ -22,10 +22,10 @@ Subject: [PATCH] Suggest service icons from expense names and add quick
  create mode 100644 shared/src/commonTest/kotlin/de/dbauer/expensetracker/shared/data/ExpenseServiceNameMatcherTest.kt
 
 diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-index f2e5269..a32b477 100644
+index 084a2c8..d8093b9 100644
 --- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
 +++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-@@ -150,4 +150,8 @@
+@@ -183,4 +183,8 @@
      <string name="edit_expense_service_social">社交</string>
      <string name="edit_expense_service_other">其他</string>
      <string name="edit_expense_service_count">%1$d 个内置图标</string>
@@ -35,10 +35,10 @@ index f2e5269..a32b477 100644
 +    <string name="edit_expense_quick_templates_hint">点击即可填入名称、图标和价格</string>
  </resources>
 diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
-index 255f0df..104c4b1 100644
+index 8340f12..95b97b6 100644
 --- a/shared/src/commonMain/composeResources/values/strings.xml
 +++ b/shared/src/commonMain/composeResources/values/strings.xml
-@@ -217,4 +217,8 @@
+@@ -219,4 +219,8 @@
      <string name="edit_expense_service_social">Social</string>
      <string name="edit_expense_service_other">Other</string>
      <string name="edit_expense_service_count">%1$d built-in icons</string>

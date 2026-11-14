@@ -10,10 +10,10 @@ Subject: [PATCH] Cache per-card date, icon and text work on the home list
  3 files changed, 153 insertions(+), 63 deletions(-)
 
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
-index 1ec217e..7ed4599 100644
+index a9c3e89..206930e 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
-@@ -134,6 +134,10 @@ fun MainContent(
+@@ -135,6 +135,10 @@ fun MainContent(
          } else {
              TillaBackgroundDark
          }
@@ -24,7 +24,7 @@ index 1ec217e..7ed4599 100644
  
      Scaffold(
          modifier = modifier,
-@@ -157,9 +161,7 @@ fun MainContent(
+@@ -158,9 +162,7 @@ fun MainContent(
          floatingActionButton = {
              if (backStackEntry?.destination?.isInRoute<MainNavRoute>(HomePane(), UpcomingPane) == true) {
                  FloatingActionButton(
@@ -35,7 +35,7 @@ index 1ec217e..7ed4599 100644
                      shape = RoundedCornerShape(20.dp),
                      containerColor = Color(0xFF2EE6D6),
                      contentColor = Color(0xFF00201D),
-@@ -313,6 +315,14 @@ fun MainContent(
+@@ -314,6 +316,14 @@ fun MainContent(
                      val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
                      val bottomPadding = if (keyboardOpen) 0.dp else 80.dp
                      val layoutDirection = LocalLayoutDirection.current
@@ -50,7 +50,7 @@ index 1ec217e..7ed4599 100644
                      Column(
                          modifier =
                              Modifier
-@@ -350,12 +360,7 @@ fun MainContent(
+@@ -351,12 +361,7 @@ fun MainContent(
                              isGridMode = isGridMode,
                              navController = navController,
                              recurringExpenseViewModel = recurringExpenseViewModel,

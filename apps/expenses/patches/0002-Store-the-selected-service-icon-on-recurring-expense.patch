@@ -304,7 +304,7 @@ index 0000000..a06d615
 +}
 \ No newline at end of file
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
-index 478dbf9..66f812f 100644
+index 9e24258..7560ac8 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
 @@ -42,6 +42,7 @@ data class RecurringExpenseData(
@@ -316,10 +316,10 @@ index 478dbf9..66f812f 100644
      fun getNextPaymentDay(): LocalDate? {
          if (firstPayment == null) return null
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
-index 249348d..319af89 100644
+index 195fa68..5eff1e0 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
-@@ -24,7 +24,7 @@ expect object RecurringExpenseDatabaseConstructor : RoomDatabaseConstructor<Recu
+@@ -23,7 +23,7 @@ expect object RecurringExpenseDatabaseConstructor : RoomDatabaseConstructor<Recu
          ReminderEntry::class,
          PaymentRecordEntry::class,
      ],
@@ -328,15 +328,15 @@ index 249348d..319af89 100644
  )
  @ConstructedBy(RecurringExpenseDatabaseConstructor::class)
  abstract class RecurringExpenseDatabase : RoomDatabase() {
-@@ -43,6 +43,7 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
+@@ -42,6 +42,7 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
                  .addMigrations(migration_8_9)
                  .addMigrations(migration_9_10)
                  .addMigrations(migration_10_11)
 +                .addMigrations(migration_11_12)
                  .fallbackToDestructiveMigrationOnDowngrade(true)
-                 .setQueryCoroutineContext(Dispatchers.IO)
+                 .setQueryCoroutineContext(ioDispatcher)
                  .build()
-@@ -340,5 +341,13 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
+@@ -343,5 +344,13 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
                      )
                  }
              }

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
-Date: Sat, 24 Oct 2026 09:46:12 +0800
+Date: Sat, 14 Nov 2026 18:28:25 +0800
 Subject: [PATCH] Restore official backups by closing and restarting the
  database process
 
@@ -24,7 +24,7 @@ index d87ad8b..8c40201 100644
      implementation(libs.compose.components.resources)
      implementation(libs.compose.foundation)
 diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
-index fb9ad63..8b0f812 100644
+index d9d8cd8..df0aac4 100644
 --- a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
 +++ b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
 @@ -2,6 +2,8 @@ package de.dbauer.expensetracker
@@ -42,8 +42,8 @@ index fb9ad63..8b0f812 100644
  import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
 +import de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase
  import de.dbauer.expensetracker.shared.model.notification.ExpenseNotificationManager
- import de.dbauer.expensetracker.shared.ui.DefaultTab
  import de.dbauer.expensetracker.shared.ui.MainContent
+ import de.dbauer.expensetracker.shared.ui.ThemeMode
 @@ -73,10 +76,12 @@ import recurringexpensetracker.shared.generated.resources.settings_backup_not_cr
  import recurringexpensetracker.shared.generated.resources.settings_backup_not_restored_toast
  import recurringexpensetracker.shared.generated.resources.settings_backup_restored_toast
@@ -74,7 +74,7 @@ index fb9ad63..8b0f812 100644
                          }
                      }
                  }
-@@ -322,7 +327,14 @@ class MainActivity : AppCompatActivity() {
+@@ -323,7 +328,14 @@ class MainActivity : AppCompatActivity() {
                                  backupPathLauncher.launch(Constants.DEFAULT_BACKUP_NAME)
                              },
                              onClickRestore = {
@@ -90,7 +90,7 @@ index fb9ad63..8b0f812 100644
                              },
                              updateWidget = {
                                  lifecycleScope.launch(Dispatchers.Main.immediate) {
-@@ -343,6 +355,29 @@ class MainActivity : AppCompatActivity() {
+@@ -344,6 +356,29 @@ class MainActivity : AppCompatActivity() {
          }
      }
  

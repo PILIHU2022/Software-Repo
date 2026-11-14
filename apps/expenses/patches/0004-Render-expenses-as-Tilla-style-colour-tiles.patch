@@ -14,10 +14,10 @@ Subject: [PATCH] Render expenses as Tilla-style colour tiles
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
 
 diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-index 8cbfb26..f2e5269 100644
+index a663036..084a2c8 100644
 --- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
 +++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-@@ -118,12 +118,20 @@
+@@ -151,12 +151,20 @@
      <!-- Tilla style home & service icons -->
      <string name="home_summary_total">总支出</string>
      <string name="home_summary_per_month">每月</string>
@@ -43,10 +43,10 @@ index 8cbfb26..f2e5269 100644
      <string name="edit_expense_service_summary">选择服务图标</string>
      <string name="edit_expense_service_none">无图标</string>
 diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
-index 3421792..255f0df 100644
+index f61a739..8340f12 100644
 --- a/shared/src/commonMain/composeResources/values/strings.xml
 +++ b/shared/src/commonMain/composeResources/values/strings.xml
-@@ -185,12 +185,20 @@
+@@ -187,12 +187,20 @@
      <!-- Tilla style home & service icons -->
      <string name="home_summary_total">Total expenses</string>
      <string name="home_summary_per_month">per month</string>
@@ -101,7 +101,7 @@ index caf1554..93479e4 100644
          ),
          ExpenseService(
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
-index 479c5e4..1ec217e 100644
+index 66246ef..a9c3e89 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
 @@ -18,8 +18,10 @@ import androidx.compose.material.icons.filled.Close
@@ -132,7 +132,7 @@ index 479c5e4..1ec217e 100644
  import androidx.compose.ui.tooling.preview.Preview
  import androidx.compose.ui.unit.LayoutDirection
  import androidx.compose.ui.unit.dp
-@@ -123,9 +128,16 @@ fun MainContent(
+@@ -124,9 +129,16 @@ fun MainContent(
      val navController = rememberNavController()
      val backStackEntry by navController.currentBackStackEntryAsState()
      val snackbarHostState = remember { SnackbarHostState() }
@@ -149,7 +149,7 @@ index 479c5e4..1ec217e 100644
          topBar = {
              mainNavigationViewModel.topAppBar()
          },
-@@ -148,6 +160,9 @@ fun MainContent(
+@@ -149,6 +161,9 @@ fun MainContent(
                      onClick = {
                          navController.navigate(EditExpensePane())
                      },
@@ -159,7 +159,7 @@ index 479c5e4..1ec217e 100644
                  ) {
                      Icon(
                          imageVector = Icons.Rounded.Add,
-@@ -252,12 +267,27 @@ fun MainContent(
+@@ -253,12 +268,27 @@ fun MainContent(
                          }
                      } else {
                          mainNavigationViewModel.topAppBar = {
@@ -188,7 +188,7 @@ index 479c5e4..1ec217e 100644
                                  actions = {
                                      IconButton(
                                          onClick = { isSearchActive = true },
-@@ -272,19 +302,10 @@ fun MainContent(
+@@ -273,19 +303,10 @@ fun MainContent(
                                          onToggleGridMode = toggleGridMode,
                                          isGridMode = isGridMode,
                                      )

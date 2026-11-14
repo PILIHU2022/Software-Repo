@@ -1,18 +1,18 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
-Date: Sat, 24 Oct 2026 13:35:24 +0800
+Date: Sat, 14 Nov 2026 18:31:11 +0800
 Subject: [PATCH] Add Tilla home bar, settings, themes, analytics and archive
 
 ---
- .../de/dbauer/expensetracker/MainActivity.kt  |  27 +-
+ .../de/dbauer/expensetracker/MainActivity.kt  |  25 +-
  .../notification/NotificationLoopReceiver.kt  |   4 +-
  .../widget/UpcomingPaymentsWidgetModel.kt     |   3 +-
- .../13.json                                   | 288 +++++++++++
+ .../13.json                                   | 288 ++++++++++++
  .../shared/ui/theme/Theme.android.kt          |   7 +-
  .../drawable/ic_tilla_more.xml                |  11 +
  .../drawable/ic_tilla_sort.xml                |   8 +
- .../values-zh-rCN/strings.xml                 | 131 +++++
- .../composeResources/values/strings.xml       | 131 +++++
+ .../values-zh-rCN/strings.xml                 | 131 ++++++
+ .../composeResources/values/strings.xml       | 131 ++++++
  .../expensetracker/shared/data/Navigation.kt  |  21 +
  .../shared/data/RecurringExpenseData.kt       |   1 +
  .../dbauer/expensetracker/shared/di/Module.kt |   6 +
@@ -28,25 +28,24 @@ Subject: [PATCH] Add Tilla home bar, settings, themes, analytics and archive
  .../datastore/IUserPreferencesRepository.kt   |  12 +
  .../KSafeUserPreferencesRepository.kt         |  12 +
  .../ExpenseNotificationManager.kt             |   2 +-
- .../expensetracker/shared/ui/DefaultTab.kt    |   1 +
- .../expensetracker/shared/ui/MainContent.kt   | 430 ++++++----------
+ .../expensetracker/shared/ui/DefaultTab.kt    |   3 +
+ .../expensetracker/shared/ui/MainContent.kt   | 430 +++++++----------
  .../shared/ui/RecurringExpenseOverview.kt     | 230 ++++-----
  .../shared/ui/TillaExpenseCard.kt             | 141 ++++--
- .../shared/ui/analytics/AnalyticsScreen.kt    | 436 +++++++++++++++++
+ .../shared/ui/analytics/AnalyticsScreen.kt    | 436 ++++++++++++++++++
  .../shared/ui/archive/ArchiveScreen.kt        | 196 ++++++++
  .../editexpense/EditRecurringExpenseScreen.kt |  20 +
  .../shared/ui/home/CardLayoutPrefs.kt         |  21 +
- .../shared/ui/home/HomeFilters.kt             |  27 +
+ .../shared/ui/home/HomeFilters.kt             |  27 ++
  .../shared/ui/home/HomeSearchField.kt         |  93 ++++
- .../shared/ui/home/TillaHomeTopBar.kt         | 375 ++++++++++++++
- .../ui/settings/SettingsAppearanceScreen.kt   | 341 +++++++++++++
- .../ui/settings/SettingsCardLayoutScreen.kt   | 232 +++++++++
- .../shared/ui/settings/SettingsComponents.kt  | 311 ++++++++++++
- .../ui/settings/SettingsGeneralScreen.kt      | 297 +++++++++++
- .../shared/ui/settings/SettingsHubScreen.kt   |  80 +++
- .../shared/ui/settings/SettingsMainScreen.kt  | 460 ------------------
+ .../shared/ui/home/TillaHomeTopBar.kt         | 375 +++++++++++++++
+ .../ui/settings/SettingsAppearanceScreen.kt   | 341 ++++++++++++++
+ .../ui/settings/SettingsCardLayoutScreen.kt   | 232 ++++++++++
+ .../shared/ui/settings/SettingsComponents.kt  | 311 +++++++++++++
+ .../ui/settings/SettingsGeneralScreen.kt      | 297 ++++++++++++
+ .../shared/ui/settings/SettingsHubScreen.kt   |  80 ++++
  .../shared/ui/settings/SettingsMoneyScreen.kt | 118 +++++
- .../shared/ui/settings/SettingsScreen.kt      | 145 ++++--
+ .../shared/ui/settings/SettingsScreen.kt      | 146 ++++--
  .../settings/SettingsSubscriptionsScreen.kt   |  95 ++++
  .../shared/ui/theme/PreviewTheme.kt           |   2 +
  .../expensetracker/shared/ui/theme/Theme.kt   |   1 +
@@ -61,11 +60,9 @@ Subject: [PATCH] Add Tilla home bar, settings, themes, analytics and archive
  .../database/ExpenseRepositoryReminderTest.kt |   8 +
  .../model/database/FakeExpenseRepository.kt   |  11 +
  .../UpcomingPaymentsViewModelTest.kt          |   5 +
- .../shared/ui/theme/Theme.ios.kt              |   6 +-
  .../de/dbauer/expensetracker/shared/Main.kt   |  12 +-
  .../model/database/GetDatabaseBuilder.kt      |   6 +-
- .../shared/ui/theme/Theme.jvm.kt              |   6 +-
- 61 files changed, 4363 insertions(+), 997 deletions(-)
+ 58 files changed, 4359 insertions(+), 530 deletions(-)
  create mode 100644 shared/schemas/de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase/13.json
  create mode 100644 shared/src/commonMain/composeResources/drawable/ic_tilla_more.xml
  create mode 100644 shared/src/commonMain/composeResources/drawable/ic_tilla_sort.xml
@@ -80,7 +77,6 @@ Subject: [PATCH] Add Tilla home bar, settings, themes, analytics and archive
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsComponents.kt
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsGeneralScreen.kt
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsHubScreen.kt
- delete mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMoneyScreen.kt
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsSubscriptionsScreen.kt
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/ThemePreset.kt
@@ -88,15 +84,10 @@ Subject: [PATCH] Add Tilla home bar, settings, themes, analytics and archive
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/ArchiveViewModel.kt
 
 diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
-index 7a49fa0..e3617f7 100644
+index 7a29da6..61a5a44 100644
 --- a/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
 +++ b/app/src/main/kotlin/de/dbauer/expensetracker/MainActivity.kt
-@@ -48,17 +48,19 @@ import de.dbauer.expensetracker.model.notification.startAlarmLooper
- import de.dbauer.expensetracker.security.BiometricPromptManager
- import de.dbauer.expensetracker.security.BiometricPromptManager.BiometricResult
- import de.dbauer.expensetracker.shared.asString
-+import de.dbauer.expensetracker.shared.data.AnalyticsPane
- import de.dbauer.expensetracker.shared.data.CalendarPane
+@@ -52,13 +52,14 @@ import de.dbauer.expensetracker.shared.data.CalendarPane
  import de.dbauer.expensetracker.shared.data.HomePane
  import de.dbauer.expensetracker.shared.data.MainNavRoute
  import de.dbauer.expensetracker.shared.data.UpcomingPane
@@ -104,23 +95,15 @@ index 7a49fa0..e3617f7 100644
  import de.dbauer.expensetracker.shared.model.database.RecurringExpenseDatabase
 +import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
  import de.dbauer.expensetracker.shared.model.notification.ExpenseNotificationManager
- import de.dbauer.expensetracker.shared.ui.DefaultTab
  import de.dbauer.expensetracker.shared.ui.MainContent
  import de.dbauer.expensetracker.shared.ui.ThemeMode
+ import de.dbauer.expensetracker.shared.ui.getDefaultTabRoute
  import de.dbauer.expensetracker.shared.ui.theme.ExpenseTrackerTheme
 +import de.dbauer.expensetracker.shared.ui.theme.ThemePreset
  import de.dbauer.expensetracker.viewmodel.MainActivityViewModel
  import de.dbauer.expensetracker.widget.UpcomingPaymentsWidget
  import kotlinx.coroutines.Dispatchers
-@@ -177,6 +179,7 @@ class MainActivity : AppCompatActivity() {
-                     when (userPreferencesRepository.defaultTab.get().first()) {
-                         DefaultTab.Upcoming.value -> UpcomingPane
-                         DefaultTab.Calendar.value -> CalendarPane
-+                        DefaultTab.Analytics.value -> AnalyticsPane
-                         else -> null
-                     }
-             }
-@@ -268,6 +271,8 @@ class MainActivity : AppCompatActivity() {
+@@ -266,6 +267,8 @@ class MainActivity : AppCompatActivity() {
  
              // Use theme based on user setting
              val selectedTheme by userPreferencesRepository.themeMode.collectAsState()
@@ -129,7 +112,7 @@ index 7a49fa0..e3617f7 100644
              val useDarkTheme =
                  when (selectedTheme) {
                      ThemeMode.Dark.value, ThemeMode.Amoled.value -> true
-@@ -281,7 +286,11 @@ class MainActivity : AppCompatActivity() {
+@@ -279,7 +282,11 @@ class MainActivity : AppCompatActivity() {
                  }
              }
  
@@ -142,7 +125,7 @@ index 7a49fa0..e3617f7 100644
                  Surface(
                      modifier = Modifier.fillMaxSize(),
                      color = MaterialTheme.colorScheme.background,
-@@ -332,13 +341,13 @@ class MainActivity : AppCompatActivity() {
+@@ -331,13 +338,13 @@ class MainActivity : AppCompatActivity() {
                              },
                              onClickRestore = {
                                  importPathLauncher.launch(
@@ -164,7 +147,7 @@ index 7a49fa0..e3617f7 100644
                              updateWidget = {
                                  lifecycleScope.launch(Dispatchers.Main.immediate) {
 diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/model/notification/NotificationLoopReceiver.kt b/app/src/main/kotlin/de/dbauer/expensetracker/model/notification/NotificationLoopReceiver.kt
-index be242f3..757f550 100644
+index 5d2b4f5..772dd92 100644
 --- a/app/src/main/kotlin/de/dbauer/expensetracker/model/notification/NotificationLoopReceiver.kt
 +++ b/app/src/main/kotlin/de/dbauer/expensetracker/model/notification/NotificationLoopReceiver.kt
 @@ -4,7 +4,7 @@ import android.app.AlarmManager
@@ -176,15 +159,15 @@ index be242f3..757f550 100644
  import de.dbauer.expensetracker.shared.model.database.IExpenseRepository
  import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
  import de.dbauer.expensetracker.shared.model.notification.ExpenseNotificationManager
-@@ -74,7 +74,7 @@ internal class NotificationLoopReceiver : AlarmLoopReceiver() {
-                         title = getString(Res.string.notification_auto_archived_title),
-                         description = candidate.name.orEmpty(),
-                         channel = SharedNotificationChannel.ExpenseReminder,
--                        startRoute = HomePane(showArchived = true),
-+                        startRoute = ArchivePane,
-                     ),
-                 )
-             }
+@@ -80,7 +80,7 @@ internal class NotificationLoopReceiver : AlarmLoopReceiver() {
+                             title = getString(Res.string.notification_auto_archived_title),
+                             description = candidate.name.orEmpty(),
+                             channel = SharedNotificationChannel.ExpenseReminder,
+-                            startRoute = HomePane(showArchived = true),
++                            startRoute = ArchivePane,
+                         ),
+                     )
+                 }
 diff --git a/app/src/main/kotlin/de/dbauer/expensetracker/widget/UpcomingPaymentsWidgetModel.kt b/app/src/main/kotlin/de/dbauer/expensetracker/widget/UpcomingPaymentsWidgetModel.kt
 index 601f02a..9c2040b 100644
 --- a/app/src/main/kotlin/de/dbauer/expensetracker/widget/UpcomingPaymentsWidgetModel.kt
@@ -552,10 +535,10 @@ index 0000000..6ded7b3
 +    <path android:fillColor="#FF000000" android:pathData="M3,18v-2h6v2ZM3,13v-2h12v2ZM3,8L3,6h18v2Z" />
 +</vector>
 diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-index 6492097..a730786 100644
+index 5317b6e..123089f 100644
 --- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
 +++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-@@ -181,4 +181,135 @@
+@@ -214,4 +214,135 @@
          <item quantity="one">%1$d 笔支出</item>
          <item quantity="other">%1$d 笔支出</item>
      </plurals>
@@ -692,10 +675,10 @@ index 6492097..a730786 100644
 +    <string name="settings_money_exchange_rates">汇率更新时间：%1$s</string>
  </resources>
 diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
-index c71142e..f19810a 100644
+index d0e310d..5bc53eb 100644
 --- a/shared/src/commonMain/composeResources/values/strings.xml
 +++ b/shared/src/commonMain/composeResources/values/strings.xml
-@@ -248,4 +248,135 @@
+@@ -250,4 +250,135 @@
      <!-- Quick templates & automatic icon selection -->
      <string name="edit_expense_quick_templates">Quick templates</string>
      <string name="edit_expense_quick_templates_hint">Tap to fill name, icon and price</string>
@@ -871,7 +854,7 @@ index 7719749..23d65f6 100644
  class EditExpensePane(val expenseId: Int? = null)
  
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
-index 66f812f..51aeb0a 100644
+index 7560ac8..cd86822 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
 @@ -42,6 +42,7 @@ data class RecurringExpenseData(
@@ -914,10 +897,10 @@ index 6517eee..38098d3 100644
          viewModelOf(::CalendarViewModel)
          viewModelOf(::SettingsViewModel)
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/ExpenseRepository.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/ExpenseRepository.kt
-index 566be68..697d362 100644
+index 751da37..4291f1a 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/ExpenseRepository.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/ExpenseRepository.kt
-@@ -114,6 +114,13 @@ class ExpenseRepository(
+@@ -113,6 +113,13 @@ class ExpenseRepository(
              recurringExpenseDao.setArchivedDate(expenseId, null)
          }
  
@@ -981,10 +964,10 @@ index c362660..d42d14e 100644
          "SELECT id, name FROM recurring_expenses WHERE endDate IS NOT NULL AND endDate <= :now AND archivedDate IS NULL",
      )
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
-index 319af89..cf909d2 100644
+index 5eff1e0..fa004bc 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
-@@ -24,7 +24,7 @@ expect object RecurringExpenseDatabaseConstructor : RoomDatabaseConstructor<Recu
+@@ -23,7 +23,7 @@ expect object RecurringExpenseDatabaseConstructor : RoomDatabaseConstructor<Recu
          ReminderEntry::class,
          PaymentRecordEntry::class,
      ],
@@ -993,15 +976,15 @@ index 319af89..cf909d2 100644
  )
  @ConstructedBy(RecurringExpenseDatabaseConstructor::class)
  abstract class RecurringExpenseDatabase : RoomDatabase() {
-@@ -44,6 +44,7 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
+@@ -43,6 +43,7 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
                  .addMigrations(migration_9_10)
                  .addMigrations(migration_10_11)
                  .addMigrations(migration_11_12)
 +                .addMigrations(migration_12_13)
                  .fallbackToDestructiveMigrationOnDowngrade(true)
-                 .setQueryCoroutineContext(Dispatchers.IO)
+                 .setQueryCoroutineContext(ioDispatcher)
                  .build()
-@@ -349,5 +350,13 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
+@@ -352,5 +353,13 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
                      )
                  }
              }
@@ -1135,10 +1118,17 @@ index ef5b03d..be97d02 100644
                  expense.getNextPaymentDay()?.let { nextPaymentDay ->
                      val daysToNextPayment = DateTimeCalculator.getDaysFromNowUntil(nextPaymentDay)
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt
-index a86aff7..1a78a01 100644
+index 9f1996b..38918d9 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/DefaultTab.kt
-@@ -4,6 +4,7 @@ enum class DefaultTab(val value: Int) {
+@@ -1,5 +1,6 @@
+ package de.dbauer.expensetracker.shared.ui
+ 
++import de.dbauer.expensetracker.shared.data.AnalyticsPane
+ import de.dbauer.expensetracker.shared.data.CalendarPane
+ import de.dbauer.expensetracker.shared.data.HomePane
+ import de.dbauer.expensetracker.shared.data.MainNavRoute
+@@ -11,6 +12,7 @@ enum class DefaultTab(val value: Int) {
      Home(0),
      Upcoming(1),
      Calendar(2),
@@ -1146,8 +1136,15 @@ index a86aff7..1a78a01 100644
      ;
  
      companion object {
+@@ -23,5 +25,6 @@ suspend fun IUserPreferencesRepository.getDefaultTabRoute(): MainNavRoute =
+     when (defaultTab.get().first()) {
+         DefaultTab.Upcoming.value -> UpcomingPane
+         DefaultTab.Calendar.value -> CalendarPane
++        DefaultTab.Analytics.value -> AnalyticsPane
+         else -> HomePane()
+     }
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
-index 8edba9d..4b9bff1 100644
+index 5585ec7..7a6eddf 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/MainContent.kt
 @@ -1,35 +1,18 @@
@@ -1252,7 +1249,7 @@ index 8edba9d..4b9bff1 100644
  import recurringexpensetracker.shared.generated.resources.snackbar_expense_archived
  import recurringexpensetracker.shared.generated.resources.snackbar_expense_unarchived
  import recurringexpensetracker.shared.generated.resources.tags_delete_undo
-@@ -134,20 +109,38 @@ fun MainContent(
+@@ -135,20 +110,38 @@ fun MainContent(
      val navController = rememberNavController()
      val backStackEntry by navController.currentBackStackEntryAsState()
      val snackbarHostState = remember { SnackbarHostState() }
@@ -1303,7 +1300,7 @@ index 8edba9d..4b9bff1 100644
      LaunchedEffect(deferredStartRoute) {
          val route = deferredStartRoute ?: return@LaunchedEffect
          navController.navigate(route) {
-@@ -161,35 +154,85 @@ fun MainContent(
+@@ -162,35 +155,85 @@ fun MainContent(
  
      Scaffold(
          modifier = modifier,
@@ -1405,7 +1402,7 @@ index 8edba9d..4b9bff1 100644
                      )
                  }
              }
-@@ -200,222 +243,43 @@ fun MainContent(
+@@ -201,222 +244,43 @@ fun MainContent(
                  startDestination = startRoute,
                  modifier = Modifier.fillMaxSize(),
              ) {
@@ -1643,7 +1640,7 @@ index 8edba9d..4b9bff1 100644
                                  top = 8.dp,
                                  start = 16.dp,
                                  end = 16.dp,
-@@ -423,22 +287,22 @@ fun MainContent(
+@@ -424,22 +288,22 @@ fun MainContent(
                          modifier = Modifier.padding(paddingValues),
                      )
                  }
@@ -1676,7 +1673,7 @@ index 8edba9d..4b9bff1 100644
                  composable<SettingsPane> {
                      var topAppBar by remember { mutableStateOf<@Composable () -> Unit>({}) }
                      SettingsScreen(
-@@ -452,6 +316,8 @@ fun MainContent(
+@@ -454,6 +318,8 @@ fun MainContent(
                          hasNotificationPermission = hasNotificationPermission,
                          requestNotificationPermission = requestNotificationPermission,
                          navigateToPermissionsSettings = navigateToPermissionsSettings,
@@ -1685,7 +1682,7 @@ index 8edba9d..4b9bff1 100644
                          setTopAppBar = {
                              mainNavigationViewModel.topAppBar = it
                              topAppBar = it
-@@ -460,9 +326,10 @@ fun MainContent(
+@@ -462,9 +328,10 @@ fun MainContent(
                      )
                      mainNavigationViewModel.topAppBar = topAppBar
                  }
@@ -1698,7 +1695,7 @@ index 8edba9d..4b9bff1 100644
                      val expenseRepository = koinInject<IExpenseRepository>()
                      val snackbarScope = rememberCoroutineScope()
                      val archivedMessage = stringResource(Res.string.snackbar_expense_archived)
-@@ -523,6 +390,7 @@ fun MainContent(
+@@ -525,6 +392,7 @@ fun MainContent(
                      )
                      mainNavigationViewModel.topAppBar = topAppBar
                  }
@@ -1706,7 +1703,7 @@ index 8edba9d..4b9bff1 100644
                  composable<TagsPane> {
                      var topAppBar by remember { mutableStateOf<@Composable () -> Unit>({}) }
                      TagsScreen(
-@@ -538,13 +406,12 @@ fun MainContent(
+@@ -540,13 +408,12 @@ fun MainContent(
                      )
                      mainNavigationViewModel.topAppBar = topAppBar
                  }
@@ -1722,7 +1719,7 @@ index 8edba9d..4b9bff1 100644
                              },
                          )
                      }
-@@ -561,6 +428,25 @@ fun MainContent(
+@@ -563,6 +430,25 @@ fun MainContent(
      )
  }
  
@@ -4837,472 +4834,6 @@ index 0000000..cc93615
 +        )
 +    }
 +}
-diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
-deleted file mode 100644
-index 68ff7ad..0000000
---- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMainScreen.kt
-+++ /dev/null
-@@ -1,460 +0,0 @@
--package de.dbauer.expensetracker.shared.ui.settings
--
--import androidx.compose.animation.AnimatedVisibility
--import androidx.compose.foundation.clickable
--import androidx.compose.foundation.layout.Arrangement
--import androidx.compose.foundation.layout.Column
--import androidx.compose.foundation.layout.Row
--import androidx.compose.foundation.layout.fillMaxSize
--import androidx.compose.foundation.layout.fillMaxWidth
--import androidx.compose.foundation.layout.padding
--import androidx.compose.foundation.layout.sizeIn
--import androidx.compose.foundation.rememberScrollState
--import androidx.compose.foundation.text.KeyboardOptions
--import androidx.compose.foundation.verticalScroll
--import androidx.compose.material.icons.Icons
--import androidx.compose.material.icons.rounded.AttachMoney
--import androidx.compose.material.icons.rounded.Backup
--import androidx.compose.material.icons.rounded.CurrencyExchange
--import androidx.compose.material.icons.rounded.DarkMode
--import androidx.compose.material.icons.rounded.DateRange
--import androidx.compose.material.icons.rounded.Fingerprint
--import androidx.compose.material.icons.rounded.HourglassEmpty
--import androidx.compose.material.icons.rounded.Info
--import androidx.compose.material.icons.rounded.Notifications
--import androidx.compose.material.icons.rounded.Restore
--import androidx.compose.material.icons.rounded.Rocket
--import androidx.compose.material.icons.rounded.Schedule
--import androidx.compose.material.icons.rounded.Tag
--import androidx.compose.material3.AlertDialog
--import androidx.compose.material3.Checkbox
--import androidx.compose.material3.ExperimentalMaterial3Api
--import androidx.compose.material3.MaterialTheme
--import androidx.compose.material3.Text
--import androidx.compose.material3.TextButton
--import androidx.compose.material3.TextField
--import androidx.compose.material3.rememberTimePickerState
--import androidx.compose.runtime.Composable
--import androidx.compose.runtime.collectAsState
--import androidx.compose.runtime.getValue
--import androidx.compose.runtime.mutableStateOf
--import androidx.compose.runtime.saveable.rememberSaveable
--import androidx.compose.runtime.setValue
--import androidx.compose.ui.Alignment
--import androidx.compose.ui.Modifier
--import androidx.compose.ui.text.input.ImeAction
--import androidx.compose.ui.text.input.KeyboardType
--import androidx.compose.ui.unit.dp
--import de.dbauer.expensetracker.shared.ui.DefaultTab
--import de.dbauer.expensetracker.shared.ui.ThemeMode
--import de.dbauer.expensetracker.shared.ui.UpcomingHorizon
--import de.dbauer.expensetracker.shared.ui.elements.TimePickerDialog
--import de.dbauer.expensetracker.shared.viewmodel.SettingsViewModel
--import kotlinx.datetime.LocalTime
--import org.jetbrains.compose.resources.stringResource
--import org.koin.compose.viewmodel.koinViewModel
--import recurringexpensetracker.shared.generated.resources.Res
--import recurringexpensetracker.shared.generated.resources.bottom_nav_calendar
--import recurringexpensetracker.shared.generated.resources.bottom_nav_home
--import recurringexpensetracker.shared.generated.resources.bottom_nav_upcoming
--import recurringexpensetracker.shared.generated.resources.dialog_ok
--import recurringexpensetracker.shared.generated.resources.settings_about
--import recurringexpensetracker.shared.generated.resources.settings_about_app
--import recurringexpensetracker.shared.generated.resources.settings_backup
--import recurringexpensetracker.shared.generated.resources.settings_backup_create
--import recurringexpensetracker.shared.generated.resources.settings_backup_restore
--import recurringexpensetracker.shared.generated.resources.settings_currency
--import recurringexpensetracker.shared.generated.resources.settings_default_currency
--import recurringexpensetracker.shared.generated.resources.settings_default_tab
--import recurringexpensetracker.shared.generated.resources.settings_general
--import recurringexpensetracker.shared.generated.resources.settings_notifications
--import recurringexpensetracker.shared.generated.resources.settings_notifications_missing_permission_subtitle
--import recurringexpensetracker.shared.generated.resources.settings_notifications_missing_permission_title
--import recurringexpensetracker.shared.generated.resources.settings_notifications_schedule_days
--import recurringexpensetracker.shared.generated.resources.settings_notifications_schedule_days_subtitle
--import recurringexpensetracker.shared.generated.resources.settings_notifications_schedule_time
--import recurringexpensetracker.shared.generated.resources.settings_notifications_subtitle
--import recurringexpensetracker.shared.generated.resources.settings_notifications_upcoming
--import recurringexpensetracker.shared.generated.resources.settings_security_biometric_lock
--import recurringexpensetracker.shared.generated.resources.settings_show_converted_currency
--import recurringexpensetracker.shared.generated.resources.settings_system_default
--import recurringexpensetracker.shared.generated.resources.settings_theme_mode
--import recurringexpensetracker.shared.generated.resources.settings_theme_mode_amoled
--import recurringexpensetracker.shared.generated.resources.settings_theme_mode_dark
--import recurringexpensetracker.shared.generated.resources.settings_theme_mode_follow_system
--import recurringexpensetracker.shared.generated.resources.settings_theme_mode_light
--import recurringexpensetracker.shared.generated.resources.settings_title_security
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon_10_years
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon_1_month
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon_1_year
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon_2_years
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon_3_months
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon_5_years
--import recurringexpensetracker.shared.generated.resources.settings_upcoming_horizon_6_months
--import recurringexpensetracker.shared.generated.resources.tags_screen_title
--
--@OptIn(ExperimentalMaterial3Api::class)
--@Composable
--fun SettingsMainScreen(
--    onClickTags: () -> Unit,
--    biometricsChecked: Boolean,
--    canUseBiometric: Boolean,
--    canUseNotifications: Boolean,
--    hasNotificationPermission: Boolean,
--    onClickBackup: () -> Unit,
--    onClickRestore: () -> Unit,
--    onBiometricCheckedChange: (Boolean) -> Unit,
--    requestNotificationPermission: () -> Unit,
--    navigateToPermissionsSettings: () -> Unit,
--    onClickDefaultCurrency: () -> Unit,
--    onClickAbout: () -> Unit,
--    modifier: Modifier = Modifier,
--    viewModel: SettingsViewModel = koinViewModel<SettingsViewModel>(),
--) {
--    Column(
--        modifier =
--            modifier
--                .verticalScroll(rememberScrollState())
--                .fillMaxSize(),
--    ) {
--        SettingsHeaderElement(
--            header = Res.string.settings_general,
--        )
--        val selectedTheme by viewModel.selectedThemeMode.collectAsState(ThemeMode.FollowSystem)
--        SettingsClickableElement(
--            title = stringResource(Res.string.settings_theme_mode),
--            subtitle =
--                when (selectedTheme) {
--                    ThemeMode.FollowSystem -> stringResource(Res.string.settings_theme_mode_follow_system)
--                    ThemeMode.Dark -> stringResource(Res.string.settings_theme_mode_dark)
--                    ThemeMode.Light -> stringResource(Res.string.settings_theme_mode_light)
--                    ThemeMode.Amoled -> stringResource(Res.string.settings_theme_mode_amoled)
--                },
--            onClick = viewModel::onClickThemeSelection,
--            icon = Icons.Rounded.DarkMode,
--        )
--        val defaultTab by viewModel.selectedDefaultTab.collectAsState(DefaultTab.Home)
--        SettingsClickableElement(
--            title = stringResource(Res.string.settings_default_tab),
--            subtitle =
--                when (defaultTab) {
--                    DefaultTab.Home -> stringResource(Res.string.bottom_nav_home)
--                    DefaultTab.Upcoming -> stringResource(Res.string.bottom_nav_upcoming)
--                    DefaultTab.Calendar -> stringResource(Res.string.bottom_nav_calendar)
--                },
--            onClick = viewModel::onClickDefaultTabSelection,
--            icon = Icons.Rounded.Rocket,
--        )
--        val upcomingHorizon by viewModel.selectedUpcomingHorizon.collectAsState(UpcomingHorizon.TenYears)
--        SettingsClickableElement(
--            title = stringResource(Res.string.settings_upcoming_horizon),
--            subtitle = stringResource(upcomingHorizon.labelRes()),
--            onClick = viewModel::onClickUpcomingHorizonSelection,
--            icon = Icons.Rounded.HourglassEmpty,
--        )
--        SettingsClickableElement(
--            title = stringResource(Res.string.tags_screen_title),
--            onClick = onClickTags,
--            icon = Icons.Rounded.Tag,
--        )
--        SettingsHeaderElement(
--            header = Res.string.settings_currency,
--        )
--        SettingsClickableElement(
--            title = stringResource(Res.string.settings_default_currency),
--            subtitle =
--                viewModel.selectedCurrencyName.ifEmpty {
--                    stringResource(Res.string.settings_system_default)
--                },
--            onClick = onClickDefaultCurrency,
--            icon = Icons.Rounded.AttachMoney,
--        )
--        SettingsClickableElementWithToggle(
--            title = stringResource(Res.string.settings_show_converted_currency),
--            checked = viewModel.showConvertedCurrency.collectAsState().value,
--            icon = Icons.Rounded.CurrencyExchange,
--            onCheckedChange = viewModel::onShowConvertedCurrency,
--        )
--
--        if (canUseBiometric) {
--            SettingsHeaderElement(header = Res.string.settings_title_security)
--            SettingsClickableElementWithToggle(
--                title = stringResource(Res.string.settings_security_biometric_lock),
--                checked = biometricsChecked,
--                onCheckedChange = onBiometricCheckedChange,
--                icon = Icons.Rounded.Fingerprint,
--            )
--        }
--
--        if (canUseNotifications) {
--            val notificationsEnabled by viewModel.upcomingPaymentNotification.collectAsState()
--
--            SettingsHeaderElement(header = Res.string.settings_notifications)
--            SettingsClickableElementWithToggle(
--                title = stringResource(Res.string.settings_notifications_upcoming),
--                subtitle = stringResource(Res.string.settings_notifications_subtitle),
--                checked = notificationsEnabled,
--                onCheckedChange = {
--                    viewModel.onUpcomingPaymentNotification(it)
--                    if (it && !hasNotificationPermission) {
--                        requestNotificationPermission()
--                    }
--                },
--                icon = Icons.Rounded.Notifications,
--            )
--            AnimatedVisibility(notificationsEnabled) {
--                Column {
--                    val upcomingPaymentNotificationTime by viewModel.upcomingPaymentNotificationTime
--                        .collectAsState()
--                    val upcomingPaymentNotificationTimeString =
--                        LocalTime(
--                            upcomingPaymentNotificationTime / 60,
--                            upcomingPaymentNotificationTime % 60,
--                        ).toString()
--                    val upcomingPaymentNotificationDaysAdvance by
--                        viewModel.upcomingPaymentNotificationDaysAdvance.collectAsState()
--                    val upcomingPaymentNotificationDaysAdvanceString =
--                        stringResource(
--                            Res.string.settings_notifications_schedule_days_subtitle,
--                            upcomingPaymentNotificationDaysAdvance,
--                        )
--
--                    if (!hasNotificationPermission) {
--                        SettingsMissingPermissionElement(
--                            title =
--                                stringResource(
--                                    Res.string.settings_notifications_missing_permission_title,
--                                ),
--                            subtitle =
--                                stringResource(
--                                    Res.string.settings_notifications_missing_permission_subtitle,
--                                ),
--                            onClick = navigateToPermissionsSettings,
--                        )
--                    }
--                    SettingsClickableElement(
--                        title = stringResource(Res.string.settings_notifications_schedule_time),
--                        subtitle = upcomingPaymentNotificationTimeString,
--                        onClick = viewModel::onUpcomingPaymentNotificationTimeSelection,
--                        icon = Icons.Rounded.Schedule,
--                    )
--                    SettingsClickableElement(
--                        title = stringResource(Res.string.settings_notifications_schedule_days),
--                        subtitle = upcomingPaymentNotificationDaysAdvanceString,
--                        onClick = viewModel::onUpcomingPaymentNotificationDaysAdvanceSelection,
--                        icon = Icons.Rounded.DateRange,
--                    )
--                }
--            }
--        }
--
--        SettingsHeaderElement(
--            header = Res.string.settings_backup,
--        )
--        SettingsClickableElement(
--            title = stringResource(Res.string.settings_backup_create),
--            onClick = onClickBackup,
--            icon = Icons.Rounded.Backup,
--        )
--        SettingsClickableElement(
--            title = stringResource(Res.string.settings_backup_restore),
--            onClick = onClickRestore,
--            icon = Icons.Rounded.Restore,
--        )
--        SettingsHeaderElement(
--            header = Res.string.settings_about,
--        )
--        SettingsClickableElement(
--            title = stringResource(Res.string.settings_about_app),
--            onClick = onClickAbout,
--            icon = Icons.Rounded.Info,
--        )
--    }
--    if (viewModel.showThemeSelectionDialog) {
--        val selectedTheme by viewModel.selectedThemeMode.collectAsState(initial = ThemeMode.FollowSystem)
--
--        AlertDialog(
--            onDismissRequest = viewModel::onDismissThemeSelectionDialog,
--            text = {
--                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
--                    Text(
--                        text = stringResource(Res.string.settings_theme_mode),
--                        style = MaterialTheme.typography.titleMedium,
--                        modifier = Modifier.padding(bottom = 8.dp),
--                    )
--                    DialogCheckbox(
--                        text = stringResource(Res.string.settings_theme_mode_follow_system),
--                        checked = selectedTheme == ThemeMode.FollowSystem,
--                        onClick = { viewModel.onSelectTheme(ThemeMode.FollowSystem) },
--                    )
--                    DialogCheckbox(
--                        text = stringResource(Res.string.settings_theme_mode_dark),
--                        checked = selectedTheme == ThemeMode.Dark,
--                        onClick = { viewModel.onSelectTheme(ThemeMode.Dark) },
--                    )
--                    DialogCheckbox(
--                        text = stringResource(Res.string.settings_theme_mode_light),
--                        checked = selectedTheme == ThemeMode.Light,
--                        onClick = { viewModel.onSelectTheme(ThemeMode.Light) },
--                    )
--                    DialogCheckbox(
--                        text = stringResource(Res.string.settings_theme_mode_amoled),
--                        checked = selectedTheme == ThemeMode.Amoled,
--                        onClick = { viewModel.onSelectTheme(ThemeMode.Amoled) },
--                    )
--                }
--            },
--            confirmButton = {},
--        )
--    } else if (viewModel.showDefaultTabSelectionDialog) {
--        val defaultTab by viewModel.selectedDefaultTab.collectAsState(DefaultTab.Home)
--
--        AlertDialog(
--            onDismissRequest = viewModel::onDismissDefaultTabSelectionDialog,
--            text = {
--                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
--                    Text(
--                        text = stringResource(Res.string.settings_default_tab),
--                        style = MaterialTheme.typography.titleMedium,
--                        modifier = Modifier.padding(bottom = 8.dp),
--                    )
--                    DialogCheckbox(
--                        text = stringResource(Res.string.bottom_nav_home),
--                        checked = defaultTab == DefaultTab.Home,
--                        onClick = { viewModel.onSelectDefaultTab(DefaultTab.Home) },
--                    )
--                    DialogCheckbox(
--                        text = stringResource(Res.string.bottom_nav_upcoming),
--                        checked = defaultTab == DefaultTab.Upcoming,
--                        onClick = { viewModel.onSelectDefaultTab(DefaultTab.Upcoming) },
--                    )
--                    DialogCheckbox(
--                        text = stringResource(Res.string.bottom_nav_calendar),
--                        checked = defaultTab == DefaultTab.Calendar,
--                        onClick = { viewModel.onSelectDefaultTab(DefaultTab.Calendar) },
--                    )
--                }
--            },
--            confirmButton = {},
--        )
--    } else if (viewModel.showUpcomingHorizonSelectionDialog) {
--        val current by viewModel.selectedUpcomingHorizon.collectAsState(UpcomingHorizon.TenYears)
--        AlertDialog(
--            onDismissRequest = viewModel::onDismissUpcomingHorizonSelectionDialog,
--            text = {
--                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
--                    Text(
--                        text = stringResource(Res.string.settings_upcoming_horizon),
--                        style = MaterialTheme.typography.titleMedium,
--                        modifier = Modifier.padding(bottom = 8.dp),
--                    )
--                    UpcomingHorizon.entries.forEach { horizon ->
--                        DialogCheckbox(
--                            text = stringResource(horizon.labelRes()),
--                            checked = current == horizon,
--                            onClick = { viewModel.onSelectUpcomingHorizon(horizon) },
--                        )
--                    }
--                }
--            },
--            confirmButton = {},
--        )
--    } else if (viewModel.upcomingPaymentNotificationTimePickerDialog) {
--        val timePickerState =
--            rememberTimePickerState(
--                initialHour = 8,
--                initialMinute = 0,
--            )
--        val upcomingPaymentNotificationTime by viewModel.upcomingPaymentNotificationTime.collectAsState()
--        upcomingPaymentNotificationTime.takeIf { it >= 0 }?.let { initialTime ->
--            timePickerState.hour = initialTime / 60
--            timePickerState.minute = initialTime % 60
--        }
--        TimePickerDialog(
--            onDismiss = viewModel::onDismissUpcomingPaymentNotificationTimePickerDialog,
--            onConfirm = viewModel::onConfirmUpcomingPaymentNotificationTimePickerDialog,
--            timePickerState = timePickerState,
--        )
--    } else if (viewModel.upcomingPaymentNotificationDaysAdvanceDialog) {
--        val upcomingPaymentNotificationDaysAdvance by viewModel.upcomingPaymentNotificationDaysAdvance
--            .collectAsState()
--        var days by rememberSaveable { mutableStateOf("") }
--        upcomingPaymentNotificationDaysAdvance.takeIf { it >= 0 }?.let { daysAdvance ->
--            days = daysAdvance.toString()
--        }
--        var inputError by rememberSaveable { mutableStateOf(false) }
--        AlertDialog(
--            onDismissRequest = viewModel::onDismissUpcomingPaymentNotificationDaysAdvanceDialog,
--            text = {
--                TextField(
--                    value = days,
--                    onValueChange = {
--                        if (it.matches(Regex("\\d{0,2}"))) {
--                            days = it
--                            inputError = false
--                        }
--                    },
--                    label = {
--                        Text(
--                            text = stringResource(Res.string.settings_notifications_schedule_days),
--                        )
--                    },
--                    keyboardOptions =
--                        KeyboardOptions(
--                            keyboardType = KeyboardType.Decimal,
--                            imeAction = ImeAction.Next,
--                        ),
--                    singleLine = true,
--                    isError = inputError,
--                )
--            },
--            confirmButton = {
--                TextButton(
--                    onClick = {
--                        val daysOrNull = days.toIntOrNull()
--                        if (daysOrNull != null && daysOrNull >= 0) {
--                            viewModel.onConfirmUpcomingPaymentNotificationDaysAdvanceDialog(daysOrNull)
--                        } else {
--                            inputError = true
--                        }
--                    },
--                ) {
--                    Text(text = stringResource(Res.string.dialog_ok))
--                }
--            },
--        )
--    }
--}
--
--private fun UpcomingHorizon.labelRes() =
--    when (this) {
--        UpcomingHorizon.OneMonth -> Res.string.settings_upcoming_horizon_1_month
--        UpcomingHorizon.ThreeMonths -> Res.string.settings_upcoming_horizon_3_months
--        UpcomingHorizon.SixMonths -> Res.string.settings_upcoming_horizon_6_months
--        UpcomingHorizon.OneYear -> Res.string.settings_upcoming_horizon_1_year
--        UpcomingHorizon.TwoYears -> Res.string.settings_upcoming_horizon_2_years
--        UpcomingHorizon.FiveYears -> Res.string.settings_upcoming_horizon_5_years
--        UpcomingHorizon.TenYears -> Res.string.settings_upcoming_horizon_10_years
--    }
--
--@Composable
--fun DialogCheckbox(
--    text: String,
--    checked: Boolean,
--    onClick: () -> Unit,
--    modifier: Modifier = Modifier,
--) {
--    Row(
--        modifier =
--            modifier
--                .fillMaxWidth()
--                .sizeIn(minHeight = 48.dp)
--                .clickable(onClick = onClick),
--        horizontalArrangement = Arrangement.spacedBy(8.dp),
--        verticalAlignment = Alignment.CenterVertically,
--    ) {
--        Checkbox(checked = checked, onCheckedChange = null)
--        Text(text = text, style = MaterialTheme.typography.bodyMedium)
--    }
--}
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMoneyScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsMoneyScreen.kt
 new file mode 100644
 index 0000000..0d9d317
@@ -5428,7 +4959,7 @@ index 0000000..0d9d317
 +        },
 +    )
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
-index 9bf1fef..5ec59d9 100644
+index c7f4f31..9fcfbcd 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
 @@ -2,6 +2,7 @@ package de.dbauer.expensetracker.shared.ui.settings
@@ -5479,7 +5010,7 @@ index 9bf1fef..5ec59d9 100644
  import recurringexpensetracker.shared.generated.resources.top_app_bar_navigate_up_content_desc
  
  @OptIn(ExperimentalMaterial3Api::class)
-@@ -65,10 +78,13 @@ fun SettingsScreen(
+@@ -66,10 +79,13 @@ fun SettingsScreen(
      onBiometricCheckedChange: (Boolean) -> Unit,
      requestNotificationPermission: () -> Unit,
      navigateToPermissionsSettings: () -> Unit,
@@ -5493,7 +5024,7 @@ index 9bf1fef..5ec59d9 100644
  
      NavHost(
          navController = settingsNavController,
-@@ -77,43 +93,96 @@ fun SettingsScreen(
+@@ -78,44 +94,96 @@ fun SettingsScreen(
      ) {
          composable<SettingsPane> {
              setTopAppBar {
@@ -5532,6 +5063,7 @@ index 9bf1fef..5ec59d9 100644
                  canUseBiometric = canUseBiometric,
                  canUseNotifications = canUseNotifications,
                  hasNotificationPermission = hasNotificationPermission,
+-                canUseBackup = canUseBackup,
 +                onClickTags = onClickTags,
                  onClickBackup = onClickBackup,
                  onClickRestore = onClickRestore,
@@ -5610,7 +5142,7 @@ index 9bf1fef..5ec59d9 100644
                  )
              }
              AboutScreen(
-@@ -123,16 +192,9 @@ fun SettingsScreen(
+@@ -125,16 +193,9 @@ fun SettingsScreen(
  
          composable<SettingsPaneLibraries> {
              setTopAppBar {
@@ -5630,7 +5162,7 @@ index 9bf1fef..5ec59d9 100644
                  )
              }
              AboutLibrariesScreen()
-@@ -234,6 +296,25 @@ fun SettingsScreen(
+@@ -236,6 +297,25 @@ fun SettingsScreen(
      }
  }
  
@@ -5656,7 +5188,7 @@ index 9bf1fef..5ec59d9 100644
  private class SettingsScreenPreviewProvider : PreviewParameterProvider<Boolean> {
      override val values: Sequence<Boolean>
          get() = sequenceOf(true, false)
-@@ -259,6 +340,8 @@ private fun SettingsScreenPreview(
+@@ -262,6 +342,8 @@ private fun SettingsScreenPreview(
                  onBiometricCheckedChange = { checked = it },
                  requestNotificationPermission = {},
                  navigateToPermissionsSettings = {},
@@ -6520,10 +6052,10 @@ index da11ba4..bf9c1d8 100644
          showDefaultTabSelectionDialog = true
      }
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/UpcomingPaymentsViewModel.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/UpcomingPaymentsViewModel.kt
-index 1315fd0..7d9938c 100644
+index 67cad3c..83708d3 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/UpcomingPaymentsViewModel.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/viewmodel/UpcomingPaymentsViewModel.kt
-@@ -77,7 +77,7 @@ class UpcomingPaymentsViewModel(
+@@ -81,7 +81,7 @@ class UpcomingPaymentsViewModel(
              combine(
                  expenseRepository.allRecurringExpensesByPrice,
                  horizonMonthsFlow,
@@ -6589,38 +6121,14 @@ index 32bb51b..69927b5 100644
              override suspend fun clearEndDateIfOverdue(
                  expenseId: Int,
                  nowEpoch: Long,
-diff --git a/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.ios.kt b/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.ios.kt
-index 0bce852..6e6bd5c 100644
---- a/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.ios.kt
-+++ b/shared/src/iosMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.ios.kt
-@@ -13,6 +13,7 @@ actual fun ExpenseTrackerTheme(
-     themeMode: ThemeMode,
-     // Dynamic color is available on Android 12+
-     dynamicColor: Boolean,
-+    themePreset: ThemePreset,
-     content: @Composable () -> Unit,
- ) {
-     val darkTheme =
-@@ -23,10 +24,7 @@ actual fun ExpenseTrackerTheme(
-         }
- 
-     val colorScheme =
--        when {
--            darkTheme -> darkColorScheme
--            else -> lightColorScheme
--        }.let { baseColorScheme ->
-+        themeColorScheme(themePreset, darkTheme).let { baseColorScheme ->
-             if (themeMode == ThemeMode.Amoled) {
-                 baseColorScheme.toAmoledColorScheme()
-             } else {
 diff --git a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Main.kt b/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Main.kt
-index 7411bc5..8c25c4a 100644
+index 694bdba..9cce67f 100644
 --- a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Main.kt
 +++ b/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/Main.kt
-@@ -1,14 +1,17 @@
- package de.dbauer.expensetracker.shared
+@@ -2,8 +2,10 @@ package de.dbauer.expensetracker.shared
  
  import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.rememberCoroutineScope
 +import androidx.compose.ui.unit.dp
  import androidx.compose.ui.window.Window
  import androidx.compose.ui.window.application
@@ -6628,14 +6136,15 @@ index 7411bc5..8c25c4a 100644
  import de.dbauer.expensetracker.shared.di.platformModule
  import de.dbauer.expensetracker.shared.di.sharedModule
  import de.dbauer.expensetracker.shared.model.datastore.IUserPreferencesRepository
- import de.dbauer.expensetracker.shared.ui.MainContent
+@@ -11,6 +13,7 @@ import de.dbauer.expensetracker.shared.ui.MainContent
  import de.dbauer.expensetracker.shared.ui.ThemeMode
+ import de.dbauer.expensetracker.shared.ui.getDefaultTabRoute
  import de.dbauer.expensetracker.shared.ui.theme.ExpenseTrackerTheme
 +import de.dbauer.expensetracker.shared.ui.theme.ThemePreset
- import kotlinx.coroutines.CoroutineScope
- import kotlinx.coroutines.Dispatchers
  import kotlinx.coroutines.launch
-@@ -27,11 +30,18 @@ fun main() =
+ import kotlinx.coroutines.runBlocking
+ import org.koin.compose.koinInject
+@@ -30,12 +33,19 @@ fun main() {
          Window(
              onCloseRequest = ::exitApplication,
              title = "RecurringExpenseTracker",
@@ -6645,6 +6154,7 @@ index 7411bc5..8c25c4a 100644
              val selectedTheme by userPreferencesRepository.themeMode.collectAsState()
 +            val selectedThemePreset by userPreferencesRepository.themePreset.collectAsState()
 +            val dynamicColor by userPreferencesRepository.dynamicColor.collectAsState()
+             val coroutineScope = rememberCoroutineScope()
  
 -            ExpenseTrackerTheme(themeMode = ThemeMode.fromInt(selectedTheme)) {
 +            ExpenseTrackerTheme(
@@ -6653,8 +6163,8 @@ index 7411bc5..8c25c4a 100644
 +                themePreset = ThemePreset.fromInt(selectedThemePreset),
 +            ) {
                  MainContent(
+                     startRoute = startRoute,
                      isGridMode = isGridMode,
-                     biometricSecurity = false,
 diff --git a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/model/database/GetDatabaseBuilder.kt b/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/model/database/GetDatabaseBuilder.kt
 index 4c37098..1cbba07 100644
 --- a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/model/database/GetDatabaseBuilder.kt
@@ -6672,27 +6182,3 @@ index 4c37098..1cbba07 100644
      return Room
          .databaseBuilder<RecurringExpenseDatabase>(
              name = dbFile.absolutePath,
-diff --git a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.jvm.kt b/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.jvm.kt
-index bd427db..7ac75d4 100644
---- a/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.jvm.kt
-+++ b/shared/src/jvmMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/Theme.jvm.kt
-@@ -10,6 +10,7 @@ actual fun ExpenseTrackerTheme(
-     themeMode: ThemeMode,
-     // Dynamic color is available on Android 12+
-     dynamicColor: Boolean,
-+    themePreset: ThemePreset,
-     content: @Composable () -> Unit,
- ) {
-     val darkTheme =
-@@ -20,10 +21,7 @@ actual fun ExpenseTrackerTheme(
-         }
- 
-     val colorScheme =
--        when {
--            darkTheme -> darkColorScheme
--            else -> lightColorScheme
--        }.let { baseColorScheme ->
-+        themeColorScheme(themePreset, darkTheme).let { baseColorScheme ->
-             if (themeMode == ThemeMode.Amoled) {
-                 baseColorScheme.toAmoledColorScheme()
-             } else {

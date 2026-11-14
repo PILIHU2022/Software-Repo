@@ -30,10 +30,10 @@ Subject: [PATCH] Complete card layout editor, add About credits and Catppuccin
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/theme/CatppuccinMocha.kt
 
 diff --git a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-index a730786..b9bce35 100644
+index 123089f..6520045 100644
 --- a/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
 +++ b/shared/src/commonMain/composeResources/values-zh-rCN/strings.xml
-@@ -207,6 +207,8 @@
+@@ -240,6 +240,8 @@
      <string name="home_suspended_badge">已暂停</string>
      <string name="suspend">暂停</string>
      <string name="resume">恢复</string>
@@ -42,7 +42,7 @@ index a730786..b9bce35 100644
  
      <!-- 分析 -->
      <string name="analytics_title">分析</string>
-@@ -312,4 +314,52 @@
+@@ -345,4 +347,52 @@
      <string name="settings_money_per_month">每月</string>
      <string name="settings_money_per_year">每年</string>
      <string name="settings_money_exchange_rates">汇率更新时间：%1$s</string>
@@ -96,7 +96,7 @@ index a730786..b9bce35 100644
 +    <string name="settings_subscriptions_card_price_add_currency_summary">在账单价格下方同时显示换算后的价格</string>
  </resources>
 diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
-index f19810a..afb583f 100644
+index 5bc53eb..2422533 100644
 --- a/shared/src/commonMain/composeResources/values/strings.xml
 +++ b/shared/src/commonMain/composeResources/values/strings.xml
 @@ -9,6 +9,8 @@
@@ -108,7 +108,7 @@ index f19810a..afb583f 100644
      <string name="notification_auto_archived_title">Expense auto-archived</string>
  
      <!-- Bottom Navigation -->
-@@ -379,4 +381,52 @@
+@@ -381,4 +383,52 @@
      <string name="settings_money_per_month">Per month</string>
      <string name="settings_money_per_year">Per year</string>
      <string name="settings_money_exchange_rates">Exchange rates: %1$s</string>
@@ -162,7 +162,7 @@ index f19810a..afb583f 100644
 +    <string name="settings_subscriptions_card_price_add_currency_summary">Show the converted price alongside the billed price</string>
  </resources>
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
-index 51aeb0a..70be116 100644
+index cd86822..dd2f43d 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/RecurringExpenseData.kt
 @@ -44,6 +44,8 @@ data class RecurringExpenseData(
@@ -1787,10 +1787,10 @@ index cc93615..a02ec05 100644
              text = stringResource(Res.string.settings_hub_version, appVersion),
              style = MaterialTheme.typography.bodySmall,
 diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
-index 5ec59d9..4568963 100644
+index 9fcfbcd..d45c2bf 100644
 --- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
 +++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsScreen.kt
-@@ -103,6 +103,7 @@ fun SettingsScreen(
+@@ -104,6 +104,7 @@ fun SettingsScreen(
                  onAppearanceClick = { settingsNavController.navigate(SettingsPaneAppearance) },
                  onSubscriptionsClick = { settingsNavController.navigate(SettingsPaneSubscriptions) },
                  onMoneyClick = { settingsNavController.navigate(SettingsPaneMoney) },

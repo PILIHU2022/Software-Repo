@@ -1363,13 +1363,13 @@ index 36e27a9..a663036 100644
 +    <string name="edit_expense_service_count">%1$d 个内置图标</string>
  </resources>
 diff --git a/shared/src/commonMain/composeResources/values/strings.xml b/shared/src/commonMain/composeResources/values/strings.xml
-index 64afd19..3421792 100644
+index 1988c7f..f61a739 100644
 --- a/shared/src/commonMain/composeResources/values/strings.xml
 +++ b/shared/src/commonMain/composeResources/values/strings.xml
-@@ -181,4 +181,32 @@
-     <string name="unarchive">Unarchive</string>
-     <string name="edit_expense_end_date">End Date (optional)</string>
+@@ -183,4 +183,32 @@
      <string name="edit_expense_end_date_placeholder">Pick a Date</string>
+     <string name="web_already_open_title">Already open in another tab</string>
+     <string name="web_already_open_message">The app is already open in another browser tab. Close the other tab, then reload this page.</string>
 +
 +    <!-- Tilla style home & service icons -->
 +    <string name="home_summary_total">Total expenses</string>
