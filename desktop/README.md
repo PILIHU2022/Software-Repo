@@ -16,9 +16,10 @@ Gradle build on a desktop program.
 | Workflow | `.github/workflows/baidunetgo.yml`, one window every 10 days |
 
 BaiduNetGo is a pure-Go/MyGo desktop client; it has no APK, no package name and
-no F-Droid metadata. Its installers are uploaded as the workflow artifact
-`baidunetgo-x86-<sha>` (Linux `.deb` + `.tar.gz`, Windows setup `.exe` + portable
-`.zip`), together with `build-info.txt`.
+no F-Droid metadata. Its installers (Linux `.deb` + `.tar.gz`, Windows setup
+`.exe` + portable `.zip`) are uploaded as the workflow artifact
+`baidunetgo-x86-<sha>` and published to a GitHub Release — see
+[Update check / releases](#update-check--releases).
 
 The workflow compares the upstream `main` SHA with `.build-state.json`, replays
 the queue onto the new head with `git am -3` (a rebase of the exported commits),
@@ -26,6 +27,55 @@ and builds both x86 targets. If the queue no longer applies, the script retries
 once on the last successfully built commit recorded in `.build-state.json`; that
 fallback build is uploaded but the recorded head is kept, so the next 10-day
 window retries the real upstream change.
+
+## Update check / releases
+
+Every successful build does two things on top of the workflow artifact:
+
+- it publishes the installers to a GitHub Release tagged
+  `baidunetgo-desktop-<version>-<short_sha>`, where `<short_sha>` is the first
+  seven characters of the built upstream commit. The assets are the same x86
+  files as the artifact (Linux `.deb` + `.tar.gz`, Windows setup `.exe` +
+  portable `.zip`; `build-info.txt` stays artifact-only). The tag is explicit
+  and the release is never marked `latest`, so `latest` can point at something
+  else later; the feed carries the tagged URLs itself;
+- it regenerates and commits `baidunetgo/update.json`, the update feed that the
+  app reads from **Settings → Updates**, and prints the feed address and the
+  release link in the run summary.
+
+The feed is public at:
+
+```
+https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json
+```
+
+Raw GitHub content is used because Pages only publishes `fdroid/`, which cannot
+host this file. `app.conf`'s `UPDATE_FEED_URL` holds that address, the workflow
+passes it to the build as `PATCHWORK_FEED_URL`, and `build-baidunetgo.sh` bakes
+it into the binary with `MYGO_LDFLAGS -X …/internal/updates.defaultFeed=<url>`
+(patch `0019` adds `internal/updates` and the settings page). A build from CI
+therefore needs no configuration on the user's side: it checks the feed out of
+the box, and when the feed lists a newer version for the running platform it
+offers the matching installer for download.
+
+Only x86 is built, so the feed only carries `linux-amd64` and `windows-amd64`.
+Any other platform reading the feed (an ARM or macOS build of the same app) ends
+up on the "更新信息没有 … 的下载地址" path, which reports that the feed has no
+download URL for this platform.
+
+The version in the feed and in the release tag is the upstream `mygo.json`
+version, because that is what the app compares against. Rebuilding the same
+upstream version therefore does not count as an update — the tag and feed change
+(`short_sha` differs) but the app does not prompt again, which keeps it from
+nagging. To publish a queue change before upstream moves (a broken installer, a
+fix that should be downloadable now), dispatch the workflow with `force`; that
+refreshes the Release and the feed immediately, and the in-app prompt arrives
+with the next upstream version bump.
+
+The app only downloads the installer into the download directory and leaves
+installing it to the user, exactly like upstream. The workflow artifact
+(`baidunetgo-x86-<sha>`, kept 90 days) is still uploaded as the quickest way to
+grab a build without a Release round trip.
 
 ## Refreshing the queue
 

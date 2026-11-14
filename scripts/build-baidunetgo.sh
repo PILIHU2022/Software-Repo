@@ -19,6 +19,11 @@
 #                             the fallback when the queue no longer applies
 #                             (default: desktop/.build-state.json)
 #   PATCHWORK_NET_RETRIES     network retry count for the mirror fetch (default 3)
+#   PATCHWORK_FEED_URL        update feed linked into the binaries as their
+#                             default feed, via
+#                             -X …/internal/updates.defaultFeed=<url>
+#                             (default: UPDATE_FEED_URL from app.conf; empty
+#                             leaves the binaries without a built-in feed)
 #
 # BaiduNetGo is not an Android app: nothing here runs Gradle, touches
 # fdroid/ or publishes through F-Droid. The build is x86 only — linux/amd64
@@ -33,7 +38,9 @@ APP="baidunetgo"
 CONF="$ROOT/desktop/$APP/app.conf"
 
 usage() {
-    sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # Print the header comment only: stop at the first non-comment line, so
+    # documenting another variable above never spills code into --help.
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
 die() {
@@ -78,6 +85,11 @@ done
 
 PLATFORMS="${PATCHWORK_PLATFORMS:-$BUILD_PLATFORMS}"
 STATE_FILE="${PATCHWORK_STATE_FILE:-$ROOT/${STATE_FILE:-desktop/.build-state.json}}"
+# The default update feed linked into the binaries. UPDATE_FEED_URL is allowed
+# to be unset, so an app.conf that predates the feed still builds: without it
+# nothing is linked and a binary only checks a feed the user enters in the
+# settings. PATCHWORK_FEED_URL wins, because CI points it at github.repository.
+FEED_URL="${PATCHWORK_FEED_URL:-${UPDATE_FEED_URL:-}}"
 PATCHES_DIR="$ROOT/desktop/$APP/patches"
 MIRROR="$MIRROR_DIR/$APP.git"
 WORK="$WORK_ROOT/$APP"
@@ -262,6 +274,16 @@ build() {
     OUT="$(cd "$OUT" && pwd)"
     rm -rf "$WORK/build"
 
+    if [[ -n "$FEED_URL" ]]; then
+        # MYGO_LDFLAGS is appended to mygo's own -ldflags (mygo adds the
+        # separating space itself), so a -X here reaches the build. Append
+        # rather than assign: the caller or CI may pass flags of its own.
+        local feed_ldflag
+        feed_ldflag="-X github.com/pengstem/baidunetgo/internal/updates.defaultFeed=$FEED_URL"
+        export MYGO_LDFLAGS="${MYGO_LDFLAGS:+$MYGO_LDFLAGS }$feed_ldflag"
+        echo "==> linking the default update feed: $FEED_URL"
+    fi
+
     echo "==> Building $PROJECT_NAME $PLATFORMS"
     (
         cd "$WORK"
@@ -277,6 +299,17 @@ build() {
                 || die "$(basename "$binary") is not an x86-64 binary: $(file -b "$binary")"
         fi
     done
+
+    if [[ -n "$FEED_URL" ]]; then
+        # -X silently ignores a symbol that no longer exists, so prove the
+        # address really landed in the binary. A miss means upstream moved
+        # internal/updates and the injected feed would be dead weight.
+        local linux_bin="$WORK/build/linux-amd64/baidunetgo"
+        [[ -f "$linux_bin" ]] || die "missing $linux_bin; cannot verify the linked update feed"
+        # -a because the binary is not text; -F because the URL has no regex.
+        grep -qaF -- "$FEED_URL" "$linux_bin" \
+            || die "the default update feed '$FEED_URL' is not linked into $linux_bin: -X ignores an unknown symbol silently, so upstream may have moved internal/updates (updates.defaultFeed); update the -X path in this script"
+    fi
 
     local version platform dir
     version="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$WORK/mygo.json" | head -n 1)"
@@ -319,6 +352,8 @@ build() {
         echo "patch_count=$patch_count"
         echo "version=$version"
         echo "platforms=$PLATFORMS"
+        echo "update_feed=$FEED_URL"
+        echo "feed_file=desktop/baidunetgo/update.json"
         echo "built_at=$built_at"
         local file
         shopt -s nullglob
@@ -350,6 +385,7 @@ print_result() {
     echo "PATCHWORK_RESULT_upstream_fallback=$upstream_fallback"
     echo "PATCHWORK_RESULT_patch_count=$patch_count"
     echo "PATCHWORK_RESULT_platforms=$PLATFORMS"
+    echo "PATCHWORK_RESULT_update_feed=$FEED_URL"
     if [[ -d "$WORK" ]]; then
         echo "PATCHWORK_RESULT_worktree=$WORK"
     fi

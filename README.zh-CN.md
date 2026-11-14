@@ -10,8 +10,8 @@
 **Fcitx5 for Android**——以及一个桌面应用 **BaiduNetGo** 的个人补丁式构建仓库。
 BaiduNetGo 只在这里构建，它**不属于** Android / F-Droid 应用。仓库里不保存任何
 应用源码，只保存按顺序应用的补丁队列，以及把补丁应用到上游当前代码、构建签名
-APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包并以 workflow artifact
-形式发布。
+APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包，发布成带 tag 的
+GitHub Release 并附一份更新 feed。
 
 > 个人项目，与上游作者（Dennis Bauer、Atharok、Fcitx5 for Android 贡献者、
 > pengstem）无关，也未获其背书。
@@ -27,7 +27,8 @@ APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包并
    baidunetgo `main`；
 2. **构建与发布自动化** —— CI 拉取上游当前 `main`，应用补丁队列，改写版本号，
    构建签名 APK，并更新签名后的 F-Droid 仓库；另一条独立的 `baidunetgo.yml`
-   只构建 x86 桌面安装包，并把安装包作为 artifact 上传，完全不碰 F-Droid。
+   只构建 x86 桌面安装包，把安装包发布成带 tag 的 Release，并提交更新 feed
+   `desktop/baidunetgo/update.json`，完全不碰 F-Droid。
 
 每次构建都把补丁重新应用到最新的上游提交上，因此上游的修复和新功能会自动进入
 构建，而不需要长期维护一个已经分叉的 fork。补丁一旦无法应用，流水线会失败并开
@@ -40,11 +41,13 @@ issue，而不是继续发布过期代码。
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `11cc955` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 10 | `0.1.3-patchwork`（11203，arm64-v8a） |
-| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 19 | `0.8.3`（linux/windows x86） |
+| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 19 | `0.8.3`（linux/windows x86；Release + feed） |
 
 三个 Android 应用发布在 F-Droid。**BaiduNetGo 不发布**：它是 Go/MyGo 桌面程序，
-按自己的 10 天周期构建，产物是 workflow artifact（`baidunetgo-x86-<sha>`），
-永远不会变成 APK。
+按自己的 10 天周期构建：安装包发布成 `baidunetgo-desktop-<version>-<short_sha>`
+的 Release，同时保留 `baidunetgo-x86-<sha>` artifact，每次构建还会提交更新 feed
+`desktop/baidunetgo/update.json`（地址
+<https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>，已内置进二进制），永远不会变成 APK。
 
 **ScreenTime** —— 每日使用记录持久化到本地 SQLite 数据库，新增基于该历史的分析页
 （时长表格从 0 递增、星期进度条与柱图从 0 生长；新增独立的「分析」设置分类和本地
@@ -80,8 +83,10 @@ Rime 配置」，也可用
 自适应，以及可配置的更新检查 feed；界面由 MyGo 原生 GPU 绘制。由
 `scripts/build-baidunetgo.sh` 从 `desktop/baidunetgo/patches` 构建，**只出 x86**
 （`linux/amd64`、`windows/amd64`），每次都把队列用 `git am -3`（导出成补丁的
-rebase 形式）重放到新的上游头上。安装包只作为 workflow artifact 发布，不进入
-F-Droid。
+rebase 形式）重放到新的上游头上。安装包发布成带 tag 的 Release 并保留
+`baidunetgo-x86-<sha>` artifact，每次构建还提交 `desktop/baidunetgo/update.json`
+（应用在「设置 → 更新」里读的 feed，地址 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
+已内置进二进制），不进入 F-Droid。
 
 两个带预编译原生依赖的 Android 应用（RecurringExpenseTracker、ScreenTime）都只编译
 **ARM**：其 `app.conf` 里的 `KEEP_ABIS="arm64-v8a armeabi-v7a"` 会让
@@ -173,8 +178,12 @@ build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 `pengstem/baidunetgo` 的 `main`；SHA 与 `desktop/.build-state.json` 不同时，把
 `desktop/baidunetgo/patches` 用 `git am -3` 重放到新 head（不适用时回退到上次成功
 构建的提交重试一次），用 `go tool mygo build` 构建 `linux/amd64,windows/amd64`，
-上传 `baidunetgo-x86-<sha>` artifact。回退构建不会记录新 head，下一个 10 天窗口
-会继续重试；整个流程不碰 `fdroid/`。
+上传 `baidunetgo-x86-<sha>` artifact，同时把安装包发布到
+`baidunetgo-desktop-<version>-<short_sha>` 的 Release（不标 `latest`），并提交
+`desktop/baidunetgo/update.json`——补丁版在「设置 → 更新」里检查的 feed，地址
+<https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
+在构建时内置进二进制。回退构建不会记录新 head，下一个 10 天窗口会继续重试；
+整个流程不碰 `fdroid/`。
 
 最近一次完整构建
 （[run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167)）
@@ -235,9 +244,11 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 ├── .watch-state.json          # android / baidunetgo 的上次 10 天检查时间
 ├── scripts/
 │   ├── build-app.sh           # 拉上游、打补丁、改版本、构建、校验
+│   ├── baidunetgo-feed.py     # 生成更新 feed（update.json）
 │   ├── build-baidunetgo.sh    # 拉上游、rebase 补丁队列、构建 x86 桌面版
 │   ├── check-upstream.sh      # 上游 SHA 差异 -> CI 矩阵
 │   ├── publish-fdroid.sh      # 发布 APK 并签名索引
+│   ├── test-baidunetgo-feed.sh # 上面那个生成器的回归测试
 │   ├── test-publish-fdroid.sh # 发布脚本的回归测试
 │   └── sync-patches.sh        # 从作者仓库同步补丁队列
 ├── fdroid/

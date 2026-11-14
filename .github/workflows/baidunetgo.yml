@@ -3,7 +3,17 @@ name: BaiduNetGo desktop build
 # Watches github.com/pengstem/baidunetgo and rebuilds the patched desktop app
 # when its main branch moves. BaiduNetGo is a Go/MyGo desktop client, not an
 # Android app: nothing in this workflow touches fdroid/ or publishes through
-# F-Droid — the installers are workflow artifacts.
+# F-Droid — the installers go to GitHub Releases, plus the workflow artifact.
+#
+# A successful build also publishes the installers to a Release tagged
+# `baidunetgo-desktop-<version>-<short_sha>` (an explicit tag, never marked
+# `latest`: the repository may point `latest` at something else later) and
+# commits desktop/baidunetgo/update.json, the update feed the patched app
+# reads from Settings → Updates. The feed URL is compiled into the binary
+# (PATCHWORK_FEED_URL -> internal/updates.defaultFeed), so a released build
+# checks for its own updates with no configuration. The feed covers the two
+# x86 platforms only; the workflow artifact (90 days) is kept as the quick
+# grab, since a Release download is one click more.
 #
 # Cadence: every 10 days. GitHub crons cannot express "every 10 days" (a
 # `*/10` day-of-month rule fires on the 1st, 11th, 21st and 31st), so the
@@ -146,6 +156,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends nsis
 
       - name: Build linux/amd64 and windows/amd64
+        env:
+          PATCHWORK_FEED_URL: https://raw.githubusercontent.com/${{ github.repository }}/main/desktop/baidunetgo/update.json
         run: ./scripts/build-baidunetgo.sh --build --out "$RUNNER_TEMP/dist"
 
       - name: Read the build info
@@ -174,12 +186,106 @@ jobs:
             find "$RUNNER_TEMP/dist" -maxdepth 1 -type f ! -name build-info.txt -printf '| %f | %s B |\n' | sort
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Test the feed generator
+        run: ./scripts/test-baidunetgo-feed.sh
+
       - name: Upload the x86 installers
         uses: actions/upload-artifact@v7
         with:
           name: baidunetgo-x86-${{ needs.check.outputs.short_sha }}
           path: ${{ runner.temp }}/dist
           if-no-files-found: error
+
+      - name: Publish the installers
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.info.outputs.version }}
+          BUILT_SHA: ${{ steps.info.outputs.built_sha }}
+          UPSTREAM_SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ -n "$VERSION" ]] || { echo "::error::no version in build-info.txt"; exit 1; }
+          SHORT_SHA="${BUILT_SHA:0:7}"
+          [[ "$SHORT_SHA" =~ ^[0-9a-f]{7}$ ]] || { echo "::error::bad built commit '$BUILT_SHA'"; exit 1; }
+          TAG="baidunetgo-desktop-${VERSION}-${SHORT_SHA}"
+          NOTES="$RUNNER_TEMP/feed-notes.md"
+          patch_count="$(sed -n 's/^patch_count=//p' "$RUNNER_TEMP/dist/build-info.txt" | head -n 1)"
+          fallback="$(sed -n 's/^upstream_fallback=//p' "$RUNNER_TEMP/dist/build-info.txt" | head -n 1)"
+          {
+            echo "社区修复版（x86），基于上游 ${SHORT_SHA}，含 ${patch_count:-若干} 个补丁。"
+            if [[ "${fallback:-0}" == "1" ]]; then
+              echo ''
+              echo "补丁队列没能应用到上游最新的 ${UPSTREAM_SHA}，这一版基于上次成功构建的提交，下一轮会重试新的上游。"
+            fi
+          } > "$NOTES"
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists; replacing its assets"
+          else
+            gh release create "$TAG" --repo "$REPO" \
+              --title "BaiduNetGo $VERSION (x86)" \
+              --notes-file "$NOTES" \
+              --latest=false
+          fi
+
+          files=()
+          for file in "$RUNNER_TEMP/dist"/*; do
+            [[ -f "$file" ]] || continue
+            [[ "$(basename "$file")" == "build-info.txt" ]] && continue
+            files+=("$file")
+          done
+          (( ${#files[@]} > 0 )) || { echo "::error::no installers in $RUNNER_TEMP/dist"; exit 1; }
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO" --clobber \
+            || { echo "::error::could not upload the installers to release $TAG"; exit 1; }
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "::notice::Published ${#files[@]} assets to release $TAG"
+
+      # The feed must be committed only after the release assets exist: its
+      # platform URLs point straight at the tag uploaded above.
+      - name: Write the update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.publish.outputs.tag }}
+          VERSION: ${{ steps.info.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ -n "$TAG" ]] || { echo "::error::no release tag from the publish step"; exit 1; }
+          feed="desktop/baidunetgo/update.json"
+          python3 scripts/baidunetgo-feed.py \
+            --dist "$RUNNER_TEMP/dist" \
+            --tag "$TAG" \
+            --version "$VERSION" \
+            --repo "$REPO" \
+            --notes "$RUNNER_TEMP/feed-notes.md" \
+            --out "$feed" | tee "$RUNNER_TEMP/feed.log"
+          {
+            echo ''
+            echo "- update feed: https://raw.githubusercontent.com/${REPO}/main/${feed}"
+            echo "- release: https://github.com/${REPO}/releases/tag/${TAG}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          git config user.name "DeepSeek Harness"
+          git config user.email "noreply@deepseek.com"
+          git add "$feed"
+          if git diff --cached --quiet; then
+            echo "Feed unchanged; nothing to commit"
+            exit 0
+          fi
+          git commit -m "Publish the BaiduNetGo update feed [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main \
+               && git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main; then
+              echo "::notice::Update feed pushed"
+              exit 0
+            fi
+            echo "    push attempt ${attempt}/3 failed; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::warning title=Feed commit failed::Could not push ${feed} (often HTTP 403: set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions')."
 
   record:
     name: Record the watch time
