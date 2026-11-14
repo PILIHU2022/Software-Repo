@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 19:12:41 +0800
+Subject: [PATCH] Silence the deprecated icon and date-property warnings
+
+The Android compile warned about four APIs the queue still used:
+Icons.Rounded.ReceiptLong and Icons.Rounded.Subject move to their
+Icons.AutoMirrored.Rounded variants, LocalDate.dayOfMonth/monthNumber move to
+day/month.number, and the second price!! in the tags mapper is redundant
+because the first one already smart-casts the property.
+---
+ .../expensetracker/shared/data/ExpenseService.kt  |  4 ++--
+ .../database/RecurringExpenseWithTagsMapper.kt    |  2 +-
+ .../expensetracker/shared/ui/TillaExpenseCard.kt  | 15 ++++++++-------
+ .../ui/settings/SettingsCardLayoutScreen.kt       |  4 ++--
+ 4 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt
+index 93479e4..5da9008 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt
+@@ -14,7 +14,7 @@ import androidx.compose.material.icons.rounded.Flight
+ import androidx.compose.material.icons.rounded.Home
+ import androidx.compose.material.icons.rounded.Payments
+ import androidx.compose.material.icons.rounded.Pets
+-import androidx.compose.material.icons.rounded.ReceiptLong
++import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
+ import androidx.compose.material.icons.rounded.School
+ import androidx.compose.material.icons.rounded.Shield
+ import androidx.compose.material.icons.rounded.ShoppingBag
+@@ -830,7 +830,7 @@ object ExpenseServiceCatalog {
+             name = "Tax",
+             category = ExpenseServiceCategory.FINANCE,
+             backgroundColor = Color(0xFF6B4A4A),
+-            icon = ExpenseServiceIcon.Material(Icons.Rounded.ReceiptLong),
++            icon = ExpenseServiceIcon.Material(Icons.AutoMirrored.Rounded.ReceiptLong),
+         ),
+         ExpenseService(
+             id = "generic_childcare",
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+index 4018f5a..4b2bd21 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseWithTagsMapper.kt
+@@ -38,7 +38,7 @@ internal fun RecurringExpenseWithTagsEntry.toRecurringExpenseData(
+                 ?: ExpenseServiceNameMatcher.find(this.expense.name.orEmpty())?.id,
+         originalPrice =
+             CurrencyValue(
+-                this.expense.price!!,
++                this.expense.price,
+                 this.expense.currencyCode.ifBlank { defaultCurrencyCode },
+             ),
+     )
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+index 9c8d04c..6fbc1cf 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/TillaExpenseCard.kt
+@@ -43,6 +43,7 @@ import de.dbauer.expensetracker.shared.ui.home.CardLayoutPrefs
+ import de.dbauer.expensetracker.shared.ui.home.CardLineSource
+ import de.dbauer.expensetracker.shared.ui.home.CardPriceMode
+ import kotlinx.datetime.LocalDate
++import kotlinx.datetime.number
+ import org.jetbrains.compose.resources.painterResource
+ import org.jetbrains.compose.resources.pluralStringResource
+ import org.jetbrains.compose.resources.stringResource
+@@ -357,14 +358,14 @@ private fun ordinalDateLabel(daysUntilPayment: Int?): String? {
+ }
+ 
+ private fun LocalDate.formatActualDate(pattern: CardActualDatePattern): String {
+-    val day = dayOfMonth.toString().padStart(2, '0')
+-    val month = monthNumber.toString().padStart(2, '0')
++    val dayText = day.toString().padStart(2, '0')
++    val monthText = month.number.toString().padStart(2, '0')
+     return when (pattern) {
+-        CardActualDatePattern.MonthDayYear -> "$month/$day/$year"
+-        CardActualDatePattern.DayMonthYearSlash -> "$day/$month/$year"
+-        CardActualDatePattern.YearMonthDaySlash -> "$year/$month/$day"
+-        CardActualDatePattern.DayMonthYearDash -> "$day-$month-$year"
+-        CardActualDatePattern.DayMonthYearDot -> "$day.$month.$year"
++        CardActualDatePattern.MonthDayYear -> "$monthText/$dayText/$year"
++        CardActualDatePattern.DayMonthYearSlash -> "$dayText/$monthText/$year"
++        CardActualDatePattern.YearMonthDaySlash -> "$year/$monthText/$dayText"
++        CardActualDatePattern.DayMonthYearDash -> "$dayText-$monthText-$year"
++        CardActualDatePattern.DayMonthYearDot -> "$dayText.$monthText.$year"
+     }
+ }
+ 
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt
+index e92abcd..5fa1e0e 100644
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/ui/settings/SettingsCardLayoutScreen.kt
+@@ -12,7 +12,7 @@ import androidx.compose.material.icons.rounded.Image
+ import androidx.compose.material.icons.rounded.Palette
+ import androidx.compose.material.icons.rounded.Payments
+ import androidx.compose.material.icons.rounded.Straighten
+-import androidx.compose.material.icons.rounded.Subject
++import androidx.compose.material.icons.automirrored.rounded.Subject
+ import androidx.compose.material.icons.rounded.Tag
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+@@ -220,7 +220,7 @@ fun SettingsCardLayoutScreen(
+         )
+         SettingsGroup {
+             SettingsRow(
+-                icon = Icons.Rounded.Subject,
++                icon = Icons.AutoMirrored.Rounded.Subject,
+                 title = stringResource(Res.string.settings_subscriptions_card_first_line),
+                 subtitle = CardLineSource.fromInt(firstLine).label(),
+                 onClick = { dialog = CardLayoutDialog.FirstLine },
