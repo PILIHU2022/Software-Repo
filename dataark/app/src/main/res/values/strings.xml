@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">数据方舟</string>
+
+    <!-- 底部导航 -->
+    <string name="nav_home">首页</string>
+    <string name="nav_apps">应用</string>
+    <string name="nav_backups">备份</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 首页 -->
+    <string name="label_storage">存储位置</string>
+    <string name="stat_apps">已安装应用</string>
+    <string name="stat_backups">备份数量</string>
+    <string name="stat_size">备份总大小</string>
+
+    <!-- 设置 -->
+    <string name="perm_notifications">通知权限</string>
+</resources>

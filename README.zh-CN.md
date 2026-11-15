@@ -7,7 +7,13 @@
 # Software-Repo —— Patchwork 构建叠加仓库
 
 这是一个面向三个 Android 应用——**ScreenTime**、**RecurringExpenseTracker** 与
-**Fcitx5 for Android**——以及一个桌面应用 **BaiduNetGo** 的个人补丁式构建仓库。
+**Fcitx5 for Android**——一个桌面应用 **BaiduNetGo**，以及一个内置源码应用
+**[DataArk](dataark/README.md)** 的个人构建仓库。前四个走补丁队列；DataArk 的
+完整源码直接提交在 [`dataark/`](dataark/)（原创 Kotlin/Compose 应用数据备份工具，
+支持 Root / Shizuku / Dhizuku 三种特权来源，GPL-3.0-or-later，图标来自
+Android-DataBackup），其 CI（[.github/workflows/dataark.yml](.github/workflows/dataark.yml)）
+默认**永久休眠**：2 月 30 日的 cron、不可达的分支过滤、再加 `if: false` 三重保险，
+不会自动或手动触发。
 BaiduNetGo 只在这里构建，它**不属于** Android / F-Droid 应用。仓库里不保存任何
 应用源码，只保存按顺序应用的补丁队列，以及把补丁应用到上游当前代码、构建签名
 APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包，发布成带 tag 的

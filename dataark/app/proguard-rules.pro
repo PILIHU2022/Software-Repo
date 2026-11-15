@@ -1,0 +1,4 @@
+-keeppackagenames rikka.shizuku.**
+-keep class rikka.shizuku.** { *; }
+-keep class com.rosan.dhizuku.** { *; }
+-keep class com.topjohnwu.superuser.** { *; }

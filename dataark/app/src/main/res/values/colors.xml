@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launcher icon palette (ported from Android-DataBackup, GPL-3.0) -->
+    <color name="ic_launcher_background">#C1E8FF</color>
+    <color name="ic_launcher_foreground_main">#219BCC</color>
+    <color name="ic_launcher_foreground_sub">@color/colorPrimary</color>
+    <color name="colorPrimary">#00668B</color>
+    <color name="colorOnPrimary">#ffffff</color>
+    <!-- App chrome -->
+    <color name="window_background_dark">#0B1220</color>
+</resources>
