@@ -6,15 +6,16 @@
 
 # Software-Repo —— Patchwork 构建叠加仓库
 
-这是一个面向三个 Android 应用——**ScreenTime**、**RecurringExpenseTracker** 与
-**Fcitx5 for Android**——一个桌面应用 **BaiduNetGo**，以及一个内置源码应用
-**[DataArk](dataark/README.md)** 的个人构建仓库。前四个走补丁队列；DataArk 的
+这是一个面向四个 Android 应用——**ScreenTime**、**RecurringExpenseTracker**、
+**Fcitx5 for Android** 与 **BaiduNetGo Android 客户端**——一个桌面应用
+**BaiduNetGo**，以及一个内置源码应用
+**[DataArk](dataark/README.md)** 的个人构建仓库。前五个走补丁队列；DataArk 的
 完整源码直接提交在 [`dataark/`](dataark/)（原创 Kotlin/Compose 应用数据备份工具，
 支持 Root / Shizuku / Dhizuku 三种特权来源，GPL-3.0-or-later，图标来自
 Android-DataBackup），其 CI（[.github/workflows/dataark.yml](.github/workflows/dataark.yml)）
 默认**永久休眠**：2 月 30 日的 cron、不可达的分支过滤、再加 `if: false` 三重保险，
 不会自动或手动触发。
-BaiduNetGo 只在这里构建，它**不属于** Android / F-Droid 应用。仓库里不保存任何
+BaiduNetGo 桌面版只在这里构建，它**不属于** Android / F-Droid 应用。仓库里不保存任何
 应用源码，只保存按顺序应用的补丁队列，以及把补丁应用到上游当前代码、构建签名
 APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包，发布成带 tag 的
 GitHub Release 并附一份更新 feed。
@@ -47,9 +48,10 @@ issue，而不是继续发布过期代码。
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `11cc955` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 10 | `0.1.3-patchwork`（11203，arm64-v8a） |
-| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 22 | `0.8.3.22` —— 上游 `0.8.3` + 22 个补丁（linux/windows x86、Arch 包；Release + feed） |
+| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 41 | `0.8.3.41` —— 上游 `0.8.3` + 41 个补丁（linux/windows x86、Arch 包；Release + feed） |
+| BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 41 | `0.8.3-patchwork`（80341 —— 上游 803 × 100 + 41 个补丁） |
 
-三个 Android 应用发布在 F-Droid。**BaiduNetGo 不发布**：它是 Go/MyGo 桌面程序，
+四个 Android 应用发布在 F-Droid。**BaiduNetGo 桌面版不发布**：它是 Go/MyGo 桌面程序，
 按自己的 10 天周期构建：安装包（`.deb`、`.tar.gz`、Arch Linux 的
 `.pkg.tar.zst`（用 `sudo pacman -U` 安装）、Windows 安装版/便携版 `.zip`）发布成
 `baidunetgo-desktop-<version>-<short_sha>` 的 Release，同时保留
@@ -100,6 +102,21 @@ pacman 装的副本会拒绝并提示用 `pacman -U`。每次构建还提交
 `desktop/baidunetgo/update.json`（应用在「设置 → 更新」里读的 feed，地址
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 已内置进二进制），不进入 F-Droid。
+
+**BaiduNetGo（Android）** —— 同一条队列的另一半：Material 3 Expressive 的
+Compose 客户端（包名 `com.pengstem.baidunetgo`），扫码登录、浏览网盘，并按计划
+把选中的文件夹与相册备份到网盘 —— 每个上传文件都会用 OpenPGP 对称加密成
+`.gpg`，任何电脑上的 `gpg -d` 都能解开，与桌面端备份写出的格式一致。桌面版和
+Android 版重放同一条 `desktop/baidunetgo/patches` 队列、构建自同一个上游提交
+（`scripts/build-baidunetgo.sh --prepare` 准备好树后，Android 的一半由
+`scripts/build-baidunetgo-android.sh` 从其 `android/` Gradle 工程构建，SDK/JDK
+步骤与其他应用相同）。签名后的 APK 有三个出口：带 tag 的 GitHub Release
+（`baidunetgo-android-<version>-<short_sha>`，不标 `latest`）、F-Droid 仓库，
+以及应用内更新 feed `fdroid/baidunetgo/update.json`
+（<https://software.sparkzh.top/baidunetgo/update.json>，由
+`scripts/baidunetgo-android-feed.py` 在每次构建后重新生成，
+`deploy-pages.yml` 随 `fdroid/` 一起部署）。它与其它应用一样用仓库里的
+patchwork 测试密钥签名；上游树里的 `dev.jks` 只是开发用密钥，从不参与发布。
 
 两个带预编译原生依赖的 Android 应用（RecurringExpenseTracker、ScreenTime）都只编译
 **ARM**：其 `app.conf` 里的 `KEEP_ABIS="arm64-v8a armeabi-v7a"` 会让
@@ -189,7 +206,7 @@ build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 `baidunetgo.yml` 是桌面版对应的工作流：每天（`43 4 * * *`）运行，按
 `.watch-state.json` 的 `baidunetgo` 时间戳过 10 天闸门，用 `git ls-remote` 解析
 `pengstem/baidunetgo` 的 `main`；SHA 与 `desktop/.build-state.json` 不同时，把
-`desktop/baidunetgo/patches` 用 `git am -3` 重放到新 head（不适用时回退到上次成功
+`desktop/baidunetgo/patches` 用 `git am -3 --keep-cr` 重放到新 head（不适用时回退到上次成功
 构建的提交重试一次），用 `go tool mygo build` 构建 `linux/amd64,windows/amd64`，
 上传 `baidunetgo-x86-<sha>` artifact，同时把安装包发布到
 `baidunetgo-desktop-<version>-<short_sha>` 的 Release（`.deb`、`.tar.gz`、在
@@ -197,8 +214,13 @@ build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 安装版/便携版 `.zip`，不标 `latest`），并提交
 `desktop/baidunetgo/update.json`——补丁版在「设置 → 更新」里检查的 feed，地址
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
-在构建时内置进二进制。回退构建不会记录新 head，下一个 10 天窗口会继续重试；
-整个流程不碰 `fdroid/`。
+在构建时内置进二进制。回退构建不会记录新 head，下一个 10 天窗口会继续重试。
+同一条工作流里的第二个任务会构建队列中的 Android 客户端（与 build.yml 相同的
+SDK/JDK/keystore 步骤），用 patchwork 密钥签名，发布到
+`baidunetgo-android-<version>-<short_sha>` Release 与 F-Droid 仓库，并提交
+Android 更新 feed `fdroid/baidunetgo/update.json`
+（<https://software.sparkzh.top/baidunetgo/update.json>，由 `deploy-pages.yml`
+部署）。10 天窗口只在两个构建都完成之后才推进。
 
 最近一次完整构建
 （[run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167)）
@@ -242,6 +264,19 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 文件。变量未设置时返回上游原值。由于保留了 per-ABI 顺序
 （`111xx < 112xx < 113xx`），以后补发 `armeabi-v7a` 也不会与 arm64 版本冲突。
 
+**BaiduNetGo（Android）** 采用同一公式，revision 取补丁队列长度（没有
+`apps/<app>/` 目录可数提交）：
+
+```
+versionCode = 803 × 100 + 补丁数        （41 个补丁 -> 80341）
+versionName = "<上游 versionName>-patchwork"   （0.8.3 -> "0.8.3-patchwork"）
+```
+
+`scripts/build-baidunetgo-android.sh` 在构建前改写 prepared 树中的
+`android/app/build.gradle.kts`（与 `build-app.sh` 相同的文件改写方式），补丁数
+超过 99 时同样直接报错。桌面版自己的版本策略（`0.8.3` + `.<补丁数>` =
+`0.8.3.41`）不变。
+
 ## 仓库结构
 
 ```
@@ -254,17 +289,20 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 │   ├── screentime/{app.conf,patches/}   # 0001..0011，KEEP_ABIS=ARM
 │   └── fcitx5/{app.conf,patches/}       # 0001..0003
 ├── desktop/
-│   ├── baidunetgo/{app.conf,patches/}   # 0001..0022，x86 桌面构建
+│   ├── baidunetgo/{app.conf,patches/}   # 0001..0041，桌面版 + Android 客户端
 │   └── .build-state.json                # 上次成功构建的上游提交
 ├── .watch-state.json          # android / baidunetgo 的上次 10 天检查时间
 ├── scripts/
 │   ├── build-app.sh           # 拉上游、打补丁、改版本、构建、校验
 │   ├── baidunetgo-feed.py     # 生成更新 feed（update.json）
+│   ├── baidunetgo-android-feed.py # 生成 Android 更新 feed
 │   ├── build-baidunetgo.sh    # 拉上游、rebase 补丁队列、构建 x86 桌面版
+│   ├── build-baidunetgo-android.sh # 构建并签名队列中的 Android 客户端
 │   ├── build-baidunetgo-arch.sh # 容器里跑 makepkg，打 Arch 包
 │   ├── check-upstream.sh      # 上游 SHA 差异 -> CI 矩阵
 │   ├── publish-fdroid.sh      # 发布 APK 并签名索引
 │   ├── test-baidunetgo-feed.sh # 上面那个生成器的回归测试
+│   ├── test-baidunetgo-android-feed.sh # Android feed 的回归测试
 │   ├── test-publish-fdroid.sh # 发布脚本的回归测试
 │   └── sync-patches.sh        # 从作者仓库同步补丁队列
 ├── fdroid/
@@ -318,6 +356,11 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-baidunetgo.sh --prepare
 ./scripts/build-baidunetgo.sh --build
 PATCHWORK_PLATFORMS=linux/amd64 ./scripts/build-baidunetgo.sh   # 本地没有 NSIS 时
+
+# 同一条队列的 Android 客户端：先 --prepare，再跑 Gradle 构建并签名
+# （需要上面的 JDK 21 与 ANDROID_HOME）。默认使用仓库里的 patchwork 测试密钥。
+./scripts/build-baidunetgo-android.sh --out dist/baidunetgo-android
+./scripts/test-baidunetgo-android-feed.sh
 ```
 
 `dist/build-info.txt` 记录 `upstream_commit`、`patch_count`、`version_code`、
@@ -341,7 +384,7 @@ GIT_SSH_COMMAND='ssh -F /dev/null -o BatchMode=yes' \
 
 ## 更新补丁
 
-补丁仍在四个独立的 app clone 中开发；本仓库只消费导出的补丁文件。expenses 与
+补丁仍在五个独立的 app clone 中开发；本仓库只消费导出的补丁文件。expenses 与
 screentime 的队列放在 `.patchwork/patches/`（或 `patchwork` 分支）；fcitx5-android
 的队列在 `feat/rime-sync-manager` 分支上，用
 `git format-patch master..feat/rime-sync-manager` 导出；BaiduNetGo 的队列则直接
@@ -380,6 +423,12 @@ git add desktop/baidunetgo/patches
 git commit -m "Update the BaiduNetGo patch queue"
 git push origin main
 ```
+
+队列同时承载应用的两半 —— 桌面客户端，以及 Android 客户端加入之后的
+`android/` Gradle 工程 —— 其中一个补丁带入了 CRLF 行尾的
+`android/gradlew.bat`。裸的 `git am` 会剥掉所有行尾 CR（mailinfo 把补丁当作
+CRLF 格式的邮件处理），因此 `build-baidunetgo.sh` 用
+`git am -3 --keep-cr` 重放队列：重放出的树与作者 clone 的 `main` 树逐字节一致。
 
 `sync-patches.sh` 只认识三个 Android clone；桌面队列按上面的命令手动导出（工作流
 会在 10 天内重建，也可以手动运行 `baidunetgo.yml` 并勾选 `force`）。

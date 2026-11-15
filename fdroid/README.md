@@ -1,6 +1,6 @@
 # Patchwork F-Droid repository
 
-Personal builds of two open-source Android apps, automatically rebuilt from upstream
+Personal builds of open-source Android apps, automatically rebuilt from upstream
 plus a small patch queue by GitHub Actions.
 
 * Repository URL (F-Droid → Settings → Repositories → Add): <https://software.sparkzh.top/repo>

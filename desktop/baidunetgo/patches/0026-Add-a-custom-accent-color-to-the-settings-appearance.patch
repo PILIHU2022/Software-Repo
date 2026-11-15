@@ -20,15 +20,21 @@ diff --git a/CHANGELOG.md b/CHANGELOG.md
 index cfb7875..afcc2b3 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -8,2 +8,3 @@
+@@ -6,6 +6,7 @@
+ 
+ ### 新增
  
 +- 设置页「外观」新增「主题色」：八个预设色块（蓝、紫、粉、橙、绿、红、青、靛）一点即换，也可在「自定义…」里填任意 `#RRGGBB` / `#RGB`（弹窗里边填边预览，写错就地提示、不保存不关闭），还能用「默认」回到系统蓝；强调色与由它派生的悬停、按下、选中、焦点配色一起生效并保存在设置里，深色外观下自动提亮，按钮上的文字按底色明暗取黑或白以保证可读。「关于」同时新增一行显示当前版本号，第一行的应用名不再重复版本。
  - 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录（构建未内置更新签名密钥，下载的包不做签名校验）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
+ - Linux 上下载完的更新可就地安装并自动重启：设置页「更新」小节在下载后多出「安装并重启」按钮，把安装包里与正在运行的程序同名的二进制原子替换到运行路径上（先 `filepath.EvalSymlinks` 解析掉 `~/.local/bin` 之类的符号链接，替换的是真实文件，旧程序留作 `<exe>.old` 供回退），完成后 toast 并重启应用；由 pacman 或系统包管理器安装的程序（如 `/opt` 下，root 所有）目录不可写，会拒绝并提示改用包管理器更新，Windows/macOS 仍在下载后提示手动安装。Arch 用户也可以直接用 Software-Repo 发布的 `baidunetgo-<版本>-1-x86_64.pkg.tar.zst`（`sudo pacman -U …`）随包管理器更新，说明见 `docs/UPDATES.md`。
+ - 设置页「关于」新增社区修复版声明：本版本基于上游 pengstem/baidunetgo，由 DeepSeek 与 GLM 协作修复与增强；README 顶部也加了同样的说明。
 diff --git a/app/app.go b/app/app.go
 index b4f03c8..abedb38 100644
 --- a/app/app.go
 +++ b/app/app.go
-@@ -126,2 +126,9 @@ type App struct {
+@@ -124,6 +124,13 @@ type App struct {
+ 
+ 	queueMu sync.Mutex
  	queued  []func()
 +
 +	// accentEditing, accentDraft and accentErr are the settings page's
@@ -38,22 +44,30 @@ index b4f03c8..abedb38 100644
 +	accentDraft   string
 +	accentErr     string
  }
+ 
+ // New makes the app's state; Attach gives it its window.
 diff --git a/app/settings.go b/app/settings.go
 index 43cf18c..365a003 100644
 --- a/app/settings.go
 +++ b/app/settings.go
-@@ -49,2 +49,6 @@ type settings struct {
+@@ -47,6 +47,10 @@ type settings struct {
+ 	// UpdateChannel is which releases to follow, stable or beta; empty
+ 	// means stable. No feed publishes channels yet, so nothing reads it.
  	UpdateChannel string `json:"update_channel,omitempty"`
 +	// AccentColor is the interface's accent color as #rrggbb, the one the
 +	// 外观 section of the settings offers; empty keeps the theme's own,
 +	// the system blue.
 +	AccentColor string `json:"accent_color,omitempty"`
  }
+ 
+ // followSystemFont reports whether the interface follows fontconfig's
 diff --git a/app/settings_page.go b/app/settings_page.go
 index fa5ee61..6588f47 100644
 --- a/app/settings_page.go
 +++ b/app/settings_page.go
-@@ -360,2 +360,83 @@ func (a *App) updateDialog(c *ui.Context, t *ui.Theme, p *palette) {
+@@ -358,6 +358,87 @@ func (a *App) updateDialog(c *ui.Context, t *ui.Theme, p *palette) {
+ 	})
+ }
  
 +// accentRow is the 外观 section's 主题色: the preset colors as swatches, one
 +// press each, a way back to the theme's own color, and a dialog for a color
@@ -137,33 +151,54 @@ index fa5ee61..6588f47 100644
 +}
 +
  func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
-@@ -390,2 +471,3 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	s := &a.settings
+ 	ui.Scroll(c).Grow(1).Padding(12, 24, 40).Children(func() {
+@@ -388,6 +469,7 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 						a.applySettings()
+ 					}
  				})
 +				a.accentRow(c, t, p)
  			})
-@@ -417,3 +499,3 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 			section(c, t, p, "预览", func() {
+ 				if s.PreviewMB == 0 {
+@@ -415,11 +497,13 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 			})
+ 			a.updatesSection(c, t, p)
  			section(c, t, p, "关于", func() {
 -				settingRow(c, t, p, "BaiduNetGo", "", version()+" · 百度网盘的原生桌面客户端", func() {
 +				settingRow(c, t, p, "BaiduNetGo", "", "百度网盘的原生桌面客户端", func() {
  					if pill(c, t, p, "external-link", "项目主页", false).Clicked() {
-@@ -422,2 +504,4 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 						c.OpenURL("https://github.com/pengstem/baidunetgo")
+ 					}
  				})
 +				// 当前版本号：报问题、对更新说明时都要它，单独一行。
 +				settingRow(c, t, p, "版本", "", version(), func() {})
  				// 社区修复版的声明：谁改了什么。
-@@ -434,2 +518,3 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 				ui.Row(c).MinHeight(48).Padding(8, 0).Gap(12).AlignItems(ui.Center).Children(func() {
+ 					ui.Column(c).Grow(1).Shrink(1).Gap(3).Children(func() {
+@@ -432,6 +516,7 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 		})
+ 	})
  	a.updateDialog(c, t, p)
 +	a.accentDialog(c, t, p)
  }
+ 
+ // section is a group of settings under its title: a rounded gray panel,
 diff --git a/app/theme.go b/app/theme.go
 index 2487241..3646fcb 100644
 --- a/app/theme.go
 +++ b/app/theme.go
-@@ -3,2 +3,3 @@ package app
+@@ -1,6 +1,7 @@
+ package app
+ 
  import (
 +	"fmt"
  	"math"
-@@ -42,6 +43,20 @@ var (
+ 	"os"
+ 	"strconv"
+@@ -40,10 +41,24 @@ var (
+ 	lightPalette, darkPalette palette
+ )
  
 -func init() {
 -	accentLight := ui.Hex("#007aff")
@@ -187,7 +222,11 @@ index 2487241..3646fcb 100644
  
 +func init() {
  	t := ui.LightTheme()
-@@ -54,6 +69,3 @@ func init() {
+ 	t.Background = ui.Hex("#ffffff")
+ 	t.Surface = ui.Hex("#f2f2f4")
+@@ -52,15 +67,10 @@ func init() {
+ 	t.Border = ui.Hex("#e3e3e6")
+ 	t.Text = ui.Hex("#1d1d1f")
  	t.TextMuted = ui.Hex("#6e6e73")
 -	t.Accent = accentLight
 -	t.AccentHover = ui.Hex("#006ee6")
@@ -195,12 +234,16 @@ index 2487241..3646fcb 100644
 -	t.AccentText = ui.Hex("#ffffff")
 +	applyAccent(t, "")
  	t.Danger = ui.Hex("#ff3b30")
-@@ -61,4 +73,2 @@ func init() {
+ 	t.Success = ui.Hex("#34c759")
  	t.Warning = ui.Hex("#ff9500")
 -	t.Selection = accentLight.Alpha(0.22)
 -	t.Focus = accentLight.Alpha(0.5)
  	t.Radius = 6
-@@ -91,6 +101,3 @@ func init() {
+ 	t.FontSize = 13
+ 	lightTheme = t
+@@ -89,15 +99,10 @@ func init() {
+ 	d.Border = ui.Hex("#3a3a3c")
+ 	d.Text = ui.Hex("#f5f5f7")
  	d.TextMuted = ui.Hex("#98989d")
 -	d.Accent = accentDark
 -	d.AccentHover = ui.Hex("#2b95ff")
@@ -208,12 +251,16 @@ index 2487241..3646fcb 100644
 -	d.AccentText = ui.Hex("#ffffff")
 +	applyAccent(d, "")
  	d.Danger = ui.Hex("#ff453a")
-@@ -98,4 +105,2 @@ func init() {
+ 	d.Success = ui.Hex("#30d158")
  	d.Warning = ui.Hex("#ff9f0a")
 -	d.Selection = accentDark.Alpha(0.35)
 -	d.Focus = accentDark.Alpha(0.6)
  	d.Radius = 6
-@@ -121,2 +126,163 @@ func init() {
+ 	d.FontSize = 13
+ 	darkTheme = d
+@@ -119,6 +124,167 @@ func init() {
+ 	}
+ }
  
 +// accentPreset is one of the accent colors the settings page offers beside
 +// a color of the user's own.
@@ -377,7 +424,11 @@ index 2487241..3646fcb 100644
 +}
 +
  // The built-in font, used when the user does not follow fontconfig: 13
-@@ -140,4 +306,6 @@ var (
+ // DIP and MyGo's own system family. fontMinDIP and fontMaxDIP clamp what
+ // fontconfig reports, so a very small or huge setting stays usable.
+@@ -138,16 +304,20 @@ var (
+ )
+ 
  // applyTheme sets the app's theme for this frame, following the system's
 -// light or dark appearance and the user's font choice, and returns it with
 -// the matching palette.
@@ -386,14 +437,18 @@ index 2487241..3646fcb 100644
 +// frame: the themes are package-level, so a custom color cleared while it
 +// showed must give way to the default of the theme now in effect.
  func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
-@@ -146,2 +314,3 @@ func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
+ 	family, size := a.resolvedFont()
+ 	if c.Theme().Dark {
  		darkTheme.Font, darkTheme.FontSize = family, size
 +		applyAccent(darkTheme, a.settings.AccentColor)
  		c.SetTheme(darkTheme)
-@@ -150,2 +319,3 @@ func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
+ 		return darkTheme, &darkPalette
+ 	}
  	lightTheme.Font, lightTheme.FontSize = family, size
 +	applyAccent(lightTheme, a.settings.AccentColor)
  	c.SetTheme(lightTheme)
+ 	return lightTheme, &lightPalette
+ }
 diff --git a/app/theme_accent_test.go b/app/theme_accent_test.go
 new file mode 100644
 index 0000000..b6c4275

@@ -1,0 +1,758 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 22:34:48 +0800
+Subject: [PATCH] Keep the rubber band choosing what the list's edge covers
+ when the pointer is dragged out of the list and end it from any release in
+ the window, since a drag that left the page froze its choice or stuck the
+ band, and widen the choosing rectangle to 1 DIP so a straight drag picks the
+ rows it crosses.
+
+---
+ AGENTS.md                |   2 +-
+ CHANGELOG.md             |   2 +
+ CLAUDE.md                |   2 +-
+ README.md                |   2 +-
+ app/browser.go           | 128 ++++++++++--
+ app/files.go             |  16 ++
+ app/grid.go              |   4 +
+ app/marqueerange_test.go | 407 +++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 543 insertions(+), 20 deletions(-)
+ create mode 100644 app/marqueerange_test.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 44dedf7..7a062ad 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -104,4 +104,4 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+ - Sidebar icons are drawn in code (`app/navicons.go`) so their parts can move; `navGlyph` takes the time into the gesture. A page's icon plays once when the page opens (`a.navRun`).
+-- The browser's pointer gestures (`marquee` and the move drag in `app/browser.go`): the page's `ObserveInput` (the capture phase) sees every pointer press, move and release in it, in window coordinates (`page.PointerPosition` plus the page's box). A press on a row or a grid tile — `l.rowRects`, filled each frame with each list row's `Bounds`, and `gridSpot.rect` — begins a move drag once the pointer goes `marqueeSlop` DIPs: it drags the whole choice when the pressed item is one of it, else it chooses just that item and drags it (a plain click still chooses by MyGo's `ListState`). While dragging, `page.DrawOver` paints a translucent card that follows the pointer (icon + name, or "N 项") and lights the folder under it (`l.moveTarget`/`l.moveTargetRect`: a folder row, a folder tile, or a breadcrumb from `l.crumbRects`); the release moves the files with `moveOrCopyAfter`, refusing the same folder, the folder itself and its own subfolders, and asking `place` about clashing names, while a release on blank space or off the window cancels. A press on the list's or grid's blank space instead paints the rubber band — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke, rounded, clipped to `l.dragArea` — and chooses the rows (`l.rowRects`) or tiles (`gridSpot.rect`) it intersects, replacing the choice or, with Cmd held at the press, adding to it (`l.dragBase`); a blank-space press let go without dragging (both of the box's sides under `marqueeSlop`) is a click on empty space, which clears the choice (`l.sel.Clear()`, `l.selected = -1`) unless Cmd was held at the press, which adds and keeps it; MyGo's `ListState.DragSelect` is off. A release over the title bar is not under the page, so `filesToolbar`'s own `ObserveInput` ends a drag dropped on a breadcrumb or let go over the tools, and a canceled or fresh press clears any leftover state. Both gestures are hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
++- The browser's pointer gestures (`marquee` and the move drag in `app/browser.go`): the page's `ObserveInput` (the capture phase) sees every pointer press in it, in window coordinates (its box plus the event's local point), and the root's `ObserveInput` sees every release in the window, so letting go over the title bar or the sidebar — not under the page — still ends the gesture (`a.pointerUp`, which also drops a dragged file there) and clears the band; while a gesture runs the pointer's place comes from `c.Root().PointerPosition()`, the column covering the whole window, so moves off the page still reach the view (the page alone gets none), with `l.dragAt` keeping the last place seen on the window for a frame that tells none, and `l.gestureEl` (this frame's list or grid) ending a band whose press the window saw go while the pointer was off the window. A press on a row or a grid tile — `l.rowRects`, filled each frame with each list row's `Bounds`, and `gridSpot.rect` — begins a move drag once the pointer goes `marqueeSlop` DIPs: it drags the whole choice when the pressed item is one of it, else it chooses just that item and drags it (a plain click still chooses by MyGo's `ListState`). While dragging, `page.DrawOver` paints a translucent card that follows the pointer (icon + name, or "N 项") and lights the folder under it (`l.moveTarget`/`l.moveTargetRect`: a folder row, a folder tile, or a breadcrumb from `l.crumbRects`); the release moves the files with `moveOrCopyAfter`, refusing the same folder, the folder itself and its own subfolders, and asking `place` about clashing names, while a release on blank space or off the window cancels. A press on the list's or grid's blank space instead paints the rubber band — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke, rounded, clipped to `l.dragArea` — and chooses the rows (`l.rowRects`) or tiles (`gridSpot.rect`) it intersects, replacing the choice or, with Cmd held at the press, adding to it (`l.dragBase`); its pointer is clamped to the choice's area first (`choiceArea`: `l.dragArea` widened to the furthest row or tile edge, `l.contentBottom`/`l.contentRight`, as the list pads its foot 16 DIP and its sides 10), so a pointer dragged past the list's edge parks the box on the edge and the choice is what that edge covers, and the choosing rectangle is widened to at least 1 DIP each way around a line (`choiceRect`), so a drag straight up, down or across still crosses the rows or tiles it goes through (a zero-width rectangle crosses none by `rectIntersects`' strict test); the choice is recomputed only when that clamped rectangle changes (`l.dragLast`), so hanging past the edge costs no scan; a blank-space press let go without dragging (both of the box's sides under `marqueeSlop`) is a click on empty space, which clears the choice (`l.sel.Clear()`, `l.selected = -1`) unless Cmd was held at the press, which adds and keeps it; MyGo's `ListState.DragSelect` is off. A release over the title bar is not under the page, so `filesToolbar`'s own `ObserveInput` ends a drag dropped on a breadcrumb or let go over the tools as well, and a canceled or fresh press clears any leftover state. Both gestures are hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index dab9fa1..79dba51 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -25,6 +25,8 @@
+ 
+ ### 修复
+ 
++- 修复选择框（弹力框）拖出列表 / 网格边缘就停止、选择冻结的问题：框选进行时指针位置改从覆盖整个窗口的根元素读取，每帧先把指针钳制到列表可视区（列表 / 网格的底边与右边取视口和最后一行 / 列的并集）再算矩形，越界后框停在列表边界、选择是边界处最后框到的项目，继续越界不再变化，回到列表内又继续跟随；松开鼠标无论落在列表内、标题栏、侧栏还是窗口外都能正常结束（窗口外由列表 / 网格自己的按下状态兜底），不再留下卡住的框。
++- 修复纯竖直或纯水平拖动框选不中任何行 / 瓦片的问题：用于选择判定的矩形在两个方向上都补到至少 1 DIP（绘制本来就把线补成 1px），从行边缘外侧竖直拖也能选中经过的行。
+ - 修复修复版启动脚本把 XDG 配置目录（`XDG_CONFIG_HOME`）指到独立 profile，连带 fontconfig、GTK、dconf 都换了目录，用户的 `fonts.conf` 不再生效、界面字体回落到 Droid Sans 的问题——这正是“fontconfig 里的字体无法应用”的真正原因：新增 `BAIDUNETGO_PROFILE`，`main.go` 用它只改本应用的数据/缓存目录（`mygo.App.SetPath` 的 PathUserData / PathCache，在窗口打开前设置），不再动任何 XDG 变量；`tools/install-patched-local.sh` 的启动脚本改用它，并沿用原来 `~/.config/baidunetgo-patched-profile/BaiduNetGo` 里的登录与设置，已登录用户不会掉登录态。
+ - 修复界面字体只取 fontconfig 解析出的第一个族名、丢掉 fallback 链的问题：改为按 `fc-match -s` 取有序的完整 family 链——fonts.conf prepend 的首选字体，加上为缺字准备的 Noto Sans / Twemoji 等回落字体——英文族名优先、去重、去掉 `System` / `sans-serif` 等占位名、最多 6 个，再交给 MyGo 的 `ui.Theme.Font`；字号仍取最佳匹配的 pt 换算成 DIP 并限幅 11–17。设置页「外观」现在显示实际生效的完整链与 pt/DIP，并新增「重新检测」按钮（装了新字体不必重启）。此前只传第一个族名，缺字、emoji 与符号会落到别的字体，观感就是“字体没完全应用”。
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index fe87443..5f6a2a6 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -105,4 +105,4 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+ - Sidebar icons are drawn in code (`app/navicons.go`) so their parts can move; `navGlyph` takes the time into the gesture. A page's icon plays once when the page opens (`a.navRun`).
+-- The browser's pointer gestures (`marquee` and the move drag in `app/browser.go`): the page's `ObserveInput` (the capture phase) sees every pointer press, move and release in it, in window coordinates (`page.PointerPosition` plus the page's box). A press on a row or a grid tile — `l.rowRects`, filled each frame with each list row's `Bounds`, and `gridSpot.rect` — begins a move drag once the pointer goes `marqueeSlop` DIPs: it drags the whole choice when the pressed item is one of it, else it chooses just that item and drags it (a plain click still chooses by MyGo's `ListState`). While dragging, `page.DrawOver` paints a translucent card that follows the pointer (icon + name, or "N 项") and lights the folder under it (`l.moveTarget`/`l.moveTargetRect`: a folder row, a folder tile, or a breadcrumb from `l.crumbRects`); the release moves the files with `moveOrCopyAfter`, refusing the same folder, the folder itself and its own subfolders, and asking `place` about clashing names, while a release on blank space or off the window cancels. A press on the list's or grid's blank space instead paints the rubber band — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke, rounded, clipped to `l.dragArea` — and chooses the rows (`l.rowRects`) or tiles (`gridSpot.rect`) it intersects, replacing the choice or, with Cmd held at the press, adding to it (`l.dragBase`); a blank-space press let go without dragging (both of the box's sides under `marqueeSlop`) is a click on empty space, which clears the choice (`l.sel.Clear()`, `l.selected = -1`) unless Cmd was held at the press, which adds and keeps it; MyGo's `ListState.DragSelect` is off. A release over the title bar is not under the page, so `filesToolbar`'s own `ObserveInput` ends a drag dropped on a breadcrumb or let go over the tools, and a canceled or fresh press clears any leftover state. Both gestures are hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
++- The browser's pointer gestures (`marquee` and the move drag in `app/browser.go`): the page's `ObserveInput` (the capture phase) sees every pointer press in it, in window coordinates (its box plus the event's local point), and the root's `ObserveInput` sees every release in the window, so letting go over the title bar or the sidebar — not under the page — still ends the gesture (`a.pointerUp`, which also drops a dragged file there) and clears the band; while a gesture runs the pointer's place comes from `c.Root().PointerPosition()`, the column covering the whole window, so moves off the page still reach the view (the page alone gets none), with `l.dragAt` keeping the last place seen on the window for a frame that tells none, and `l.gestureEl` (this frame's list or grid) ending a band whose press the window saw go while the pointer was off the window. A press on a row or a grid tile — `l.rowRects`, filled each frame with each list row's `Bounds`, and `gridSpot.rect` — begins a move drag once the pointer goes `marqueeSlop` DIPs: it drags the whole choice when the pressed item is one of it, else it chooses just that item and drags it (a plain click still chooses by MyGo's `ListState`). While dragging, `page.DrawOver` paints a translucent card that follows the pointer (icon + name, or "N 项") and lights the folder under it (`l.moveTarget`/`l.moveTargetRect`: a folder row, a folder tile, or a breadcrumb from `l.crumbRects`); the release moves the files with `moveOrCopyAfter`, refusing the same folder, the folder itself and its own subfolders, and asking `place` about clashing names, while a release on blank space or off the window cancels. A press on the list's or grid's blank space instead paints the rubber band — a faint `t.Accent.Alpha(0.12)` fill and a 1px `t.Accent` stroke, rounded, clipped to `l.dragArea` — and chooses the rows (`l.rowRects`) or tiles (`gridSpot.rect`) it intersects, replacing the choice or, with Cmd held at the press, adding to it (`l.dragBase`); its pointer is clamped to the choice's area first (`choiceArea`: `l.dragArea` widened to the furthest row or tile edge, `l.contentBottom`/`l.contentRight`, as the list pads its foot 16 DIP and its sides 10), so a pointer dragged past the list's edge parks the box on the edge and the choice is what that edge covers, and the choosing rectangle is widened to at least 1 DIP each way around a line (`choiceRect`), so a drag straight up, down or across still crosses the rows or tiles it goes through (a zero-width rectangle crosses none by `rectIntersects`' strict test); the choice is recomputed only when that clamped rectangle changes (`l.dragLast`), so hanging past the edge costs no scan; a blank-space press let go without dragging (both of the box's sides under `marqueeSlop`) is a click on empty space, which clears the choice (`l.sel.Clear()`, `l.selected = -1`) unless Cmd was held at the press, which adds and keeps it; MyGo's `ListState.DragSelect` is off. A release over the title bar is not under the page, so `filesToolbar`'s own `ObserveInput` ends a drag dropped on a breadcrumb or let go over the tools as well, and a canceled or fresh press clears any leftover state. Both gestures are hidden while the preview, a dialog, an in-place rename or the folder maker has the pointer, and while files from another app are dragged in (`l.over`).
+diff --git a/README.md b/README.md
+index b7f67e6..039ea22 100644
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@
+ ## 特性
+ 
+ - **登录**：百度网盘 App 扫码，或粘贴 Cookie / BDUSS+STOKEN；也能直接沿用本机百度网盘 Linux 客户端或 BaiduPCS-Go 的登录。凭据用 AES-GCM 加密保存，密钥放在系统钥匙串
+-- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；从列表或网格的空白处按住左键拖动会显示选择框（弹力框）并选中框住的行 / 瓦片（按住 ⌘ 追加选择），框选后单击空白处取消选择；拖动文件或文件夹则是移动它们（按下即选中被拖的项目，已在选择中的则整批拖动），拖动时显示跟随指针的半透明卡片，悬停在文件夹行、网格文件夹瓦片或面包屑上会高亮，松开即移动过去，松开在空白处或窗口外取消；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；路径栏右侧是一条工具栏，放着新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传，窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏再把上层文件夹收进「…」
++- **浏览**：列表 / 网格两种视图，按名称（拼音）、大小、日期排序，面包屑、前进后退、全盘搜索；从列表或网格的空白处按住左键拖动会显示选择框（弹力框）并选中框住的行 / 瓦片（按住 ⌘ 追加选择），框选后单击空白处取消选择；拉框拖出列表边缘时框选不会中断，框会停在边界、选择停在边界处最后覆盖的项目，继续拖出去也不再变化，回到列表内又继续跟随，松开鼠标在列表外也能正常结束；拖动文件或文件夹则是移动它们（按下即选中被拖的项目，已在选择中的则整批拖动），拖动时显示跟随指针的半透明卡片，悬停在文件夹行、网格文件夹瓦片或面包屑上会高亮，松开即移动过去，松开在空白处或窗口外取消；文件详情（`⌘I`）显示类型、字节数、位置、时间和 MD5；路径栏右侧是一条工具栏，放着新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传，窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏再把上层文件夹收进「…」
+ - **不落盘预览**：文件只读进内存
+   - 图片：支持 SVG 矢量和 GIF 动画，从缩略图"长"出来的共享元素动画，滚轮缩放、拖拽平移、←/→ 切换；可复制图片（按 EXIF 方向摆正，SVG 转 PNG，GIF 取首帧）
+   - 文本与代码（语法高亮，UTF-8 / GB18030 自动识别）、Markdown 渲染，可一键复制全文
+diff --git a/app/browser.go b/app/browser.go
+index bbc9001..1d4c3f6 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -54,7 +54,8 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 		// The page sees every pointer press and release in it, whatever
+ 		// takes it, so a drag from the rows' blank space or a tile's gap
+ 		// counts too, and the release ends it. A release over the title bar
+-		// does not come here but to filesToolbar's listener.
++		// or the sidebar is not under the page: the root's listener below
++		// ends the gesture there.
+ 		switch ev.Kind {
+ 		case ui.InputPointerDown:
+ 			if ev.Button == 0 {
+@@ -64,19 +65,24 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 			}
+ 		case ui.InputPointerUp:
+ 			if ev.Button == 0 {
+-				if l.moveDrag && !ev.Canceled {
+-					a.dropMove(l, ui.Point{X: pageBox.X + ev.X, Y: pageBox.Y + ev.Y})
+-				} else if blankClick(l) && !ev.Canceled {
+-					// A click on the list's or grid's blank space, not a
+-					// marquee drag, clears the choice, as a click outside
+-					// the rows does in Finder. A Cmd-click adds instead,
+-					// so blankClick is false and the choice stays.
+-					a.clearChoice(l)
+-				}
+-				a.endDrag(l)
++				a.pointerUp(l, ui.Point{X: pageBox.X + ev.X, Y: pageBox.Y + ev.Y}, ev.Canceled)
+ 			}
+ 		}
+ 	})
++	// A release over the title bar or the sidebar is not under the page, so
++	// the page's ObserveInput does not see it and the band would stay on.
++	// The root is the column the whole window is: it sees that release too,
++	// wherever the pointer lets go inside the window, and ends the gesture
++	// there (a release over the title bar reaches filesToolbar as well). It
++	// is attached only while a pointer gesture runs, so idle frames add no
++	// observer.
++	if l.pressDown || l.dragOn {
++		c.Root().ObserveInput(func(ev ui.InputEvent) {
++			if ev.Kind == ui.InputPointerUp && ev.Button == 0 {
++				a.pointerUp(l, ui.Point{X: ev.X, Y: ev.Y}, ev.Canceled)
++			}
++		})
++	}
+ 	// Files dragged over the window light the maker, brought into view.
+ 	if over := page.FileDragOver(); over != l.over {
+ 		if l.over = over; over && l.loaded {
+@@ -174,6 +180,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 	tops := a.rowTops(l, now)
+ 	l.rowsBuilt = map[int64]float32{}
+ 	l.rowRects = map[int64]ui.Rect{}
++	l.contentBottom, l.contentRight = 0, 0
+ 	if l.glides == nil {
+ 		l.glides = map[int64]rowGlide{}
+ 	}
+@@ -185,6 +192,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 		rows++
+ 	}
+ 	list := ui.List(c, &l.list, rows).Grow(1).Padding(0, 10, 16)
++	l.gestureEl = list // the element a blank press lands on, for the band
+ 	outer, enter := c, false
+ 	list.Rows(func(row ui.ListRow) {
+ 		if enterRenames && !enter {
+@@ -278,7 +286,11 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 			}
+ 		})
+ 		if !draft {
+-			l.rowRects[f.FsID] = r.Bounds() // where a drag or a drop finds it
++			if r := r.Bounds(); r.W > 0 {
++				l.rowRects[f.FsID] = r // where a drag or a drop finds it
++				l.contentRight = max(l.contentRight, r.X+r.W)
++				l.contentBottom = max(l.contentBottom, r.Y+r.H)
++			}
+ 		}
+ 		if !passing && !draft {
+ 			a.fileMenu(r, l, row.Index)
+@@ -328,6 +340,7 @@ func (a *App) endDrag(l *listing) {
+ 	l.dragRect = ui.Rect{}
+ 	l.dragBase = nil
+ 	l.dragInView = false
++	l.dragAt, l.dragAtOK = ui.Point{}, false
+ }
+ 
+ // blankClick reports whether the release of a press was a click on the
+@@ -365,9 +378,7 @@ func (a *App) marquee(c *ui.Context, t *ui.Theme, p *palette, l *listing, page u
+ 		}
+ 		return
+ 	}
+-	b := page.Bounds()
+-	x, y, _ := page.PointerPosition()
+-	at := ui.Point{X: b.X + x, Y: b.Y + y}
++	at := dragPointer(c, l)
+ 	if l.pressNew {
+ 		l.pressNew = false
+ 		a.pressBegin(l, at)
+@@ -384,7 +395,17 @@ func (a *App) marquee(c *ui.Context, t *ui.Theme, p *palette, l *listing, page u
+ 	if !l.dragOn {
+ 		return
+ 	}
+-	rect := marqueeRect(l.dragFrom, at, l.dragArea)
++	if l.gestureEl.Valid() {
++		// The pointer's press ended where no observer could see it, off the
++		// window (the platform took the moves and the release away): the
++		// element the press landed on knows. End the gesture, keeping the
++		// choice a band made.
++		if _, held := l.gestureEl.PressedButton(); !held {
++			a.endDrag(l)
++			return
++		}
++	}
++	rect := marqueeRect(l.dragFrom, at, choiceArea(l))
+ 	if rect.W < marqueeSlop && rect.H < marqueeSlop {
+ 		l.dragRect = ui.Rect{} // a click, not yet a drag
+ 		return
+@@ -413,6 +434,47 @@ func (a *App) marquee(c *ui.Context, t *ui.Theme, p *palette, l *listing, page u
+ 	a.dragScroll(c, l, at)
+ }
+ 
++// dragPointer returns where the pointer is, in the window, for the gesture.
++// It comes from the root, the column the whole window is, rather than from
++// the page: root moves reach the view even when the pointer is over the
++// title bar, the sidebar or past the list's edge, where the page alone is
++// told nothing and a band would freeze. The root's coordinates are the
++// pointer's even off the window, since a press keeps the pointer's grab on
++// Linux and macOS, so the clamp below can put the band's edge on the list's
++// border; dragAt is the last place the pointer showed on the window, kept
++// for a frame that has no position at all (before the root is laid out).
++func dragPointer(c *ui.Context, l *listing) ui.Point {
++	x, y, over := c.Root().PointerPosition()
++	switch {
++	case over:
++		l.dragAt, l.dragAtOK = ui.Point{X: x, Y: y}, true
++		return l.dragAt
++	case l.dragAtOK && c.Root().Bounds().W > 0:
++		// Off the window: where the pointer went still reaches us, and the
++		// clamp takes the band to the list's edge; a platform that stops
++		// telling leaves x and y at the last place it told.
++		return ui.Point{X: x, Y: y}
++	case l.dragAtOK:
++		return l.dragAt
++	default:
++		return l.dragFrom
++	}
++}
++
++// pointerUp ends the gesture at at, wherever its release came: a dragged
++// file dropped there, else a click on the list's or grid's blank space,
++// which clears the choice, as a click outside the rows does in Finder (a
++// Cmd-click adds instead, so blankClick is false and the choice stays);
++// then the gesture ends.
++func (a *App) pointerUp(l *listing, at ui.Point, canceled bool) {
++	if l.moveDrag && !canceled {
++		a.dropMove(l, at)
++	} else if blankClick(l) && !canceled {
++		a.clearChoice(l)
++	}
++	a.endDrag(l)
++}
++
+ // farApart reports whether a and b are more than d DIPs apart.
+ func farApart(a, b ui.Point, d float32) bool {
+ 	dx, dy := a.X-b.X, a.Y-b.Y
+@@ -637,6 +699,7 @@ func (a *App) dragScroll(c *ui.Context, l *listing, at ui.Point) {
+ // listMarquee chooses the list's rows the box crosses: those it holds,
+ // plus, with Cmd held at the press, those chosen before.
+ func (a *App) listMarquee(l *listing, rect ui.Rect) {
++	rect = choiceRect(rect)
+ 	if rect == l.dragLast {
+ 		return
+ 	}
+@@ -659,6 +722,7 @@ func (a *App) listMarquee(l *listing, rect ui.Rect) {
+ // gridMarquee chooses the grid's tiles the box crosses, as listMarquee the
+ // rows.
+ func (a *App) gridMarquee(l *listing, rect ui.Rect) {
++	rect = choiceRect(rect)
+ 	if rect == l.dragLast {
+ 		return
+ 	}
+@@ -675,6 +739,36 @@ func (a *App) gridMarquee(l *listing, rect ui.Rect) {
+ 	l.selected = -1
+ }
+ 
++// choiceRect gives a marquee at least 1 DIP each way, centred on the line a
++// drag straight up, down or across makes: a zero-width or zero-height
++// rectangle crosses no row or tile by rectIntersects' strict test, so the
++// drawn 1px line would choose nothing. The drawing widens its line to 1px
++// too, without the centring, as it only has to show.
++func choiceRect(rect ui.Rect) ui.Rect {
++	if rect.W < 1 {
++		rect.X -= (1 - rect.W) / 2
++		rect.W = 1
++	}
++	if rect.H < 1 {
++		rect.Y -= (1 - rect.H) / 2
++		rect.H = 1
++	}
++	return rect
++}
++
++// choiceArea is where the band is clamped: the viewport, widened to the
++// furthest row or tile edge built this frame when one shows past it. The
++// list pads its foot 16 DIP and its sides 10, the grid its edges too, so the
++// viewport usually reaches past the last row or column and the pointer
++// clamped to it crosses them; the union keeps that true where a clipped row
++// or tile shows past the viewport's edge.
++func choiceArea(l *listing) ui.Rect {
++	area := l.dragArea
++	area.W = max(area.W, l.contentRight-area.X)
++	area.H = max(area.H, l.contentBottom-area.Y)
++	return area
++}
++
+ // marqueeRect is the rectangle from a to b, clipped to area.
+ func marqueeRect(a, b ui.Point, area ui.Rect) ui.Rect {
+ 	x0, x1 := min(a.X, b.X), max(a.X, b.X)
+@@ -1262,7 +1356,7 @@ func (a *App) filesToolbar(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 	bar := ui.Row(c).Grow(1).Gap(0).AlignItems(ui.Center)
+ 	// A release over the title bar does not reach the page's ObserveInput
+ 	// (the page is not under it), so a drag dropped on a breadcrumb, or let
+-	// go over the tools, ends here.
++	// go over the tools, ends here as well as at the root's listener.
+ 	bar.ObserveInput(func(ev ui.InputEvent) {
+ 		if ev.Kind != ui.InputPointerUp || ev.Button != 0 {
+ 			return
+diff --git a/app/files.go b/app/files.go
+index fcdfe24..d98ed8b 100644
+--- a/app/files.go
++++ b/app/files.go
+@@ -64,6 +64,22 @@ type listing struct {
+ 	dragAdd  bool     // Cmd was held at the press: add to the choice
+ 	dragBase []int64  // the choice a Cmd drag adds to
+ 	dragLast ui.Rect  // the rectangle the choice was made by, to skip a repeat
++	// dragAt is the last place the pointer was seen in the window while a
++	// gesture ran, kept for a frame that tells no pointer position at all;
++	// the root, which covers the whole window, gives it wherever the
++	// pointer goes, even off the page.
++	dragAt   ui.Point
++	dragAtOK bool
++	// contentBottom and contentRight are the furthest row or tile edge
++	// built this frame, in the window: the box's clamp reaches them even
++	// where the viewport's padding ends first, so the last row or column
++	// is chosen when the pointer is dragged to the edge.
++	contentBottom, contentRight float32
++	// gestureEl is this frame's list or grid, the element a blank press
++	// lands on: the frame can ask it whether the pointer still presses it,
++	// which ends the band even when the release came off the window and no
++	// observer saw it. It is valid for the frame it was built in only.
++	gestureEl ui.Element
+ 
+ 	// Moving the files by dragging them: movePress says the press landed on
+ 	// an item and a drag may still begin; moveDrag says it began and the
+diff --git a/app/grid.go b/app/grid.go
+index 2b467fe..1e83bd6 100644
+--- a/app/grid.go
++++ b/app/grid.go
+@@ -56,9 +56,11 @@ func gridCols(w float32) int {
+ // several, and a double click or Enter opens it.
+ func (a *App) tileGrid(c *ui.Context, l *listing, maker func(e ui.Element), tile func(i int, e ui.Element)) {
+ 	g := &l.grid
++	l.contentBottom, l.contentRight = 0, 0
+ 	n := len(l.files)
+ 	grid := ui.Scroll(c.Key("grid")).Grow(1).Padding(gridPadTop, gridPadX, gridPadEnd).
+ 		TrackScroll(&g.scroll).Focusable().FocusRing(false).Role(ui.RoleList).Label("文件")
++	l.gestureEl = grid // the element a blank press lands on, for the band
+ 	// The width the tiles had in the last frame, which the layout will
+ 	// keep but for a resize; a resize that brings another number of
+ 	// columns builds the frame after it again.
+@@ -140,6 +142,8 @@ func (a *App) tileGrid(c *ui.Context, l *listing, maker func(e ui.Element), tile
+ 					tile(i, e)
+ 				})
+ 				spot.rect = slot.Bounds()
++				l.contentRight = max(l.contentRight, spot.rect.X+spot.rect.W)
++				l.contentBottom = max(l.contentBottom, spot.rect.Y+spot.rect.H)
+ 				g.built[id] = spot
+ 			}
+ 		})
+diff --git a/app/marqueerange_test.go b/app/marqueerange_test.go
+new file mode 100644
+index 0000000..be9d3ea
+--- /dev/null
++++ b/app/marqueerange_test.go
+@@ -0,0 +1,407 @@
++package app
++
++import (
++	"fmt"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/baidu"
++	"github.com/pengstem/baidunetgo/internal/fakepan"
++)
++
++// marqueeFrom presses at a and drags the pointer to each point of to in
++// order, a few frames apart, leaving the button pressed: the caller
++// releases. The points may leave the list and the window.
++func marqueeFrom(tt *ui.Tester, a ui.Point, to ...ui.Point) {
++	tt.Press(a.X, a.Y)
++	tt.Frame()
++	dragThrough(tt, a, to...)
++}
++
++// dragThrough moves the pointer, already pressed, through to in order.
++func dragThrough(tt *ui.Tester, from ui.Point, to ...ui.Point) {
++	for _, p := range to {
++		for i := 1; i <= 6; i++ {
++			f := float32(i) / 6
++			tt.Move(lerp(from.X, p.X, f), lerp(from.Y, p.Y, f))
++			tt.Frame()
++		}
++		from = p
++	}
++}
++
++// chosen reports whether the listing chose exactly ids.
++func chosen(l *listing, ids ...int64) bool {
++	if l.sel.Len() != len(ids) {
++		return false
++	}
++	for _, id := range ids {
++		if !l.sel.Has(id) {
++			return false
++		}
++	}
++	return true
++}
++
++func ids(files []baidu.File) []int64 {
++	out := make([]int64, len(files))
++	for i, f := range files {
++		out[i] = f.FsID
++	}
++	return out
++}
++
++// TestMarqueeBeyondListBottom drags the band across the last three rows of
++// the list from the blank strip at its right edge, keeps going out of the
++// list's bottom, and says the choice stays the three rows while the box
++// stops at the list's edge, and the release keeps them.
++func TestMarqueeBeyondListBottom(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	n := len(l.files)
++	if n < 4 {
++		t.Fatalf("need a few rows, have %d", n)
++	}
++	area := l.dragArea
++	last3 := l.files[n-3:]
++	top := l.rowRects[last3[0].FsID].Y + 2 // the third from last row
++	start := ui.Point{X: area.X + area.W - 2, Y: top}
++	inside := ui.Point{X: area.X + 540, Y: top}
++	marqueeFrom(tt, start, inside, ui.Point{X: inside.X, Y: area.Y + area.H + 200})
++	if !l.dragOn {
++		t.Fatalf("the drag ended at the list's bottom")
++	}
++	if !chosen(l, ids(last3)...) {
++		t.Fatalf("beyond the bottom chose %d, want the last three rows", l.sel.Len())
++	}
++	if got := l.dragRect.Y + l.dragRect.H; got != area.Y+area.H {
++		t.Errorf("the box stops at y=%v, want the list's bottom %v", got, area.Y+area.H)
++	}
++	if got := l.dragRect.X; got != inside.X {
++		t.Errorf("the box starts at x=%v, want %v", got, inside.X)
++	}
++	// Going on out of the list, and out of the window, changes nothing.
++	dragThrough(tt, inside, ui.Point{X: inside.X, Y: area.Y + area.H + 400})
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("another 200 DIP beyond the bottom chose %d, want the same three", l.sel.Len())
++	}
++	// Back in the window to let go: the choice stays.
++	tt.Move(inside.X, 755)
++	tt.Frame()
++	tt.Release(inside.X, 755)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("the band stayed after the release: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("the release kept %d chosen, want the last three rows", l.sel.Len())
++	}
++}
++
++// TestMarqueeBeyondListTop drags up out of the list's top after covering
++// three rows: the box stops at the list's top edge and the choice is what
++// that edge covers, and going on above it keeps both.
++func TestMarqueeBeyondListTop(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	n := len(l.files)
++	area := l.dragArea
++	start := ui.Point{X: area.X + 300, Y: area.Y + area.H - 12}
++	third := l.rowRects[l.files[n-3].FsID].Y + 2
++	marqueeFrom(tt, start, ui.Point{X: start.X, Y: third})
++	if !chosen(l, ids(l.files[n-3:])...) {
++		t.Fatalf("the box over the last three rows chose %d", l.sel.Len())
++	}
++	// Above the list's edge, in the title bar.
++	dragThrough(tt, ui.Point{X: start.X, Y: third}, ui.Point{X: start.X, Y: area.Y - 40})
++	if !l.dragOn {
++		t.Fatalf("the drag ended at the list's top")
++	}
++	if got := l.dragRect.Y; got != area.Y {
++		t.Errorf("the box stops at y=%v, want the list's top %v", got, area.Y)
++	}
++	if l.sel.Len() != n {
++		t.Errorf("above the top chose %d, want all %d rows the box covers", l.sel.Len(), n)
++	}
++	all := ids(l.files)
++	from := ui.Point{X: start.X, Y: area.Y - 40}
++	for _, y := range []float32{20, 5, area.Y - 100} {
++		dragThrough(tt, from, ui.Point{X: start.X, Y: y})
++		from = ui.Point{X: start.X, Y: y}
++		if !chosen(l, all...) || l.dragRect.Y != area.Y {
++			t.Errorf("moving on at y=%v chose %d, want the same rows with the box at the top", y, l.sel.Len())
++		}
++	}
++	tt.Release(start.X, 20)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("the band stayed after a release over the title bar: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	if !chosen(l, all...) {
++		t.Errorf("the release kept %d, want all %d rows", l.sel.Len(), n)
++	}
++}
++
++// TestMarqueeBeyondListLeft drags across the last three rows, then left out
++// of the list into the sidebar: the box stops at the list's left edge and
++// the choice stays, and a release over the sidebar ends it.
++func TestMarqueeBeyondListLeft(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	n := len(l.files)
++	area := l.dragArea
++	last3 := l.files[n-3:]
++	start := ui.Point{X: area.X + 400, Y: area.Y + area.H - 12}
++	up := ui.Point{X: start.X, Y: l.rowRects[last3[0].FsID].Y + 2}
++	marqueeFrom(tt, start, up)
++	if !chosen(l, ids(last3)...) {
++		t.Fatalf("the box over the last three rows chose %d", l.sel.Len())
++	}
++	dragThrough(tt, up, ui.Point{X: area.X - 40, Y: up.Y})
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("out of the left edge chose %d, want the same three", l.sel.Len())
++	}
++	if got := l.dragRect.X; got != area.X {
++		t.Errorf("the box stops at x=%v, want the list's left %v", got, area.X)
++	}
++	dragThrough(tt, ui.Point{X: area.X - 40, Y: up.Y}, ui.Point{X: 20, Y: up.Y})
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("further left chose %d, want the same three", l.sel.Len())
++	}
++	tt.Release(20, up.Y)
++	tt.Frame()
++	if l.dragOn {
++		t.Errorf("a release over the sidebar left the band on")
++	}
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("a release over the sidebar kept %d, want the same three", l.sel.Len())
++	}
++}
++
++// TestMarqueeBeyondListRight drags across the last three rows, then right
++// out of the list and the window: the box stops at the list's right edge
++// and the choice stays, and coming back to let go keeps it.
++func TestMarqueeBeyondListRight(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	n := len(l.files)
++	area := l.dragArea
++	last3 := l.files[n-3:]
++	start := ui.Point{X: area.X + 400, Y: area.Y + area.H - 12}
++	up := ui.Point{X: start.X, Y: l.rowRects[last3[0].FsID].Y + 2}
++	marqueeFrom(tt, start, up)
++	if !chosen(l, ids(last3)...) {
++		t.Fatalf("the box over the last three rows chose %d", l.sel.Len())
++	}
++	out := ui.Point{X: area.X + area.W + 200, Y: up.Y} // past the window
++	dragThrough(tt, up, out)
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("out of the right edge chose %d, want the same three", l.sel.Len())
++	}
++	if got := l.dragRect.X + l.dragRect.W; got != area.X+area.W {
++		t.Errorf("the box stops at x=%v, want the list's right %v", got, area.X+area.W)
++	}
++	dragThrough(tt, out, ui.Point{X: area.X + area.W + 350, Y: up.Y})
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("further right chose %d, want the same three", l.sel.Len())
++	}
++	back := ui.Point{X: area.X + 560, Y: up.Y}
++	dragThrough(tt, out, back)
++	tt.Release(back.X, back.Y)
++	tt.Frame()
++	if l.dragOn || !chosen(l, ids(last3)...) {
++		t.Errorf("after coming back and letting go: on=%v chosen=%d", l.dragOn, l.sel.Len())
++	}
++}
++
++// TestMarqueeVerticalLineSelects says a drag straight up (no width) chooses
++// the rows it crosses, even from just left of them: the choice's rectangle
++// is widened to 1 DIP while the drawn band stays a line.
++func TestMarqueeVerticalLineSelects(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	n := len(l.files)
++	area := l.dragArea
++	last3 := l.files[n-3:]
++	// 0.4 DIP left of the rows' edge: a zero-width line misses them, a
++	// 1 DIP one crosses the row it goes through.
++	x := l.rowRects[last3[0].FsID].X - 0.4
++	start := ui.Point{X: x, Y: area.Y + area.H - 12}
++	up := ui.Point{X: x, Y: l.rowRects[last3[0].FsID].Y + 2}
++	marqueeFrom(tt, start, up)
++	if l.dragRect.W != 0 {
++		t.Errorf("a drag straight up gave a box %v wide", l.dragRect.W)
++	}
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("the vertical line chose %d, want the last three rows", l.sel.Len())
++	}
++	tt.Release(up.X, up.Y)
++	tt.Frame()
++	if !chosen(l, ids(last3)...) {
++		t.Errorf("the release kept %d, want the last three rows", l.sel.Len())
++	}
++}
++
++// TestMarqueeHorizontalLineSelects says a drag straight across (no height)
++// chooses the row it goes through, from the list's left padding.
++func TestMarqueeHorizontalLineSelects(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	row := l.rowRects[l.files[1].FsID]
++	y := row.Y + row.H/2
++	area := l.dragArea
++	start := ui.Point{X: area.X + 2, Y: y}
++	across := ui.Point{X: area.X + 400, Y: y}
++	marqueeFrom(tt, start, across)
++	if l.dragRect.H != 0 {
++		t.Errorf("a drag straight across gave a box %v high", l.dragRect.H)
++	}
++	if !chosen(l, l.files[1].FsID) {
++		t.Errorf("the horizontal line chose %d, want the row it crosses", l.sel.Len())
++	}
++	tt.Release(across.X, across.Y)
++	tt.Frame()
++	if !chosen(l, l.files[1].FsID) {
++		t.Errorf("the release kept %d, want the row it crosses", l.sel.Len())
++	}
++}
++
++// TestMarqueeOutsidePageKeepsChoice drags over rows, then moves the pointer
++// up into the title bar, where the page is not under it: the band still
++// follows (its box stopped at the list's top), keeps its choice, and a
++// release there ends it normally.
++func TestMarqueeOutsidePageKeepsChoice(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	n := len(l.files)
++	area := l.dragArea
++	start := ui.Point{X: area.X + 300, Y: area.Y + area.H - 12}
++	third := l.rowRects[l.files[n-3].FsID].Y + 2
++	marqueeFrom(tt, start, ui.Point{X: start.X, Y: third})
++	if !l.dragOn || !chosen(l, ids(l.files[n-3:])...) {
++		t.Fatalf("the box over the last three rows: on=%v chose %d", l.dragOn, l.sel.Len())
++	}
++	// The title bar: above the page and outside the list.
++	from := ui.Point{X: start.X, Y: third}
++	for _, y := range []float32{area.Y - 30, 20, 5} {
++		dragThrough(tt, from, ui.Point{X: start.X, Y: y})
++		from = ui.Point{X: start.X, Y: y}
++		if !l.dragOn {
++			t.Fatalf("the drag ended in the title bar at y=%v", y)
++		}
++		if l.dragRect.Y != area.Y {
++			t.Errorf("in the title bar at y=%v the box starts at %v, want the list's top %v", y, l.dragRect.Y, area.Y)
++		}
++		if l.sel.Len() != n {
++			t.Errorf("in the title bar at y=%v chose %d, want all %d rows the box covers", y, l.sel.Len(), n)
++		}
++	}
++	tt.Release(start.X, 5)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("the band stayed after a release over the title bar: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	if l.sel.Len() != n {
++		t.Errorf("the release over the title bar kept %d, want %d", l.sel.Len(), n)
++	}
++}
++
++// TestMarqueeGridBeyondBottom drags in the grid from the blank strip right
++// of the tiles across them and out of the grid's bottom: the tiles the box
++// crosses stay chosen while it goes on past the edge, and the release
++// keeps them.
++func TestMarqueeGridBeyondBottom(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	for i := 1; i <= 3; i++ {
++		srv.Add(fakepan.Node{Path: fmt.Sprintf("/剧集/E%02d.mkv", i), Category: 1, Size: 1 << 30})
++	}
++	a.gridView = true
++	a.router.Push(filesRoute("/剧集"))
++	waitFor(t, tt, "E01.mkv")
++	tt.Advance(time.Second)
++	l := a.listingFor("/剧集")
++	area := l.dragArea
++	var first ui.Rect
++	for id, s := range l.grid.spots {
++		if id >= 0 && s.rect.W > 0 && (first == (ui.Rect{}) || s.rect.X < first.X) {
++			first = s.rect
++		}
++	}
++	if first == (ui.Rect{}) {
++		t.Fatal("no tiles in the grid")
++	}
++	start := ui.Point{X: area.X + area.W - 20, Y: first.Y + first.H/2}
++	across := ui.Point{X: area.X + 160, Y: start.Y}
++	out := ui.Point{X: across.X, Y: area.Y + area.H + 300}
++	marqueeFrom(tt, start, across, out)
++	if !l.dragOn {
++		t.Fatalf("the drag ended at the grid's bottom")
++	}
++	if !chosen(l, ids(l.files)...) {
++		t.Errorf("the box across the tiles chose %d, want all %d", l.sel.Len(), len(l.files))
++	}
++	if got := l.dragRect.Y + l.dragRect.H; got != area.Y+area.H {
++		t.Errorf("the box stops at y=%v, want the grid's bottom %v", got, area.Y+area.H)
++	}
++	// Farther down, even off the window, changes nothing.
++	dragThrough(tt, out, ui.Point{X: out.X, Y: area.Y + area.H + 500})
++	if !chosen(l, ids(l.files)...) {
++		t.Errorf("beyond the grid's bottom chose %d, want the same tiles", l.sel.Len())
++	}
++	tt.Move(across.X, 755)
++	tt.Frame()
++	tt.Release(across.X, 755)
++	tt.Frame()
++	if l.dragOn || l.dragRect != (ui.Rect{}) {
++		t.Errorf("the band stayed after the release: on=%v rect=%v", l.dragOn, l.dragRect)
++	}
++	if !chosen(l, ids(l.files)...) {
++		t.Errorf("the release kept %d, want the tiles crossed", l.sel.Len())
++	}
++}
++
++// TestMarqueeReleaseOutsideWindow drags over rows, leaves the window above
++// it and lets go there: the band still ends (the list knows its press went,
++// which no observer off the window could tell) and keeps the choice the
++// box's edge covered.
++func TestMarqueeReleaseOutsideWindow(t *testing.T) {
++	a, tt, _ := signedIn(t)
++	tt.Advance(time.Second)
++	l := a.listings["/"]
++	n := len(l.files)
++	area := l.dragArea
++	start := ui.Point{X: area.X + 300, Y: area.Y + area.H - 12}
++	covered := ui.Point{X: start.X, Y: l.rowRects[l.files[3].FsID].Y + 2}
++	marqueeFrom(tt, start, covered)
++	if l.sel.Len() == 0 {
++		t.Fatalf("the box over the rows chose none")
++	}
++	// Above the window, where no release observer can be.
++	dragThrough(tt, covered, ui.Point{X: start.X, Y: -100})
++	if !l.dragOn {
++		t.Fatalf("the band ended while the pointer was above the window")
++	}
++	if l.dragRect.Y != area.Y {
++		t.Errorf("above the window the box starts at %v, want the list's top %v", l.dragRect.Y, area.Y)
++	}
++	if l.sel.Len() != n {
++		t.Errorf("above the window chose %d, want all %d rows the box covers", l.sel.Len(), n)
++	}
++	tt.Release(start.X, -100)
++	tt.Frame()
++	if l.dragOn || l.pressDown || l.dragRect != (ui.Rect{}) {
++		t.Errorf("a release above the window left the band: on=%v pressDown=%v rect=%v", l.dragOn, l.pressDown, l.dragRect)
++	}
++	if l.sel.Len() != n {
++		t.Errorf("the release kept %d, want %d rows", l.sel.Len(), n)
++	}
++}

@@ -1,0 +1,738 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 10:59:26 +0800
+Subject: [PATCH] Teach the fake netdisk the real precreate/superfile2/create
+ upload calls and add cmd/fakepand, so a client written in another language
+ can be tested against the same fake the desktop tests use.
+
+---
+ cmd/fakepand/main.go             |  82 ++++++++++
+ internal/fakepan/fakepan.go      |  43 ++++-
+ internal/fakepan/ops.go          |  13 +-
+ internal/fakepan/upload2.go      | 231 ++++++++++++++++++++++++++
+ internal/fakepan/upload2_test.go | 272 +++++++++++++++++++++++++++++++
+ 5 files changed, 634 insertions(+), 7 deletions(-)
+ create mode 100644 cmd/fakepand/main.go
+ create mode 100644 internal/fakepan/upload2.go
+ create mode 100644 internal/fakepan/upload2_test.go
+
+diff --git a/cmd/fakepand/main.go b/cmd/fakepand/main.go
+new file mode 100644
+index 0000000..51c5881
+--- /dev/null
++++ b/cmd/fakepand/main.go
+@@ -0,0 +1,82 @@
++// Command fakepand runs the fake Baidu Netdisk of internal/fakepan as a
++// standalone process, so that a test of a client that is not Go — the new
++// Android app's Kotlin netdisk client — can host the same pretend netdisk
++// the desktop app's own tests use.
++//
++// It prints one line, "url=<base url>", to stdout once listening (with
++// -addr 127.0.0.1:0 the kernel picks a free port, so the line is the only
++// place the real one is told), then serves until SIGINT or SIGTERM and
++// exits 0. The spawned process is meant to be killed with a signal; it
++// keeps no state on disk.
++//
++// Usage:
++//
++//	fakepand [-addr 127.0.0.1:0] [-quiet]
++//
++// The fake netdisk answers the pan.baidu.com and pcs.baidu.com endpoints
++// the client needs, including the real chunked upload protocol —
++// POST /api/precreate, POST /rest/2.0/pcs/file?method=locateupload,
++// POST /rest/2.0/pcs/superfile2?method=upload and POST /api/create.
++package main
++
++import (
++	"flag"
++	"fmt"
++	"net/http"
++	"os"
++	"os/signal"
++	"syscall"
++
++	"github.com/pengstem/baidunetgo/internal/fakepan"
++)
++
++func main() {
++	addr := flag.String("addr", "127.0.0.1:0", "address to listen on")
++	quiet := flag.Bool("quiet", false, "do not log requests to stderr")
++	flag.Parse()
++
++	var wrap func(http.Handler) http.Handler
++	if !*quiet {
++		wrap = logRequests
++	}
++	srv, err := fakepan.Serve(*addr, wrap)
++	if err != nil {
++		fmt.Fprintln(os.Stderr, "fakepand:", err)
++		os.Exit(1)
++	}
++	fmt.Printf("url=%s\n", srv.URL)
++	os.Stdout.Sync() // tell the parent the server is ready, not to wait
++
++	sig := make(chan os.Signal, 1)
++	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
++	<-sig
++	srv.Close()
++}
++
++// logRequests writes each request to stderr, so that whoever runs the
++// process by hand sees what its client did; -quiet leaves it out, as a
++// test spawning the process wants no noise.
++func logRequests(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
++		next.ServeHTTP(rec, r)
++		fmt.Fprintf(os.Stderr, "%s %s %d\n", r.Method, r.URL.RequestURI(), rec.status)
++	})
++}
++
++// statusRecorder keeps the status a handler wrote, for the log line.
++type statusRecorder struct {
++	http.ResponseWriter
++	status int
++}
++
++func (r *statusRecorder) WriteHeader(code int) {
++	r.status = code
++	r.ResponseWriter.WriteHeader(code)
++}
++
++func (r *statusRecorder) Flush() {
++	if f, ok := r.ResponseWriter.(http.Flusher); ok {
++		f.Flush()
++	}
++}
+diff --git a/internal/fakepan/fakepan.go b/internal/fakepan/fakepan.go
+index af98010..63fac39 100644
+--- a/internal/fakepan/fakepan.go
++++ b/internal/fakepan/fakepan.go
+@@ -15,6 +15,7 @@ import (
+ 	"image/png"
+ 	"io"
+ 	"math"
++	"net"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"net/url"
+@@ -73,6 +74,9 @@ type Server struct {
+ 	// mirror is a second download host, the same netdisk on another
+ 	// port.
+ 	mirror *httptest.Server
++	// mux is the fake netdisk's routes, kept so that Serve can host them
++	// on a listener of the caller's choosing.
++	mux *http.ServeMux
+ 
+ 	mu       sync.Mutex
+ 	nodes    map[string]*Node
+@@ -83,10 +87,45 @@ type Server struct {
+ 	nextID   int64
+ 	// uploads are the parts sent of uploads not joined yet, by id.
+ 	uploads map[string]map[int][]byte
++	// chunked are the uploads of the real chunked protocol (precreate,
++	// superfile2, create) not joined yet, by upload id.
++	chunked map[string]*chunkedUpload
+ }
+ 
+ // New starts a fake netdisk holding a few sample folders and files.
+ func New() *Server {
++	s := newServer()
++	s.Server = httptest.NewServer(s.mux)
++	s.mirror = httptest.NewServer(s.mux)
++	return s
++}
++
++// Serve starts a fake netdisk serving on addr until Close, for a process
++// that hosts it for other programs to talk to (cmd/fakepand does that for
++// the Android client's tests). wrap, when not nil, is applied to the routes
++// before serving, to log or shape requests. The URL field holds the address
++// actually taken, which matters when addr ends in ":0".
++func Serve(addr string, wrap func(http.Handler) http.Handler) (*Server, error) {
++	ln, err := net.Listen("tcp", addr)
++	if err != nil {
++		return nil, err
++	}
++	s := newServer()
++	var h http.Handler = s.mux
++	if wrap != nil {
++		h = wrap(h)
++	}
++	ts := httptest.NewUnstartedServer(h)
++	ts.Listener.Close() // the port httptest picked, never used
++	ts.Listener = ln
++	ts.Start()
++	s.Server = ts
++	s.mirror = httptest.NewServer(s.mux)
++	return s, nil
++}
++
++// newServer builds the fake netdisk's tree and routes, not serving them yet.
++func newServer() *Server {
+ 	s := &Server{nodes: map[string]*Node{}, nextID: 1000}
+ 	s.nodes["/"] = &Node{FsID: 1, Path: "/", IsDir: true}
+ 	s.seed()
+@@ -109,8 +148,8 @@ func New() *Server {
+ 	mux.HandleFunc("/locatedownload", s.locate)
+ 	s.opsRoutes(mux)
+ 	s.shareRoutes(mux)
+-	s.Server = httptest.NewServer(mux)
+-	s.mirror = httptest.NewServer(mux)
++	s.upload2Routes(mux)
++	s.mux = mux
+ 	return s
+ }
+ 
+diff --git a/internal/fakepan/ops.go b/internal/fakepan/ops.go
+index 27f96a5..fd2f842 100644
+--- a/internal/fakepan/ops.go
++++ b/internal/fakepan/ops.go
+@@ -71,11 +71,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 	delete(s.uploads, id)
+ 	p := path.Clean("/" + q.Get("path"))
+-	cat := 6
+-	if strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".jpg") {
+-		cat = 3
+-	}
+-	s.add(Node{Path: p, Data: whole, Category: cat})
++	s.add(Node{Path: p, Data: whole, Category: categoryOf(p)})
+ 	writeJSON(w, map[string]any{"errno": 0})
+ }
+ 
+@@ -85,6 +81,7 @@ func (s *Server) DropUploads() {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 	s.uploads = nil
++	s.chunked = nil
+ }
+ 
+ // Data returns the content of a file of the fake netdisk.
+@@ -98,6 +95,12 @@ func (s *Server) Data(p string) []byte {
+ }
+ 
+ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
++	// The real chunked upload ends with a create that joins the parts it
++	// sent, naming the upload by id; a create without one makes a folder.
++	if r.FormValue("uploadid") != "" {
++		s.joinUpload(w, r)
++		return
++	}
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 	p := path.Clean("/" + r.FormValue("path"))
+diff --git a/internal/fakepan/upload2.go b/internal/fakepan/upload2.go
+new file mode 100644
+index 0000000..3637bba
+--- /dev/null
++++ b/internal/fakepan/upload2.go
+@@ -0,0 +1,231 @@
++package fakepan
++
++import (
++	"crypto/md5"
++	"crypto/rand"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"path"
++	"strconv"
++	"strings"
++	"time"
++)
++
++// chunkedUpload is an upload of the real netdisk protocol — precreate, then
++// a superfile2 part per block, then create to join them — not joined yet.
++type chunkedUpload struct {
++	path  string // where the client said the file goes
++	size  int64  // the length the client declared
++	parts map[int][]byte
++}
++
++// upload2Routes adds the real protocol's endpoints to mux, as Baidu's pan
++// and pcs hosts answer them: precreate asks for an upload, locateupload
++// names the server to send the parts to, superfile2 takes a part, and
++// create (in ops.go) joins them.
++func (s *Server) upload2Routes(mux *http.ServeMux) {
++	mux.HandleFunc("/api/precreate", s.precreate)
++	mux.HandleFunc("/rest/2.0/pcs/file", s.pcsFile)
++	mux.HandleFunc("/rest/2.0/pcs/superfile2", s.superfile2)
++}
++
++// precreate answers the protocol's first call with an id to send parts to,
++// always as an upload (return_type 1) and never as a rapid upload, so the
++// client sends every part. The declared path and size are kept for create.
++func (s *Server) precreate(w http.ResponseWriter, r *http.Request) {
++	if err := r.ParseForm(); err != nil {
++		writeErrno(w, -9, "bad form: "+err.Error())
++		return
++	}
++	p := path.Clean("/" + r.FormValue("path"))
++	size, _ := strconv.ParseInt(r.FormValue("size"), 10, 64)
++	if p == "/" || p == "" {
++		writeErrno(w, -9, "no path")
++		return
++	}
++	id := newUploadID()
++	s.mu.Lock()
++	if s.chunked == nil {
++		s.chunked = map[string]*chunkedUpload{}
++	}
++	s.chunked[id] = &chunkedUpload{path: p, size: size, parts: map[int][]byte{}}
++	s.mu.Unlock()
++	writeJSON(w, map[string]any{"errno": 0, "uploadid": id, "return_type": 1, "block_list": []string{}})
++}
++
++// pcsFile answers the pcs host's file method calls, of which the protocol
++// only uses locateupload: it names this fake netdisk, reached at the
++// request's own host, as the server to send the parts to.
++func (s *Server) pcsFile(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet && r.Method != http.MethodPost {
++		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
++		return
++	}
++	if r.URL.Query().Get("method") != "locateupload" {
++		writeErrno(w, 2, "unsupported method")
++		return
++	}
++	writeJSON(w, map[string]any{"errno": 0, "servers": []map[string]string{{"server": baseURL(r)}}})
++}
++
++// baseURL is this fake netdisk as the request reached it.
++func baseURL(r *http.Request) string {
++	scheme := "http"
++	if r.TLS != nil {
++		scheme = "https"
++	}
++	return scheme + "://" + r.Host
++}
++
++// superfile2 takes one part of an upload, from a multipart form's file
++// field (the real client names it "file"; BaiduPCS-Go says "uploadedfile")
++// or from the raw body, and answers the part's MD5.
++func (s *Server) superfile2(w http.ResponseWriter, r *http.Request) {
++	q := r.URL.Query()
++	id := q.Get("uploadid")
++	seq, err := strconv.Atoi(q.Get("partseq"))
++	if err != nil || seq < 0 {
++		writeErrno(w, -9, "bad partseq")
++		return
++	}
++	data, err := partData(r)
++	if err != nil {
++		writeErrno(w, -9, "no part: "+err.Error())
++		return
++	}
++	sum := md5.Sum(data)
++	md := hex.EncodeToString(sum[:])
++	s.mu.Lock()
++	up := s.chunked[id]
++	if up == nil {
++		s.mu.Unlock()
++		writeErrno(w, -9, "unknown uploadid")
++		return
++	}
++	up.parts[seq] = data
++	s.mu.Unlock()
++	writeJSON(w, map[string]any{"errno": 0, "md5": md, "request_id": newRequestID()})
++}
++
++// newRequestID makes a request id as the netdisk's responses carry one: a
++// number small enough that a client reading it as a 32-bit int is fine.
++func newRequestID() int64 { return time.Now().UnixNano() % 1_000_000_000 }
++
++// partData reads a superfile2 request's part: the first multipart file
++// field, or else the raw body.
++func partData(r *http.Request) ([]byte, error) {
++	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
++		return io.ReadAll(r.Body)
++	}
++	mr, err := r.MultipartReader()
++	if err != nil {
++		return nil, err
++	}
++	for {
++		p, err := mr.NextPart()
++		if errors.Is(err, io.EOF) {
++			return nil, errors.New(`no "file" field`)
++		}
++		if err != nil {
++			return nil, err
++		}
++		if p.FormName() == "file" || p.FormName() == "uploadedfile" || p.FileName() != "" {
++			data, err := io.ReadAll(p)
++			p.Close()
++			return data, err
++		}
++		p.Close()
++	}
++}
++
++// joinUpload answers the protocol's last call: it joins an upload's parts by
++// partseq into the file precreate named, checking the whole length and each
++// part's MD5 against the block list the client gives, then drops the parts.
++func (s *Server) joinUpload(w http.ResponseWriter, r *http.Request) {
++	if err := r.ParseForm(); err != nil {
++		writeErrno(w, -9, "bad form: "+err.Error())
++		return
++	}
++	var blocks []string
++	if raw := r.FormValue("block_list"); raw != "" {
++		if err := json.Unmarshal([]byte(raw), &blocks); err != nil {
++			writeErrno(w, -9, "bad block_list")
++			return
++		}
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	id := r.FormValue("uploadid")
++	up := s.chunked[id]
++	if up == nil {
++		writeErrno(w, -9, "unknown uploadid")
++		return
++	}
++	p, size := up.path, up.size
++	if raw := r.FormValue("path"); raw != "" {
++		p = path.Clean("/" + raw)
++	}
++	if raw := r.FormValue("size"); raw != "" {
++		n, err := strconv.ParseInt(raw, 10, 64)
++		if err != nil {
++			writeErrno(w, -9, "bad size")
++			return
++		}
++		size = n
++	}
++	if up.size != size {
++		writeErrno(w, -9, "size does not match the precreate")
++		return
++	}
++	if size > 0 && len(blocks) == 0 {
++		writeErrno(w, -9, "block_list missing")
++		return
++	}
++	whole := []byte{}
++	for i, want := range blocks {
++		part, ok := up.parts[i]
++		if !ok {
++			writeErrno(w, -9, fmt.Sprintf("part %d missing", i))
++			return
++		}
++		sum := md5.Sum(part)
++		if !strings.EqualFold(hex.EncodeToString(sum[:]), want) {
++			writeErrno(w, -9, fmt.Sprintf("part %d md5 mismatch", i))
++			return
++		}
++		whole = append(whole, part...)
++	}
++	if int64(len(whole)) != size {
++		writeErrno(w, -9, fmt.Sprintf("joined %d bytes, want %d", len(whole), size))
++		return
++	}
++	delete(s.chunked, id)
++	n := s.add(Node{Path: p, Data: whole, Category: categoryOf(p)})
++	writeJSON(w, map[string]any{"errno": 0, "fs_id": n.FsID, "path": n.Path, "size": n.Size})
++}
++
++// categoryOf guesses a file's netdisk category from its name, as the fake
++// netdisk's uploads do.
++func categoryOf(p string) int {
++	if strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".jpg") {
++		return 3
++	}
++	return 6
++}
++
++// newUploadID makes an opaque id for an upload.
++func newUploadID() string {
++	var b [12]byte
++	rand.Read(b[:]) // crypto/rand does not fail on the systems this runs on
++	return hex.EncodeToString(b[:])
++}
++
++// writeErrno answers an error as the netdisk does: a nonzero errno, with a
++// message for whoever reads it, never an HTTP error.
++func writeErrno(w http.ResponseWriter, errno int, msg string) {
++	writeJSON(w, map[string]any{"errno": errno, "error_msg": msg})
++}
+diff --git a/internal/fakepan/upload2_test.go b/internal/fakepan/upload2_test.go
+new file mode 100644
+index 0000000..21b662c
+--- /dev/null
++++ b/internal/fakepan/upload2_test.go
+@@ -0,0 +1,272 @@
++package fakepan
++
++import (
++	"bytes"
++	"crypto/md5"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"mime/multipart"
++	"net/http"
++	"net/url"
++	"strconv"
++	"strings"
++	"testing"
++)
++
++// postForm posts v to path and decodes the fake netdisk's JSON answer.
++func postForm(t *testing.T, s *Server, p string, v url.Values) map[string]any {
++	t.Helper()
++	resp, err := http.PostForm(s.URL+p, v)
++	if err != nil {
++		t.Fatalf("POST %s: %v", p, err)
++	}
++	defer resp.Body.Close()
++	return decodeJSON(t, resp, "POST "+p)
++}
++
++// getJSON fetches path and decodes the fake netdisk's JSON answer.
++func getJSON(t *testing.T, s *Server, p string) map[string]any {
++	t.Helper()
++	resp, err := http.Get(s.URL + p)
++	if err != nil {
++		t.Fatalf("GET %s: %v", p, err)
++	}
++	defer resp.Body.Close()
++	return decodeJSON(t, resp, "GET "+p)
++}
++
++func decodeJSON(t *testing.T, resp *http.Response, what string) map[string]any {
++	t.Helper()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("%s: HTTP %d", what, resp.StatusCode)
++	}
++	var out map[string]any
++	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
++		t.Fatalf("%s: bad JSON: %v", what, err)
++	}
++	return out
++}
++
++// md5Hex is content's MD5, as the protocol's block lists carry it.
++func md5Hex(b []byte) string {
++	sum := md5.Sum(b)
++	return hex.EncodeToString(sum[:])
++}
++
++// partURL is the superfile2 endpoint for one part of upload id.
++func partURL(s *Server, id, target string, seq int) string {
++	return s.URL + "/rest/2.0/pcs/superfile2?" + url.Values{
++		"method": {"upload"}, "type": {"tmpfile"}, "path": {target},
++		"partseq": {strconv.Itoa(seq)}, "uploadid": {id}, "vip": {"1"},
++	}.Encode()
++}
++
++// sendPart sends part as the seq'th part of upload id, in a multipart form
++// field when form is true and as the raw body otherwise, and returns the
++// MD5 the netdisk answered.
++func sendPart(t *testing.T, s *Server, id, target string, seq int, part []byte, form bool) string {
++	t.Helper()
++	var (
++		body        bytes.Buffer
++		contentType = "application/octet-stream"
++	)
++	if form {
++		mw := multipart.NewWriter(&body)
++		fw, err := mw.CreateFormFile("file", "")
++		if err != nil {
++			t.Fatalf("multipart field: %v", err)
++		}
++		if _, err := fw.Write(part); err != nil {
++			t.Fatalf("multipart part: %v", err)
++		}
++		if err := mw.Close(); err != nil {
++			t.Fatalf("multipart body: %v", err)
++		}
++		contentType = mw.FormDataContentType()
++	} else {
++		body.Write(part)
++	}
++	resp, err := http.Post(partURL(s, id, target, seq), contentType, &body)
++	if err != nil {
++		t.Fatalf("POST part %d: %v", seq, err)
++	}
++	defer resp.Body.Close()
++	out := decodeJSON(t, resp, fmt.Sprintf("part %d", seq))
++	if out["errno"] != float64(0) {
++		t.Fatalf("part %d: errno %v, %v", seq, out["errno"], out["error_msg"])
++	}
++	if rid, ok := out["request_id"].(float64); !ok || rid <= 0 {
++		t.Fatalf("part %d: request_id = %v", seq, out["request_id"])
++	}
++	md, _ := out["md5"].(string)
++	return md
++}
++
++// precreate starts an upload of target with content and returns its id.
++func precreate(t *testing.T, s *Server, target string, content []byte, blocks []string) string {
++	t.Helper()
++	bl, err := json.Marshal(blocks)
++	if err != nil {
++		t.Fatalf("block list: %v", err)
++	}
++	out := postForm(t, s, "/api/precreate", url.Values{
++		"path": {target}, "size": {strconv.Itoa(len(content))}, "isdir": {"0"},
++		"autoinit": {"1"}, "rtype": {"2"}, "block_list": {string(bl)},
++	})
++	if out["errno"] != float64(0) {
++		t.Fatalf("precreate: errno %v, %v", out["errno"], out["error_msg"])
++	}
++	id, _ := out["uploadid"].(string)
++	if id == "" {
++		t.Fatalf("precreate gave no uploadid: %v", out)
++	}
++	return id
++}
++
++// TestChunkedUpload walks the real protocol — precreate, a superfile2 part
++// each (one in a multipart "file" field as the real client sends it, one as
++// the raw body), then create — and checks the joined file's bytes, its size
++// in a listing and its scrambled MD5 there.
++func TestChunkedUpload(t *testing.T) {
++	s := New()
++	defer s.Close()
++
++	content := bytes.Repeat([]byte("BaiduNetGo 分片上传。"), 40000)
++	half := len(content) / 2
++	parts := [][]byte{content[:half], content[half:]}
++	const target = "/上传/两段.bin"
++
++	// locateupload names this fake netdisk, at the host the request came
++	// in on.
++	loc := getJSON(t, s, "/rest/2.0/pcs/file?method=locateupload&upload_version=2.0")
++	if loc["errno"] != float64(0) {
++		t.Fatalf("locateupload: errno %v, %v", loc["errno"], loc["error_msg"])
++	}
++	servers, _ := loc["servers"].([]any)
++	if len(servers) != 1 {
++		t.Fatalf("locateupload: servers = %v", loc["servers"])
++	}
++	if got := servers[0].(map[string]any)["server"]; got != s.URL {
++		t.Fatalf("locateupload: server = %v, want %v", got, s.URL)
++	}
++
++	blocks := []string{md5Hex(parts[0]), md5Hex(parts[1])}
++	id := precreate(t, s, target, content, blocks)
++	if got := sendPart(t, s, id, target, 0, parts[0], true); got != blocks[0] {
++		t.Fatalf("part 0 MD5 = %q, want %q", got, blocks[0])
++	}
++	if got := sendPart(t, s, id, target, 1, parts[1], false); got != blocks[1] {
++		t.Fatalf("part 1 MD5 = %q, want %q", got, blocks[1])
++	}
++
++	bl, err := json.Marshal(blocks)
++	if err != nil {
++		t.Fatalf("block list: %v", err)
++	}
++	cr := postForm(t, s, "/api/create", url.Values{
++		"path": {target}, "size": {strconv.Itoa(len(content))}, "isdir": {"0"},
++		"block_list": {string(bl)}, "uploadid": {id}, "rtype": {"2"},
++	})
++	if cr["errno"] != float64(0) {
++		t.Fatalf("create: errno %v, %v", cr["errno"], cr["error_msg"])
++	}
++	if cr["size"] != float64(len(content)) {
++		t.Fatalf("create: size = %v, want %d", cr["size"], len(content))
++	}
++	if got := s.Data(target); !bytes.Equal(got, content) {
++		t.Fatalf("Data(%q) = %d bytes, want the %d uploaded", target, len(got), len(content))
++	}
++
++	// A listing sees the file, the right size and a scrambled MD5.
++	list := getJSON(t, s, "/api/list?dir="+url.QueryEscape("/上传"))
++	if list["errno"] != float64(0) {
++		t.Fatalf("list: errno %v, %v", list["errno"], list["error_msg"])
++	}
++	var entry map[string]any
++	for _, it := range list["list"].([]any) {
++		if m := it.(map[string]any); m["server_filename"] == "两段.bin" {
++			entry = m
++		}
++	}
++	if entry == nil {
++		t.Fatalf("listing has no 两段.bin: %v", list["list"])
++	}
++	if entry["size"] != float64(len(content)) {
++		t.Fatalf("listed size = %v, want %d", entry["size"], len(content))
++	}
++	if want := scramble(md5Hex(content)); entry["md5"] != want {
++		t.Fatalf("listed md5 = %v, want the scrambled %v", entry["md5"], want)
++	}
++
++	// The parts are gone once joined.
++	s.mu.Lock()
++	left := len(s.chunked)
++	s.mu.Unlock()
++	if left != 0 {
++		t.Fatalf("%d joined uploads still kept their parts", left)
++	}
++}
++
++// TestChunkedUploadRefusesBadBlockList checks create refuses parts whose
++// MD5 does not match the block list, and stores no file then.
++func TestChunkedUploadRefusesBadBlockList(t *testing.T) {
++	s := New()
++	defer s.Close()
++
++	content := []byte("only one part")
++	const target = "/上传/坏哈希.txt"
++	id := precreate(t, s, target, content, []string{md5Hex(content)})
++	sendPart(t, s, id, target, 0, content, true)
++
++	bl, err := json.Marshal([]string{md5Hex([]byte("something else"))})
++	if err != nil {
++		t.Fatalf("block list: %v", err)
++	}
++	cr := postForm(t, s, "/api/create", url.Values{
++		"path": {target}, "size": {strconv.Itoa(len(content))}, "isdir": {"0"},
++		"block_list": {string(bl)}, "uploadid": {id}, "rtype": {"2"},
++	})
++	if cr["errno"] == float64(0) {
++		t.Fatalf("create accepted a block_list that does not match the part")
++	}
++	if s.Exists(target) {
++		t.Fatalf("create of a mismatched block_list stored %q anyway", target)
++	}
++	if got := s.Data(target); got != nil {
++		t.Fatalf("create of a mismatched block_list stored %d bytes", len(got))
++	}
++}
++
++// TestChunkedUploadUnknownID checks superfile2 and create for an id the
++// netdisk never gave answer an error instead of panicking.
++func TestChunkedUploadUnknownID(t *testing.T) {
++	s := New()
++	defer s.Close()
++
++	resp, err := http.Post(partURL(s, "no-such-upload", "/x.bin", 0), "application/octet-stream", strings.NewReader("part"))
++	if err != nil {
++		t.Fatalf("POST superfile2: %v", err)
++	}
++	out := decodeJSON(t, resp, "superfile2")
++	resp.Body.Close()
++	if out["errno"] == float64(0) {
++		t.Fatalf("superfile2 accepted an unknown uploadid: %v", out)
++	}
++
++	bl, err := json.Marshal([]string{md5Hex([]byte("part"))})
++	if err != nil {
++		t.Fatalf("block list: %v", err)
++	}
++	cr := postForm(t, s, "/api/create", url.Values{
++		"path": {"/x.bin"}, "size": {"4"}, "isdir": {"0"},
++		"block_list": {string(bl)}, "uploadid": {"no-such-upload"},
++	})
++	if cr["errno"] == float64(0) {
++		t.Fatalf("create accepted an unknown uploadid: %v", cr)
++	}
++	// The fake netdisk keeps answering.
++	if st := getJSON(t, s, "/api/loginStatus"); st["errno"] != float64(0) {
++		t.Fatalf("loginStatus after unknown uploads: %v", st)
++	}
++}

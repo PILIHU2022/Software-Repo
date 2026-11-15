@@ -1,0 +1,829 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 10:59:26 +0800
+Subject: [PATCH] Encrypt a backed-up file with a passphrase in the OpenPGP
+ format gpg reads, since a backup on the netdisk should open on a machine that
+ does not have this app.
+
+---
+ go.mod                   |   3 +
+ go.sum                   |   6 +
+ internal/pgp/pgp.go      | 210 ++++++++++++++++
+ internal/pgp/pgp_test.go | 532 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 751 insertions(+)
+ create mode 100644 internal/pgp/pgp.go
+ create mode 100644 internal/pgp/pgp_test.go
+
+diff --git a/go.mod b/go.mod
+index e26e00a..8a2ef5a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -3,6 +3,7 @@ module github.com/pengstem/baidunetgo
+ go 1.27.3
+ 
+ require (
++	github.com/ProtonMail/go-crypto v1.5.2
+ 	github.com/egoist/mygo v0.8.1
+ 	github.com/klippa-app/go-pdfium v1.21.3
+ 	github.com/qjfoidnh/BaiduPCS-Go v0.0.0-20260909034501-1b9131817aaf
+@@ -12,6 +13,7 @@ require (
+ 
+ require (
+ 	github.com/bitly/go-simplejson v0.5.0 // indirect
++	github.com/cloudflare/circl v1.6.3 // indirect
+ 	github.com/ebitengine/purego v0.11.1 // indirect
+ 	github.com/fatih/color v1.18.0 // indirect
+ 	github.com/go-text/typesetting v0.3.5 // indirect
+@@ -36,6 +38,7 @@ require (
+ 	github.com/tidwall/gjson v1.18.0 // indirect
+ 	github.com/tidwall/match v1.1.1 // indirect
+ 	github.com/tidwall/pretty v1.2.0 // indirect
++	golang.org/x/crypto v0.57.0 // indirect
+ 	golang.org/x/image v0.46.0 // indirect
+ 	golang.org/x/net v0.59.0 // indirect
+ 	golang.org/x/sync v0.24.0 // indirect
+diff --git a/go.sum b/go.sum
+index dbe072e..68e0443 100644
+--- a/go.sum
++++ b/go.sum
+@@ -5,6 +5,8 @@ github.com/GeertJohan/go.rice v1.0.2/go.mod h1:af5vUNlDNkCjOZeSGFgIJxDje9qdjsO6h
+ github.com/Knetic/govaluate v3.0.0+incompatible/go.mod h1:r7JcOSlj0wfOMncg0iLm8Leh48TZaKVeNIfJntJ2wa0=
+ github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
+ github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
++github.com/ProtonMail/go-crypto v1.5.2 h1:cucYnvqcY7UOXVD//mSyjeaPY0SSN3v5cDkYPxumINk=
++github.com/ProtonMail/go-crypto v1.5.2/go.mod h1:/RaSu30DaKO4RY+XdV/ACcCcZkGr7AhUIduq5sjzzCo=
+ github.com/akavel/rsrc v0.8.0/go.mod h1:uLoCtb9J+EyAqh+26kdrTgmzRBFPGOolLWKpdxkKq+c=
+ github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
+ github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
+@@ -26,6 +28,8 @@ github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869/go.mod h1:Ekp36dR
+ github.com/bradfitz/gomemcache v0.0.0-20180710155616-bc664df96737/go.mod h1:PmM6Mmwb0LSuEubjR8N7PtNe1KxZLtOUHtbeikc5h60=
+ github.com/casbin/casbin v1.7.0/go.mod h1:c67qKN6Oum3UF5Q1+BByfFxkwKvhwW57ITjqwtzR1KE=
+ github.com/cespare/xxhash/v2 v2.1.1/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
++github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
++github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
+ github.com/cloudflare/golz4 v0.0.0-20150217214814-ef862a3cdc58/go.mod h1:EOBUe0h4xcZ5GoxqC5SDxFQ8gwyZPKQoEzownBlhI80=
+ github.com/couchbase/go-couchbase v0.0.0-20200519150804-63f3cdb75e0d/go.mod h1:TWI8EKQMs5u5jLKW/tsb9VwauIrMIxQG1r5fMsswK5U=
+ github.com/couchbase/gomemcached v0.0.0-20200526233749-ec430f949808/go.mod h1:srVSlQLB8iXBVXHgnqemxUXqN6FCvClgCMPCsjBDR7c=
+@@ -238,6 +242,8 @@ golang.org/x/crypto v0.0.0-20180904163835-0709b304e793/go.mod h1:6SG95UA2DQfeDnf
+ golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
+ golang.org/x/crypto v0.0.0-20190820162420-60c769a6c586/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
+ golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
++golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
++golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
+ golang.org/x/image v0.46.0 h1:b1+oYj0Jbp6K5MDT4i4/eZpYlk3V8SJhhDKh6LBHAyQ=
+ golang.org/x/image v0.46.0/go.mod h1:3B3W05VGVQyuXucLINLjXKrqISASfi4Xj+iCVkLMwew=
+ golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
+diff --git a/internal/pgp/pgp.go b/internal/pgp/pgp.go
+new file mode 100644
+index 0000000..cf20f69
+--- /dev/null
++++ b/internal/pgp/pgp.go
+@@ -0,0 +1,210 @@
++// Package pgp provides OpenPGP symmetric (passphrase-based) encryption and
++// decryption that interoperates with the gpg command line tool, e.g.
++//
++//	gpg --batch --pinentry-mode loopback --passphrase "$PW" --decrypt photo.jpg.gpg > photo.jpg
++//
++// Files are encrypted with a passphrase only (no public keys), AES-256, an
++// iterated and salted SHA-256 S2K, and no compression. The message is streamed
++// from source to destination: no file is ever buffered in memory as a whole.
++package pgp
++
++import (
++	"crypto"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++
++	"github.com/ProtonMail/go-crypto/openpgp"
++	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
++	"github.com/ProtonMail/go-crypto/openpgp/packet"
++	"github.com/ProtonMail/go-crypto/openpgp/s2k"
++)
++
++// Suffix is appended to the name of a file that has been encrypted with this
++// package, e.g. "photo.jpg" becomes "photo.jpg.gpg".
++const Suffix = ".gpg"
++
++// s2kCount is the S2K iteration count used for encrypting with a passphrase.
++// It is a per-message constant cost of a few milliseconds and does not affect
++// streaming throughput. 1<<22 is 64 times the RFC 4880 minimum of 65536: it
++// slows a brute-force search over passphrases while keeping the fixed overhead
++// small for backups that encrypt many small files.
++const s2kCount = 1 << 22
++
++// copyBufSize is the buffer used for streaming file contents.
++const copyBufSize = 1 << 20
++
++// ErrPassphrase reports that the supplied passphrase did not decrypt the
++// message, or that the message integrity check (MDC) failed. The two cases are
++// deliberately not distinguished: both mean this passphrase cannot produce the
++// original plaintext.
++var ErrPassphrase = errors.New("pgp: passphrase or integrity check failed")
++
++// ErrNotEncrypted reports that the input is not a passphrase-encrypted OpenPGP
++// message (it may be plain data, a public-key encrypted message, or not
++// OpenPGP at all).
++var ErrNotEncrypted = errors.New("pgp: input is not a passphrase-encrypted OpenPGP message")
++
++// config returns the packet configuration used both when encrypting and when
++// decrypting: AES-256, no compression, iterated+salted SHA-256 S2K. AEAD is
++// deliberately left disabled so the output is a classic SEIPD v1 (MDC)
++// message that every OpenPGP implementation, including gpg 2.4, can read.
++func config() *packet.Config {
++	return &packet.Config{
++		DefaultCipher:          packet.CipherAES256,
++		DefaultCompressionAlgo: packet.CompressionNone,
++		S2KConfig: &s2k.Config{
++			S2KMode:  s2k.IteratedSaltedS2K,
++			Hash:     crypto.SHA256,
++			S2KCount: s2kCount,
++		},
++	}
++}
++
++// Encrypt streams an OpenPGP symmetric message of src into dst. The message is
++// passphrase-protected, uses AES-256 and is left uncompressed. dst receives the
++// binary (not ASCII-armored) OpenPGP message.
++func Encrypt(dst io.Writer, src io.Reader, passphrase string) error {
++	hints := &openpgp.FileHints{IsBinary: true}
++	w, err := openpgp.SymmetricallyEncrypt(dst, []byte(passphrase), hints, config())
++	if err != nil {
++		return fmt.Errorf("pgp: start encryption: %w", err)
++	}
++
++	copyErr := copyStream(w, src)
++	closeErr := w.Close()
++
++	if copyErr != nil {
++		if closeErr != nil {
++			copyErr = errors.Join(copyErr, closeErr)
++		}
++		return fmt.Errorf("pgp: encrypt: %w", copyErr)
++	}
++	if closeErr != nil {
++		return fmt.Errorf("pgp: finish encryption: %w", closeErr)
++	}
++	return nil
++}
++
++// Decrypt streams the plain text of an OpenPGP symmetric message src into dst.
++// It returns ErrPassphrase (possibly wrapped with more detail) when the
++// passphrase is wrong or the message integrity check fails, and ErrNotEncrypted
++// when src is not a passphrase-encrypted OpenPGP message.
++func Decrypt(dst io.Writer, src io.Reader, passphrase string) error {
++	// The OpenPGP reader asks for the passphrase again when the first attempt
++	// did not produce a usable session key. Answer at most once; on a second
++	// request report the failure instead of looping forever.
++	prompted := false
++	prompt := func(_ []openpgp.Key, symmetric bool) ([]byte, error) {
++		if !symmetric || prompted {
++			return nil, fmt.Errorf("%w: the passphrase did not decrypt the message", ErrPassphrase)
++		}
++		prompted = true
++		return []byte(passphrase), nil
++	}
++
++	md, err := openpgp.ReadMessage(src, nil, prompt, config())
++	if err != nil {
++		if errors.Is(err, ErrPassphrase) {
++			return err // our own prompt error, already descriptive
++		}
++		if prompted {
++			// A passphrase was tried, so anything that fails afterwards is a
++			// passphrase (session key) or integrity problem, not a format one.
++			return fmt.Errorf("%w: %v", ErrPassphrase, err)
++		}
++		return fmt.Errorf("%w: %v", ErrNotEncrypted, err)
++	}
++	if !md.IsEncrypted || !md.IsSymmetricallyEncrypted {
++		return ErrNotEncrypted
++	}
++
++	if err := copyStream(dst, md.UnverifiedBody); err != nil {
++		// A wrong passphrase shows up as a failed MDC (integrity) check once
++		// the body has been read, or as the prompt error above.
++		if errors.Is(err, pgperrors.ErrMDCHashMismatch) || errors.Is(err, pgperrors.ErrKeyIncorrect) {
++			return fmt.Errorf("%w: %v", ErrPassphrase, err)
++		}
++		return fmt.Errorf("pgp: decrypt: %w", err)
++	}
++	return nil
++}
++
++// EncryptFile encrypts srcPath into dstPath with the given passphrase. The
++// destination is created with mode 0600 and is removed again if encryption
++// fails. It returns the number of bytes written to dstPath.
++func EncryptFile(dstPath, srcPath, passphrase string) (int64, error) {
++	return transformFile(dstPath, srcPath, passphrase, Encrypt)
++}
++
++// DecryptFile decrypts srcPath into dstPath with the given passphrase. The
++// destination is created with mode 0600 and is removed again if decryption
++// fails. It returns the number of bytes written to dstPath.
++func DecryptFile(dstPath, srcPath, passphrase string) (int64, error) {
++	return transformFile(dstPath, srcPath, passphrase, Decrypt)
++}
++
++// transformFile opens srcPath, runs fn from it into dstPath and reports how
++// many bytes were written. On any error the partial destination is removed so
++// callers never observe a truncated plaintext or ciphertext file.
++func transformFile(dstPath, srcPath, passphrase string, fn func(io.Writer, io.Reader, string) error) (int64, error) {
++	src, err := os.Open(srcPath)
++	if err != nil {
++		return 0, fmt.Errorf("pgp: open source %q: %w", srcPath, err)
++	}
++	defer src.Close()
++
++	// Refuse to encrypt or decrypt a file onto itself: truncating the
++	// destination would destroy the source before it has been read.
++	if dstInfo, statErr := os.Stat(dstPath); statErr == nil {
++		if srcInfo, srcErr := src.Stat(); srcErr == nil && os.SameFile(srcInfo, dstInfo) {
++			return 0, fmt.Errorf("pgp: source and destination are the same file %q", dstPath)
++		}
++	}
++
++	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
++	if err != nil {
++		return 0, fmt.Errorf("pgp: create destination %q: %w", dstPath, err)
++	}
++
++	// O_CREATE only applies the mode to new files; enforce 0600 for reused
++	// paths as well so secrets are never world-readable.
++	if err := dst.Chmod(0o600); err != nil {
++		dst.Close()
++		os.Remove(dstPath)
++		return 0, fmt.Errorf("pgp: set destination mode %q: %w", dstPath, err)
++	}
++
++	cw := &countingWriter{w: dst}
++	err = fn(cw, src, passphrase)
++	closeErr := dst.Close()
++
++	if err != nil || closeErr != nil {
++		err = errors.Join(err, closeErr)
++		if removeErr := os.Remove(dstPath); removeErr != nil {
++			err = errors.Join(err, fmt.Errorf("pgp: remove partial destination %q: %w", dstPath, removeErr))
++		}
++		return cw.n, err
++	}
++	return cw.n, nil
++}
++
++// copyStream copies src into dst through a single reusable buffer.
++func copyStream(dst io.Writer, src io.Reader) error {
++	buf := make([]byte, copyBufSize)
++	_, err := io.CopyBuffer(dst, src, buf)
++	return err
++}
++
++// countingWriter records how many bytes were successfully written.
++type countingWriter struct {
++	w io.Writer
++	n int64
++}
++
++func (c *countingWriter) Write(p []byte) (int, error) {
++	n, err := c.w.Write(p)
++	c.n += int64(n)
++	return n, err
++}
+diff --git a/internal/pgp/pgp_test.go b/internal/pgp/pgp_test.go
+new file mode 100644
+index 0000000..e6d9d11
+--- /dev/null
++++ b/internal/pgp/pgp_test.go
+@@ -0,0 +1,532 @@
++package pgp
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"errors"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++)
++
++// testSizes are the plaintext sizes used by the round-trip and interoperability
++// tests: empty, one byte, and a few MiB (large enough to exercise streaming
++// across many cipher blocks without making the tests slow).
++var testSizes = [][2]any{
++	{"empty", 0},
++	{"one byte", 1},
++	{"4 MiB", 4 << 20},
++}
++
++// randomBytes returns n cryptographically random bytes.
++func randomBytes(tb testing.TB, n int) []byte {
++	tb.Helper()
++	b := make([]byte, n)
++	if _, err := rand.Read(b); err != nil {
++		tb.Fatalf("rand.Read: %v", err)
++	}
++	return b
++}
++
++func TestSuffix(t *testing.T) {
++	if Suffix != ".gpg" {
++		t.Fatalf("Suffix = %q, want %q", Suffix, ".gpg")
++	}
++}
++
++// TestRoundTrip encrypts random bytes and decrypts them again through the
++// streaming API. Empty input must produce a valid message too.
++func TestRoundTrip(t *testing.T) {
++	const passphrase = "correct horse battery staple"
++	for _, tc := range testSizes {
++		name, size := tc[0].(string), tc[1].(int)
++		t.Run(name, func(t *testing.T) {
++			plain := randomBytes(t, size)
++
++			var cipher bytes.Buffer
++			if err := Encrypt(&cipher, bytes.NewReader(plain), passphrase); err != nil {
++				t.Fatalf("Encrypt: %v", err)
++			}
++			if cipher.Len() == 0 {
++				t.Fatal("Encrypt wrote nothing")
++			}
++
++			var got bytes.Buffer
++			if err := Decrypt(&got, bytes.NewReader(cipher.Bytes()), passphrase); err != nil {
++				t.Fatalf("Decrypt: %v", err)
++			}
++			if !bytes.Equal(got.Bytes(), plain) {
++				t.Fatalf("round trip mismatch: got %d bytes, want %d", got.Len(), len(plain))
++			}
++		})
++	}
++}
++
++// TestEncryptFileDecryptFile exercises the file helpers, including the
++// reported byte count and the 0600 destination mode.
++func TestEncryptFileDecryptFile(t *testing.T) {
++	const passphrase = "file passphrase"
++	dir := t.TempDir()
++	plain := randomBytes(t, 1<<20)
++
++	srcPath := filepath.Join(dir, "photo.jpg")
++	if err := os.WriteFile(srcPath, plain, 0o644); err != nil {
++		t.Fatal(err)
++	}
++	encPath := srcPath + Suffix
++
++	encN, err := EncryptFile(encPath, srcPath, passphrase)
++	if err != nil {
++		t.Fatalf("EncryptFile: %v", err)
++	}
++	fi, err := os.Stat(encPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if encN != fi.Size() {
++		t.Fatalf("EncryptFile returned %d bytes, file has %d", encN, fi.Size())
++	}
++	if mode := fi.Mode().Perm(); mode != 0o600 {
++		t.Fatalf("encrypted file mode = %04o, want 0600", mode)
++	}
++
++	decPath := filepath.Join(dir, "restored.jpg")
++	decN, err := DecryptFile(decPath, encPath, passphrase)
++	if err != nil {
++		t.Fatalf("DecryptFile: %v", err)
++	}
++	restored, err := os.ReadFile(decPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if decN != int64(len(plain)) || !bytes.Equal(restored, plain) {
++		t.Fatalf("restored %d bytes (reported %d), want %d equal bytes", len(restored), decN, len(plain))
++	}
++	fi, err = os.Stat(decPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if mode := fi.Mode().Perm(); mode != 0o600 {
++		t.Fatalf("decrypted file mode = %04o, want 0600", mode)
++	}
++}
++
++// TestFileHelpersRemovePartialDestination checks that a failed encryption or
++// decryption leaves no destination file behind.
++func TestFileHelpersRemovePartialDestination(t *testing.T) {
++	const passphrase = "cleanup passphrase"
++	dir := t.TempDir()
++
++	// Refuse to overwrite the source with its own output.
++	samePath := filepath.Join(dir, "same.bin")
++	if err := os.WriteFile(samePath, []byte("must survive"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := EncryptFile(samePath, samePath, passphrase); err == nil {
++		t.Fatal("EncryptFile with identical source and destination returned nil error")
++	}
++	if got, err := os.ReadFile(samePath); err != nil || string(got) != "must survive" {
++		t.Fatalf("source was damaged: %q, %v", got, err)
++	}
++
++	// A missing source fails before anything is written.
++	dstPath := filepath.Join(dir, "missing.jpg.gpg")
++	if _, err := EncryptFile(dstPath, filepath.Join(dir, "does-not-exist"), passphrase); err == nil {
++		t.Fatal("EncryptFile with a missing source returned nil error")
++	}
++	if _, err := os.Stat(dstPath); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("destination %q exists after failed EncryptFile (stat error: %v)", dstPath, err)
++	}
++
++	// Corrupt ciphertext: decryption must fail and remove the partial output.
++	plain := randomBytes(t, 256<<10)
++	srcPath := filepath.Join(dir, "src.bin")
++	if err := os.WriteFile(srcPath, plain, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	encPath := filepath.Join(dir, "src.bin.gpg")
++	if _, err := EncryptFile(encPath, srcPath, passphrase); err != nil {
++		t.Fatalf("EncryptFile: %v", err)
++	}
++	corrupt, err := os.ReadFile(encPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	corrupt[len(corrupt)/2] ^= 0xff
++	if err := os.WriteFile(encPath, corrupt, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	badDst := filepath.Join(dir, "corrupt.out")
++	if _, err := DecryptFile(badDst, encPath, passphrase); err == nil {
++		t.Fatal("DecryptFile of corrupted ciphertext returned nil error")
++	}
++	if _, err := os.Stat(badDst); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("destination %q exists after failed DecryptFile (stat error: %v)", badDst, err)
++	}
++}
++
++// TestWrongPassphrase checks that a wrong passphrase produces a clear
++// ErrPassphrase error instead of a panic, and no plaintext.
++func TestWrongPassphrase(t *testing.T) {
++	const right, wrong = "the right passphrase", "the wrong passphrase"
++	for _, tc := range testSizes {
++		name, size := tc[0].(string), tc[1].(int)
++		t.Run(name, func(t *testing.T) {
++			plain := randomBytes(t, size)
++			var cipher bytes.Buffer
++			if err := Encrypt(&cipher, bytes.NewReader(plain), right); err != nil {
++				t.Fatalf("Encrypt: %v", err)
++			}
++
++			var got bytes.Buffer
++			err := Decrypt(&got, bytes.NewReader(cipher.Bytes()), wrong)
++			if err == nil {
++				t.Fatal("Decrypt with a wrong passphrase returned nil error")
++			}
++			if !errors.Is(err, ErrPassphrase) {
++				t.Fatalf("Decrypt error = %v, want ErrPassphrase", err)
++			}
++			if got.Len() != 0 {
++				t.Fatalf("Decrypt wrote %d plaintext bytes despite the wrong passphrase", got.Len())
++			}
++			t.Logf("wrong passphrase error: %v", err)
++		})
++	}
++}
++
++// TestOtherPassphraseNotDecryptable encrypts a file with one passphrase and
++// checks that DecryptFile with another one fails and leaves no output.
++func TestOtherPassphraseNotDecryptable(t *testing.T) {
++	dir := t.TempDir()
++	srcPath := filepath.Join(dir, "note.txt")
++	if err := os.WriteFile(srcPath, []byte("a secret backup"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	encPath := filepath.Join(dir, "note.txt.gpg")
++	if _, err := EncryptFile(encPath, srcPath, "passphrase A"); err != nil {
++		t.Fatalf("EncryptFile: %v", err)
++	}
++
++	outPath := filepath.Join(dir, "note.out")
++	_, err := DecryptFile(outPath, encPath, "passphrase B")
++	if err == nil {
++		t.Fatal("DecryptFile with a different passphrase returned nil error")
++	}
++	if !errors.Is(err, ErrPassphrase) {
++		t.Fatalf("DecryptFile error = %v, want ErrPassphrase", err)
++	}
++	if _, statErr := os.Stat(outPath); !errors.Is(statErr, os.ErrNotExist) {
++		t.Fatalf("output %q exists after failed DecryptFile (stat error: %v)", outPath, statErr)
++	}
++}
++
++// TestNotEncryptedInput checks that plain or malformed input is reported as
++// not being a passphrase-encrypted message.
++func TestNotEncryptedInput(t *testing.T) {
++	for _, tc := range []struct {
++		name string
++		data []byte
++	}{
++		{"empty", nil},
++		{"plain text", []byte("this is not an OpenPGP message at all")},
++		{"random garbage", randomBytes(t, 128)},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var got bytes.Buffer
++			err := Decrypt(&got, bytes.NewReader(tc.data), "some passphrase")
++			if err == nil {
++				t.Fatal("Decrypt of non-encrypted input returned nil error")
++			}
++			if !errors.Is(err, ErrNotEncrypted) {
++				t.Fatalf("Decrypt error = %v, want ErrNotEncrypted", err)
++			}
++			if got.Len() != 0 {
++				t.Fatalf("Decrypt wrote %d bytes for non-encrypted input", got.Len())
++			}
++		})
++	}
++}
++
++// gpgEnv runs the installed gpg CLI against a throwaway GNUPGHOME so the
++// user's real keyrings are never touched.
++type gpgEnv struct {
++	path string
++	home string
++}
++
++// newGPGEnv locates gpg and creates a temporary GNUPGHOME, skipping the test
++// when gpg is not installed. The gpg-agent started for the temporary home is
++// stopped again when the test ends.
++func newGPGEnv(t *testing.T) *gpgEnv {
++	t.Helper()
++	path, err := exec.LookPath("gpg")
++	if err != nil {
++		t.Skip("gpg CLI not installed; skipping OpenPGP CLI interoperability test")
++	}
++	home := filepath.Join(t.TempDir(), "gnupg")
++	if err := os.Mkdir(home, 0o700); err != nil {
++		t.Fatalf("create GNUPGHOME: %v", err)
++	}
++	e := &gpgEnv{path: path, home: home}
++	t.Cleanup(func() {
++		conf, err := exec.LookPath("gpgconf")
++		if err != nil {
++			return
++		}
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		defer cancel()
++		cmd := exec.CommandContext(ctx, conf, "--kill", "gpg-agent")
++		cmd.Env = append(os.Environ(), "GNUPGHOME="+home)
++		_ = cmd.Run()
++	})
++	return e
++}
++
++// command builds a gpg invocation with the temporary home and a timeout.
++func (e *gpgEnv) command(t *testing.T, args ...string) *exec.Cmd {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
++	t.Cleanup(cancel)
++	cmd := exec.CommandContext(ctx, e.path, args...)
++	cmd.Env = append(os.Environ(), "GNUPGHOME="+e.home)
++	return cmd
++}
++
++// decryptFile runs gpg --decrypt and returns the plaintext from stdout.
++func (e *gpgEnv) decryptFile(t *testing.T, inPath, passphrase string) []byte {
++	t.Helper()
++	cmd := e.command(t,
++		"--batch", "--yes", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", passphrase,
++		"--decrypt", inPath,
++	)
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --decrypt %s: %v\n%s", inPath, err, stderr.String())
++	}
++	return stdout.Bytes()
++}
++
++// encryptFile runs gpg --symmetric on inPath and writes outPath.
++func (e *gpgEnv) encryptFile(t *testing.T, inPath, outPath, passphrase string, extra ...string) {
++	t.Helper()
++	args := []string{
++		"--batch", "--yes", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", passphrase,
++		"--symmetric", "--cipher-algo", "AES256",
++		"--output", outPath,
++	}
++	args = append(args, extra...)
++	args = append(args, inPath)
++	cmd := e.command(t, args...)
++	var stderr bytes.Buffer
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --symmetric %s: %v\n%s", inPath, err, stderr.String())
++	}
++}
++
++// TestGPGDecryptsGoOutput verifies the format this package produces is readable
++// by the real gpg CLI (gpg -d photo.jpg.gpg > photo.jpg).
++func TestGPGDecryptsGoOutput(t *testing.T) {
++	gpg := newGPGEnv(t)
++	const passphrase = "gpg interop passphrase"
++	dir := t.TempDir()
++
++	for _, tc := range [][2]any{{"empty", 0}, {"1 MiB", 1 << 20}} {
++		name, size := tc[0].(string), tc[1].(int)
++		t.Run(name, func(t *testing.T) {
++			plain := randomBytes(t, size)
++			srcPath := filepath.Join(dir, name+".bin")
++			if err := os.WriteFile(srcPath, plain, 0o600); err != nil {
++				t.Fatal(err)
++			}
++			encPath := srcPath + Suffix
++			if _, err := EncryptFile(encPath, srcPath, passphrase); err != nil {
++				t.Fatalf("EncryptFile: %v", err)
++			}
++
++			got := gpg.decryptFile(t, encPath, passphrase)
++			if !bytes.Equal(got, plain) {
++				t.Fatalf("gpg decrypted %d bytes, want %d equal bytes", len(got), len(plain))
++			}
++		})
++	}
++}
++
++// TestGoDecryptsGPGOutput verifies that Decrypt accepts messages produced by
++// the real gpg CLI, both uncompressed and compressed inside the encryption.
++func TestGoDecryptsGPGOutput(t *testing.T) {
++	gpg := newGPGEnv(t)
++	const passphrase = "gpg interop passphrase"
++	dir := t.TempDir()
++
++	variants := []struct {
++		name  string
++		extra []string
++	}{
++		{"uncompressed", []string{"--compress-algo", "none"}},
++		{"gpg default", nil},
++		{"zlib compressed", []string{"--compress-algo", "zlib"}},
++		{"sha256 s2k", []string{"--compress-algo", "none", "--s2k-digest-algo", "SHA256"}},
++	}
++	for _, variant := range variants {
++		for _, size := range []int{0, 1 << 20} {
++			name := variant.name
++			if size == 0 {
++				name += "/empty"
++			} else {
++				name += "/1 MiB"
++			}
++			t.Run(name, func(t *testing.T) {
++				plain := randomBytes(t, size)
++				srcPath := filepath.Join(dir, "in.bin")
++				if err := os.WriteFile(srcPath, plain, 0o600); err != nil {
++					t.Fatal(err)
++				}
++				encPath := filepath.Join(dir, "in.gpg")
++				gpg.encryptFile(t, srcPath, encPath, passphrase, variant.extra...)
++
++				outPath := filepath.Join(dir, "out.bin")
++				n, err := DecryptFile(outPath, encPath, passphrase)
++				if err != nil {
++					t.Fatalf("DecryptFile of gpg output: %v", err)
++				}
++				got, err := os.ReadFile(outPath)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if n != int64(len(plain)) || !bytes.Equal(got, plain) {
++					t.Fatalf("decrypted %d bytes (reported %d), want %d equal bytes", len(got), n, len(plain))
++				}
++			})
++		}
++	}
++}
++
++// TestGPGWrongPassphrase checks that gpg-produced ciphertext also fails with
++// ErrPassphrase when decrypted with the wrong passphrase.
++func TestGPGWrongPassphrase(t *testing.T) {
++	gpg := newGPGEnv(t)
++	dir := t.TempDir()
++	plain := randomBytes(t, 64<<10)
++	srcPath := filepath.Join(dir, "in.bin")
++	if err := os.WriteFile(srcPath, plain, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	encPath := filepath.Join(dir, "in.gpg")
++	gpg.encryptFile(t, srcPath, encPath, "gpg passphrase", "--compress-algo", "none")
++
++	outPath := filepath.Join(dir, "out.bin")
++	if _, err := DecryptFile(outPath, encPath, "not the gpg passphrase"); err == nil {
++		t.Fatal("DecryptFile of gpg output with the wrong passphrase returned nil error")
++	} else if !errors.Is(err, ErrPassphrase) {
++		t.Fatalf("DecryptFile error = %v, want ErrPassphrase", err)
++	}
++	if _, err := os.Stat(outPath); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("output %q exists after failed DecryptFile (stat error: %v)", outPath, err)
++	}
++}
++
++// listPackets returns gpg's packet dump of the encrypted file. It needs the
++// passphrase because gpg decrypts the inner packets before dumping them.
++func (e *gpgEnv) listPackets(t *testing.T, inPath, passphrase string) string {
++	t.Helper()
++	cmd := e.command(t,
++		"--batch", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", passphrase,
++		"--list-packets", inPath,
++	)
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --list-packets %s: %v\n%s", inPath, err, stderr.String())
++	}
++	return stdout.String()
++}
++
++// TestGPGSeesExpectedParameters inspects a message produced by EncryptFile from
++// gpg's point of view: AES-256 (cipher 9), iterated+salted S2K (mode 3) with a
++// SHA-256 digest (hash 8), integrity protection (MDC), and no compression.
++func TestGPGSeesExpectedParameters(t *testing.T) {
++	gpg := newGPGEnv(t)
++	const passphrase = "parameter check passphrase"
++	dir := t.TempDir()
++	srcPath := filepath.Join(dir, "in.bin")
++	if err := os.WriteFile(srcPath, []byte("photo bytes"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	encPath := filepath.Join(dir, "in.bin.gpg")
++	if _, err := EncryptFile(encPath, srcPath, passphrase); err != nil {
++		t.Fatalf("EncryptFile: %v", err)
++	}
++
++	dump := gpg.listPackets(t, encPath, passphrase)
++	t.Logf("gpg packet dump:\n%s", dump)
++	for _, want := range []string{
++		"symkey enc packet",
++		"cipher 9", // AES-256
++		"aead 0",   // classic SEIPD v1, not the AEAD extension
++		"s2k 3",    // iterated and salted S2K
++		"hash 8",   // SHA-256
++		"mdc_method: 2",
++	} {
++		if !strings.Contains(dump, want) {
++			t.Errorf("gpg packet dump is missing %q", want)
++		}
++	}
++	if strings.Contains(dump, ":compressed packet:") {
++		t.Error("gpg packet dump contains a compressed packet; encryption must be uncompressed")
++	}
++}
++
++// BenchmarkEncryptFile and BenchmarkDecryptFile report streaming throughput on
++// a 32 MiB local file (the passphrase KDF cost is included once per call).
++const benchFileSize = 32 << 20
++
++func benchmarkInput(b *testing.B) string {
++	b.Helper()
++	srcPath := filepath.Join(b.TempDir(), "bench.bin")
++	if err := os.WriteFile(srcPath, randomBytes(b, benchFileSize), 0o600); err != nil {
++		b.Fatal(err)
++	}
++	return srcPath
++}
++
++func BenchmarkEncryptFile(b *testing.B) {
++	srcPath := benchmarkInput(b)
++	dstPath := filepath.Join(b.TempDir(), "bench.bin.gpg")
++	b.SetBytes(benchFileSize)
++	b.ResetTimer()
++	for i := 0; i < b.N; i++ {
++		if _, err := EncryptFile(dstPath, srcPath, "benchmark passphrase"); err != nil {
++			b.Fatal(err)
++		}
++	}
++}
++
++func BenchmarkDecryptFile(b *testing.B) {
++	srcPath := benchmarkInput(b)
++	encPath := filepath.Join(b.TempDir(), "bench.bin.gpg")
++	if _, err := EncryptFile(encPath, srcPath, "benchmark passphrase"); err != nil {
++		b.Fatal(err)
++	}
++	dstPath := filepath.Join(b.TempDir(), "bench.out")
++	b.SetBytes(benchFileSize)
++	b.ResetTimer()
++	for i := 0; i < b.N; i++ {
++		if _, err := DecryptFile(dstPath, encPath, "benchmark passphrase"); err != nil {
++			b.Fatal(err)
++		}
++	}
++}

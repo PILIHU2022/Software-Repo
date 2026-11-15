@@ -6,9 +6,10 @@
 
 # Software-Repo — Patchwork build overlay
 
-A personal, patch-based build overlay for three Android apps — **ScreenTime**,
-**RecurringExpenseTracker** and **Fcitx5 for Android** — plus **BaiduNetGo**, a
-desktop Netdisk client that is built here but is *not* an Android/F-Droid app.
+A personal, patch-based build overlay for four Android apps — **ScreenTime**,
+**RecurringExpenseTracker**, **Fcitx5 for Android** and the **BaiduNetGo
+Android client** — plus the **BaiduNetGo desktop** client, which is built here
+but is *not* an Android/F-Droid app.
 No application source is vendored here. The repository keeps ordered patch
 queues, plus the CI that applies them to current upstream code: signed APKs are
 published through a signed F-Droid repository, and the desktop app's x86
@@ -44,7 +45,8 @@ code.
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `11cc955` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 10 | `0.1.3-patchwork` (11203, arm64-v8a) |
-| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 22 | `0.8.3.22` — upstream `0.8.3` + 22 patches (linux/windows x86, Arch package; Release + feed) |
+| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 41 | `0.8.3.41` — upstream `0.8.3` + 41 patches (linux/windows x86, Arch package; Release + feed) |
+| BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 41 | `0.8.3-patchwork` (80341 — upstream 803 × 100 + 41 patches) |
 | DataArk | *in-tree* — source at [`dataark/`](dataark/) (no upstream; GPL-3.0, icon from [Android-DataBackup](https://github.com/XayahSuSuSu/Android-DataBackup)) | — | — | `1.0.0` — full source committed, not a patch queue; CI is dormant (see below) |
 
 **DataArk** — the one app whose full source lives in this tree instead of a
@@ -60,7 +62,8 @@ gating — Dhizuku is APK-only, and external `Android/data` requires root. See
 `if: false` job guard): nothing runs it automatically or manually until the
 triggers are consciously re-enabled.
 
-The three Android apps are published in F-Droid. **BaiduNetGo is not**: it is a
+The four Android apps are published in F-Droid. **The BaiduNetGo desktop
+program is not**: it is a
 Go/MyGo desktop program, built on its own 10-day schedule. Its installers —
 `.deb`, `.tar.gz`, an Arch Linux `.pkg.tar.zst` (`sudo pacman -U`) and the
 Windows setup/portable `.zip` — go to a GitHub Release tagged
@@ -138,6 +141,25 @@ by pacman refuses and points at `pacman -U`. Each build also commits
 at
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 (compiled into the binary). It is never an F-Droid package.
+
+**BaiduNetGo (Android)** — the Android half of the same queue: a Material 3
+Expressive Compose client (package `com.pengstem.baidunetgo`) that signs in by
+scanning a QR code, browses the netdisk, and backs up chosen folders and photo
+albums to it on a schedule — each uploaded file OpenPGP-encrypted into a
+`.gpg` that `gpg -d` opens on any computer, the same format the desktop
+backup writes. The desktop and Android builds replay the identical
+`desktop/baidunetgo/patches` queue onto the same upstream head
+(`scripts/build-baidunetgo.sh --prepare` prepares the tree; the Android half
+is built from its `android/` Gradle project by
+`scripts/build-baidunetgo-android.sh` with the same SDK/JDK steps as the other
+apps). The signed APK is published three ways: a tagged GitHub Release
+(`baidunetgo-android-<version>-<short_sha>`, never marked `latest`), the
+F-Droid repository, and the in-app update feed `fdroid/baidunetgo/update.json`
+at <https://software.sparkzh.top/baidunetgo/update.json>, which
+`scripts/baidunetgo-android-feed.py` regenerates each build and
+`deploy-pages.yml` deploys with the rest of `fdroid/`. It is signed with the
+same committed patchwork test keystore as the other apps; the `dev.jks`
+inside the upstream tree is a development-only key and is never used.
 
 Both Android apps with prebuilt native dependencies (RecurringExpenseTracker and
 ScreenTime) are compiled **ARM only**: `KEEP_ABIS="arm64-v8a armeabi-v7a"`
@@ -242,8 +264,8 @@ NDK 28.0.13004108, CMake 3.31.6 and build-tools 36.1.0 SDK packages, and has a
 on `.watch-state.json`'s `baidunetgo` timestamp, resolves `pengstem/baidunetgo`
 `main` with `git ls-remote`, and when the SHA differs from
 `desktop/.build-state.json` replays `desktop/baidunetgo/patches` onto it
-(`git am -3`, with one retry on the last built commit when the queue no longer
-applies), builds `linux/amd64,windows/amd64` with `go tool mygo build`, and
+(`git am -3 --keep-cr`, with one retry on the last built commit when the queue
+no longer applies), builds `linux/amd64,windows/amd64` with `go tool mygo build`, and
 uploads the installers as the `baidunetgo-x86-<sha>` artifact. It also publishes
 them to a Release tagged `baidunetgo-desktop-<version>-<short_sha>` (assets:
 `.deb`, `.tar.gz`, the Arch `.pkg.tar.zst` that a makepkg step builds in an
@@ -252,7 +274,13 @@ marked `latest`) and commits `desktop/baidunetgo/update.json`, the feed the
 patched binary checks from Settings → Updates at
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 (the URL is baked in at build time). A fallback build keeps the recorded head, so
-the next 10-day window retries the new upstream. Nothing in it touches `fdroid/`.
+the next 10-day window retries the new upstream. A second job in the same
+workflow builds the queue's Android client with the same SDK/JDK/keystore steps
+build.yml uses, signs it with the patchwork keystore, publishes it to a
+`baidunetgo-android-<version>-<short_sha>` Release and the F-Droid repository,
+and commits the Android update feed `fdroid/baidunetgo/update.json`
+(<https://software.sparkzh.top/baidunetgo/update.json> — deployed by
+`deploy-pages.yml`). The 10-day window advances only when both builds finished.
 
 The last full build
 ([run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167))
@@ -301,6 +329,20 @@ code is returned unchanged. Because the per-ABI order is preserved
 (`111xx < 112xx < 113xx`), publishing `armeabi-v7a` later would not conflict
 with the arm64 build.
 
+**BaiduNetGo (Android)** follows the same formula, with the queue's patch count
+as the revision (there is no `apps/<app>/` directory to count commits in):
+
+```
+versionCode = 803 × 100 + patch count        (41 patches -> 80341)
+versionName = "<upstream versionName>-patchwork"   (0.8.3 -> "0.8.3-patchwork")
+```
+
+`scripts/build-baidunetgo-android.sh` rewrites `android/app/build.gradle.kts`
+in the prepared tree before the Gradle build, the same file-rewrite approach
+`build-app.sh` uses, and rejects patch counts above 99 like every other app
+here. The desktop build's own scheme (`0.8.3` + `.<patch count>` = `0.8.3.41`)
+is unchanged.
+
 ## Repository layout
 
 ```
@@ -313,17 +355,20 @@ with the arm64 build.
 │   ├── screentime/{app.conf,patches/}   # 0001..0011, KEEP_ABIS=ARM
 │   └── fcitx5/{app.conf,patches/}       # 0001..0010
 ├── desktop/
-│   ├── baidunetgo/{app.conf,patches/}   # 0001..0022, x86 desktop build
+│   ├── baidunetgo/{app.conf,patches/}   # 0001..0041, desktop + Android client
 │   └── .build-state.json                # last upstream commit built
 ├── .watch-state.json          # last android/baidunetgo 10-day check
 ├── scripts/
-│   ├── baidunetgo-feed.py     # write the update feed (update.json)
-│   ├── build-app.sh           # fetch, patch, version, build, verify
-│   ├── build-baidunetgo.sh    # fetch, rebase queue, x86 desktop build
+│   ├── baidunetgo-feed.py       # write the update feed (update.json)
+│   ├── baidunetgo-android-feed.py # write the Android update feed
+│   ├── build-app.sh             # fetch, patch, version, build, verify
+│   ├── build-baidunetgo.sh      # fetch, rebase queue, x86 desktop build
+│   ├── build-baidunetgo-android.sh # build + sign the queue's Android client
 │   ├── build-baidunetgo-arch.sh # makepkg in a container -> Arch package
-│   ├── check-upstream.sh      # upstream SHA diff -> CI matrix
-│   ├── publish-fdroid.sh      # APKs + signed index
-│   ├── test-baidunetgo-feed.sh # its regression test
+│   ├── check-upstream.sh        # upstream SHA diff -> CI matrix
+│   ├── publish-fdroid.sh        # APKs + signed index
+│   ├── test-baidunetgo-feed.sh  # its regression test
+│   ├── test-baidunetgo-android-feed.sh # the Android feed's regression test
 │   ├── test-publish-fdroid.sh # publisher regression test
 │   └── sync-patches.sh        # copy queues from authoring clones
 ├── fdroid/
@@ -379,6 +424,12 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-baidunetgo.sh --prepare
 ./scripts/build-baidunetgo.sh --build
 PATCHWORK_PLATFORMS=linux/amd64 ./scripts/build-baidunetgo.sh   # skip NSIS locally
+
+# The queue's Android client: --prepare once, then the Gradle build + sign
+# (JDK 21 and ANDROID_HOME as above). Defaults to signing with the committed
+# patchwork test keystore.
+./scripts/build-baidunetgo-android.sh --out dist/baidunetgo-android
+./scripts/test-baidunetgo-android-feed.sh
 ```
 
 `dist/build-info.txt` records `upstream_commit`, `patch_count`, `version_code`,
@@ -403,7 +454,7 @@ GIT_SSH_COMMAND='ssh -F /dev/null -o BatchMode=yes' \
 
 ## Updating the patches
 
-Patches are authored in four separate app clones; this repository only consumes
+Patches are authored in five separate app clones; this repository only consumes
 the exported files. Expenses and ScreenTime keep their queue in
 `.patchwork/patches/` (or on a `patchwork` branch); fcitx5-android keeps it on
 the `feat/rime-sync-manager` branch, exported with
@@ -445,6 +496,13 @@ git add desktop/baidunetgo/patches
 git commit -m "Update the BaiduNetGo patch queue"
 git push origin main
 ```
+
+The queue carries both halves of the app — the desktop client and, since the
+Android client landed, its `android/` Gradle project — and one of the patches
+adds a CRLF `android/gradlew.bat`. Plain `git am` strips every trailing CR
+(mailinfo treats the patch as CRLF-formatted mail), so `build-baidunetgo.sh`
+replays the queue with `git am -3 --keep-cr`: the replayed tree then matches
+the authoring clone's `main` tree byte for byte.
 
 `sync-patches.sh` only knows the three Android clones; the desktop queue is
 exported by hand as above (the workflow rebuilds it within 10 days, or run

@@ -1,0 +1,1251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 14 Nov 2026 19:37:36 +0800
+Subject: [PATCH] Follow fontconfig's whole sans-serif family chain and give
+ the patched launcher a BAIDUNETGO_PROFILE data directory instead of an
+ XDG_CONFIG_HOME pointer, since the pointer also hid the user's fonts.conf and
+ made the interface draw Droid Sans instead of the font they set.
+
+---
+ AGENTS.md                                    |   7 +-
+ CHANGELOG.md                                 |   3 +
+ CLAUDE.md                                    |   7 +-
+ README.md                                    |  13 +-
+ app/fontconfig_test.go                       | 115 +++++++---
+ app/settings_page.go                         |  30 ++-
+ app/theme.go                                 |  72 +++++--
+ internal/fontconfig/doc.go                   |  26 ++-
+ internal/fontconfig/fontconfig_linux.go      | 170 +++++++++++----
+ internal/fontconfig/fontconfig_linux_test.go | 208 +++++++++++++------
+ internal/fontconfig/fontconfig_other.go      |   9 +
+ main.go                                      |  26 +++
+ main_test.go                                 |  49 +++++
+ tools/install-patched-local.sh               |  54 +++--
+ 14 files changed, 607 insertions(+), 182 deletions(-)
+ create mode 100644 main_test.go
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 66253e2..44dedf7 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -34,8 +34,9 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ - `BAIDUNETGO_CAPTURE=out.png` (with `BAIDUNETGO_CAPTURE_AFTER=4s`): write a PNG of the window, then quit. This is how to look at the real window from a script.
+ - `BAIDUNETGO_SELFTEST=report.json` (`selftest.go`, `internal/selftest`): headless run of every feature against the saved session, else BaiduPCS-Go's login, inside a `/BaiduNetGo自检-…` folder it deletes afterwards. `BAIDUNETGO_PROBE=1` adds the download speed probe.
+ - `BAIDUNETGO_SNAPSHOTS=dir` with `go test ./app`: tests that call `save(t, tt, name)` write `ui.Tester.Image()` PNGs there, for visual checks without a window.
+-- `BAIDUNETGO_FONT=family`: override the interface font family; empty leaves the setting alone, `-` forces MyGo's own system font.
++- `BAIDUNETGO_FONT=family`: override the interface font family (a comma-separated fallback chain works too); empty leaves the setting alone, `-` forces MyGo's own system font.
+ - `BAIDUNETGO_FONT_SIZE=dip`: override the interface font size in DIP (an integer).
++- `BAIDUNETGO_PROFILE=dir`: this build's own data and cache directory (session, settings, transfers, dedup), set through `mygo.App.SetPath` before the window opens. It changes no XDG variable, so fontconfig, GTK and dconf keep reading the desktop's configuration, which the patched launcher needs.
+ 
+ ## Architecture
+ 
+@@ -43,7 +44,9 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Phases and routing.** `App.phase` is booting → login → ready. Once ready, `shell.go` draws the sidebar and title bar around a `ui.Router` with these routes: `/files/{path...}` (netdisk path, segments `url.PathEscape`d by `filesRoute`/`dirOfRoute`), `/search?q=`, `/transfers`, `/shares`, `/offline`, `/dedup`, `/recycle`, `/settings`. The title bar's controls switch on `a.section()`. Each directory gets its own `listing` (cached in `a.listings`, keyed by dir), so a page sliding out during a router transition keeps showing its own files.
+ 
+-**Interface font (`internal/fontconfig`).** The interface follows this computer's fontconfig default sans-serif rather than a hard-coded face, which matters on desktops without XSettings where MyGo finds no GTK interface font. `fontconfig.Family`/`Size`/`Detected` run `fc-match -f "%{family[0]}\n%{size}\n" sans-serif` once with a 500 ms timeout and cache the answer (`sync.Once`), dropping empty and placeholder families; non-Linux builds return empty so MyGo keeps its own system font. `App.resolvedFont` turns the point size into DIP (`round(pt*4/3)`, clamped 11–17), and `App.applyTheme` sets the light/dark `ui.Theme`'s `Font`/`FontSize` from it each frame. `settings.FollowSystemFont` (nil, so true, by default) turns it off to the built-in 13 DIP and empty family; `BAIDUNETGO_FONT` and `BAIDUNETGO_FONT_SIZE` override both for tests and as an escape hatch. The settings page's 外观 section shows the detected face and a switch. A failed detection or no fontconfig is silent: the app keeps the built-in font.
++**Interface font (`internal/fontconfig`).** The interface follows this computer's fontconfig default sans-serif rather than a hard-coded face, which matters on desktops without XSettings where MyGo finds no GTK interface font. `fontconfig.List`/`Families`/`Family`/`Size`/`Detected` run `fc-match -s -f "%{family}\t%{size}\n" sans-serif` once with a 500 ms timeout and cache the answer until `Reset`. The answer is the whole ordered family chain fontconfig resolves for sans-serif — the face a fonts.conf prepends, then the fallbacks it names for glyphs that face lacks — deduplicated, without placeholders (`System`, `sans-serif`) and capped at 6, each family its ASCII name where it has one so a localized alias never stands for the family. Only the first line's size is used: fallback lines carry their own fonts' sizes (Twemoji reports 58.56). Non-Linux builds return empty so MyGo keeps its own system font. `App.resolvedFont` hands the chain, comma-separated, to `ui.Theme.Font` (MyGo's `familyList` splits it, and `pangoFamily` builds Pango's ordered fallback list) and turns the point size into DIP (`round(pt*4/3)`, clamped 11–17: MyGo lays a FontSize of 16 out the way Pango draws 12pt, as pango-view at 96dpi confirms), and `App.applyTheme` sets the light/dark `ui.Theme`'s `Font`/`FontSize` from it each frame. `settings.FollowSystemFont` (nil, so true, by default) turns it off to the built-in 13 DIP and empty family; `BAIDUNETGO_FONT` and `BAIDUNETGO_FONT_SIZE` override both for tests and as an escape hatch. The settings page's 外观 section shows the chain and the points/DIP in effect, with a 重新检测 button that calls `fontconfig.Reset` and the follow switch. A failed detection or no fontconfig is silent: the app keeps the built-in font.
++
++**Profiles and XDG.** A build that needs its own saved session, settings and transfers (the patched build beside the installed app) gets them from `BAIDUNETGO_PROFILE`, which `main.go`'s `useProfile` turns into `mygo.App.SetPath(PathUserData/PathCache, …)` before `App.Run`; `tools/install-patched-local.sh`'s launcher sets it and changes no XDG variable. Never give a profile its own configuration by pointing `XDG_CONFIG_HOME` elsewhere: fontconfig reads its fonts.conf there, and GTK and dconf their settings, so a patched build launched that way lost the user's fonts and drew fontconfig's Droid Sans fallback — which is exactly why the font looked like it could not be applied.
+ 
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8aff94c..87011ef 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -26,6 +26,9 @@
+ 
+ ### 修复
+ 
++- 修复修复版启动脚本把 XDG 配置目录（`XDG_CONFIG_HOME`）指到独立 profile，连带 fontconfig、GTK、dconf 都换了目录，用户的 `fonts.conf` 不再生效、界面字体回落到 Droid Sans 的问题——这正是“fontconfig 里的字体无法应用”的真正原因：新增 `BAIDUNETGO_PROFILE`，`main.go` 用它只改本应用的数据/缓存目录（`mygo.App.SetPath` 的 PathUserData / PathCache，在窗口打开前设置），不再动任何 XDG 变量；`tools/install-patched-local.sh` 的启动脚本改用它，并沿用原来 `~/.config/baidunetgo-patched-profile/BaiduNetGo` 里的登录与设置，已登录用户不会掉登录态。
++- 修复界面字体只取 fontconfig 解析出的第一个族名、丢掉 fallback 链的问题：改为按 `fc-match -s` 取有序的完整 family 链——fonts.conf prepend 的首选字体，加上为缺字准备的 Noto Sans / Twemoji 等回落字体——英文族名优先、去重、去掉 `System` / `sans-serif` 等占位名、最多 6 个，再交给 MyGo 的 `ui.Theme.Font`；字号仍取最佳匹配的 pt 换算成 DIP 并限幅 11–17。设置页「外观」现在显示实际生效的完整链与 pt/DIP，并新增「重新检测」按钮（装了新字体不必重启）。此前只传第一个族名，缺字、emoji 与符号会落到别的字体，观感就是“字体没完全应用”。
++
+ - 修复选择框只能看不能选：从列表或网格空白处拖出的框现在会真正选中与矩形相交的行（此前依赖 MyGo 的 DragSelect，只在按下落在行上时才选，空白起框选不中任何行）与瓦片；默认替换选择，按住 ⌘ 拖框则追加。
+ - 不再在窗口获得焦点或登录时自动读取剪贴板，避免剪贴板所有者无响应时 GTK 的同步读取卡住主线程；分享链接改由文件工具栏的链接按钮或 Cmd-V 显式读取。
+ - 上传大量小文件时，合并同一目录的完成刷新（约 500 毫秒内一次）与后台完成通知（2 秒内合成一条），并停止空闲时每秒重绘图表和失焦窗口的定时目录刷新，减少界面无响应。
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 444b489..fe87443 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -34,8 +34,9 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ - `BAIDUNETGO_CAPTURE=out.png` (with `BAIDUNETGO_CAPTURE_AFTER=4s`): write a PNG of the window, then quit. This is how to look at the real window from a script.
+ - `BAIDUNETGO_SELFTEST=report.json` (`selftest.go`, `internal/selftest`): headless run of every feature against the saved session, else BaiduPCS-Go's login, inside a `/BaiduNetGo自检-…` folder it deletes afterwards. `BAIDUNETGO_PROBE=1` adds the download speed probe.
+ - `BAIDUNETGO_SNAPSHOTS=dir` with `go test ./app`: tests that call `save(t, tt, name)` write `ui.Tester.Image()` PNGs there, for visual checks without a window.
+-- `BAIDUNETGO_FONT=family`: override the interface font family; empty leaves the setting alone, `-` forces MyGo's own system font.
++- `BAIDUNETGO_FONT=family`: override the interface font family (a comma-separated fallback chain works too); empty leaves the setting alone, `-` forces MyGo's own system font.
+ - `BAIDUNETGO_FONT_SIZE=dip`: override the interface font size in DIP (an integer).
++- `BAIDUNETGO_PROFILE=dir`: this build's own data and cache directory (session, settings, transfers, dedup), set through `mygo.App.SetPath` before the window opens. It changes no XDG variable, so fontconfig, GTK and dconf keep reading the desktop's configuration, which the patched launcher needs.
+ 
+ ## Architecture
+ 
+@@ -43,7 +44,9 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Phases and routing.** `App.phase` is booting → login → ready. Once ready, `shell.go` draws the sidebar and title bar around a `ui.Router` with these routes: `/files/{path...}` (netdisk path, segments `url.PathEscape`d by `filesRoute`/`dirOfRoute`), `/search?q=`, `/transfers`, `/shares`, `/offline`, `/dedup`, `/recycle`, `/settings`. The title bar's controls switch on `a.section()`. Each directory gets its own `listing` (cached in `a.listings`, keyed by dir), so a page sliding out during a router transition keeps showing its own files.
+ 
+-**Interface font (`internal/fontconfig`).** The interface follows this computer's fontconfig default sans-serif rather than a hard-coded face, which matters on desktops without XSettings where MyGo finds no GTK interface font. `fontconfig.Family`/`Size`/`Detected` run `fc-match -f "%{family[0]}\n%{size}\n" sans-serif` once with a 500 ms timeout and cache the answer (`sync.Once`), dropping empty and placeholder families; non-Linux builds return empty so MyGo keeps its own system font. `App.resolvedFont` turns the point size into DIP (`round(pt*4/3)`, clamped 11–17), and `App.applyTheme` sets the light/dark `ui.Theme`'s `Font`/`FontSize` from it each frame. `settings.FollowSystemFont` (nil, so true, by default) turns it off to the built-in 13 DIP and empty family; `BAIDUNETGO_FONT` and `BAIDUNETGO_FONT_SIZE` override both for tests and as an escape hatch. The settings page's 外观 section shows the detected face and a switch. A failed detection or no fontconfig is silent: the app keeps the built-in font.
++**Interface font (`internal/fontconfig`).** The interface follows this computer's fontconfig default sans-serif rather than a hard-coded face, which matters on desktops without XSettings where MyGo finds no GTK interface font. `fontconfig.List`/`Families`/`Family`/`Size`/`Detected` run `fc-match -s -f "%{family}\t%{size}\n" sans-serif` once with a 500 ms timeout and cache the answer until `Reset`. The answer is the whole ordered family chain fontconfig resolves for sans-serif — the face a fonts.conf prepends, then the fallbacks it names for glyphs that face lacks — deduplicated, without placeholders (`System`, `sans-serif`) and capped at 6, each family its ASCII name where it has one so a localized alias never stands for the family. Only the first line's size is used: fallback lines carry their own fonts' sizes (Twemoji reports 58.56). Non-Linux builds return empty so MyGo keeps its own system font. `App.resolvedFont` hands the chain, comma-separated, to `ui.Theme.Font` (MyGo's `familyList` splits it, and `pangoFamily` builds Pango's ordered fallback list) and turns the point size into DIP (`round(pt*4/3)`, clamped 11–17: MyGo lays a FontSize of 16 out the way Pango draws 12pt, as pango-view at 96dpi confirms), and `App.applyTheme` sets the light/dark `ui.Theme`'s `Font`/`FontSize` from it each frame. `settings.FollowSystemFont` (nil, so true, by default) turns it off to the built-in 13 DIP and empty family; `BAIDUNETGO_FONT` and `BAIDUNETGO_FONT_SIZE` override both for tests and as an escape hatch. The settings page's 外观 section shows the chain and the points/DIP in effect, with a 重新检测 button that calls `fontconfig.Reset` and the follow switch. A failed detection or no fontconfig is silent: the app keeps the built-in font.
++
++**Profiles and XDG.** A build that needs its own saved session, settings and transfers (the patched build beside the installed app) gets them from `BAIDUNETGO_PROFILE`, which `main.go`'s `useProfile` turns into `mygo.App.SetPath(PathUserData/PathCache, …)` before `App.Run`; `tools/install-patched-local.sh`'s launcher sets it and changes no XDG variable. Never give a profile its own configuration by pointing `XDG_CONFIG_HOME` elsewhere: fontconfig reads its fonts.conf there, and GTK and dconf their settings, so a patched build launched that way lost the user's fonts and drew fontconfig's Droid Sans fallback — which is exactly why the font looked like it could not be applied.
+ 
+ **Overlays.** One `a.dlg` (`dialog` with a `dialogKind`) drives every modal through `a.dialogs`. The file preview is a separate overlay (`a.pv`, `previewOverlay`). The image preview and the grid/list thumbnails share `ui.ElementTransition{Match: thumbMatch{fsid}}`. The source thumbnail is skipped while `a.previewing(f)`, so the image grows out of it and shrinks back.
+ 
+diff --git a/README.md b/README.md
+index fa23553..b7f67e6 100644
+--- a/README.md
++++ b/README.md
+@@ -31,7 +31,7 @@
+ - **分享**：创建带提取码与有效期的链接、管理我的分享；工具栏的链接按钮、Cmd+Shift+V（没有文件剪贴板时 Cmd+V 也可以）在你操作时读取剪贴板，粘贴整段分享文字一键转存
+ - **离线下载**：HTTP / 磁力链接交给网盘云端下载
+ - **动效**：跟随系统深浅色；文件夹打开时文件依次浮现，删除的文件碎成光点飘散，上传中的文件由光点聚拢成行，拖文件进来时窗口亮起一圈流动的光
+-- **外观与字体**：界面字体族与字号默认跟随本机 fontconfig 的默认 sans-serif（`fc-match sans-serif`），按 pt 换算成 DIP 并限幅 11–17；可在设置「外观」里关闭改用内置字体，或用环境变量 `BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 覆盖
++- **外观与字体**：界面字体族与字号默认跟随本机 fontconfig 对 sans-serif 的**完整 family 链**（`fc-match -s sans-serif`，含用户 fonts.conf 里的 fallback，最多 6 个，英文族名优先），按 pt 换算成 DIP 并限幅 11–17；可在设置「外观」里看实际生效的链与字号、重新检测，或关闭改用内置字体，也可用环境变量 `BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 覆盖
+ 
+ ![深色设置](docs/screenshots/settings-dark.png)
+ 
+@@ -102,13 +102,18 @@ go tool mygo build -sign "BaiduNetGo Dev"   # macOS：用固定的自签名证
+ | `BAIDUNETGO_CAPTURE=out.png` | 窗口打开几秒后截图并退出（`BAIDUNETGO_CAPTURE_AFTER=4s` 调等待时间） |
+ | `BAIDUNETGO_SELFTEST=report.json` | 用真实账号无界面地自检每项功能（在临时文件夹里进行，结束后删除）；加 `BAIDUNETGO_PROBE=1` 再测一次下载速度 |
+ | `BAIDUNETGO_SNAPSHOTS=dir` | 配合 `go test ./app`，把界面测试的画面存成 PNG |
+-| `BAIDUNETGO_FONT=family` | 覆盖界面字体族名；空字符串不覆盖，`-` 强制使用 MyGo 的系统字体 |
++| `BAIDUNETGO_FONT=family` | 覆盖界面字体族名（可写逗号分隔的 fallback 链）；空字符串不覆盖，`-` 强制使用 MyGo 的系统字体 |
+ | `BAIDUNETGO_FONT_SIZE=dip` | 覆盖界面字号（DIP 整数） |
++| `BAIDUNETGO_PROFILE=dir` | 把本应用的 session、settings、传输、查重缓存与缓存目录改到 `dir`（只动应用自己的路径，不动 XDG 变量，fontconfig / GTK 照常读桌面配置）；`tools/install-patched-local.sh` 用它隔离修复版 |
+ | `MYGO_AUTOMATION=/tmp/baidunetgo.sock` | 配合 `go run -tags e2e .`，开放仅当前用户可访问的窗口自动化 socket；正式版不包含此入口 |
+ 
+ ### 外观与字体
+ 
+-界面字体族与字号默认跟随本机 fontconfig 对 `sans-serif` 的解析结果（Linux 上即 `fc-match -f '%{family[0]}\n%{size}\n' sans-serif`；其它平台保持 MyGo 的系统字体）。字号按 1pt ≈ 4/3 DIP 换算，并限幅在 11–17 DIP，例如本机 12pt 显示为 16 DIP。可在设置页的「外观」小节关闭「跟随系统字体」，改用内置的 13 DIP 与系统族名；环境变量 `BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖。没有 fontconfig 或检测失败时静默回落到内置字体，不报错。
++界面字体族与字号默认跟随本机 fontconfig 对 `sans-serif` 的解析结果（Linux 上即 `fc-match -s -f '%{family}\t%{size}\n' sans-serif`；其它平台保持 MyGo 的系统字体）。取的是**完整 family 链**而不是第一个名字：fonts.conf 里 `<edit mode="prepend">` 加进去的首选字体，以及它后面为缺字准备的 fallback（例如 `LXGW WenKai Screen, Noto Sans, Twemoji`），按 fontconfig 的排序去重、去掉 `System` / `sans-serif` 这类占位名，最多保留 6 个，再把整条链交给 MyGo 的 `ui.Theme.Font`（它按逗号拆开交给 Pango，缺字时依次回落）。每行的族名优先取英文名（`LXGW WenKai Screen`），没有英文名才用本地化名，以免不同字体栈对本地化名的支持不一。
++
++字号取自最佳匹配的 `%{size}`（fallback 行带的是别的字体自己的字号，不用），按 1pt = 4/3 DIP 换算并限幅在 11–17 DIP，例如 12pt 显示为 16 DIP。设置页「外观」小节显示实际生效的完整链与字号（如 `LXGW WenKai Screen · Noto Sans · Twemoji，12pt（16 DIP）`），旁边的「重新检测」按钮会清掉缓存、重新读 fontconfig，装了新字体不必重启。可以关闭「跟随系统字体」改用内置的 13 DIP 与系统族名；环境变量 `BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖。没有 fontconfig 或检测失败时静默回落到内置字体，不报错。
++
++注意：fontconfig 读的是 `XDG_CONFIG_HOME`（默认 `~/.config`）下的 `fontconfig/fonts.conf`。给应用做配置隔离时只能改应用自己的数据目录（`BAIDUNETGO_PROFILE`），不要改 `XDG_CONFIG_HOME`，否则 fontconfig、GTK、dconf 都会跟着换目录，用户的字体设置就“应用不上”了。
+ 
+ 窗口自动化可读取控件、点击、输入、选择菜单并截图，协议见 [MyGo automation](https://github.com/egoist/mygo/blob/v0.7.2/docs/plugins/automation.md)。例如列出窗口：
+ 
+@@ -127,7 +132,7 @@ go build -trimpath -ldflags='-s -w' -o build/baidunetgo-patched .
+ tools/install-patched-local.sh
+ ```
+ 
+-会安装独立的「百度网盘 Go（修复版）」条目（图标带橙色 P 标记），在 fuzzel 里搜索「修复」或「patch」可找到。修复版使用自己的配置目录 `~/.config/baidunetgo-patched-profile`：首次启动自动沿用已安装版的登录与设置，传输记录独立，因此可以和已安装版同时运行。重新构建后再次运行脚本即可更新程序，启动项和配置保持不变。
++会安装独立的「百度网盘 Go（修复版）」条目（图标带橙色 P 标记），在 fuzzel 里搜索「修复」或「patch」可找到。修复版通过 `BAIDUNETGO_PROFILE` 使用自己的数据目录 `~/.config/baidunetgo-patched-profile/BaiduNetGo`：首次启动自动沿用已安装版的登录与设置，传输记录独立，因此可以和已安装版同时运行。它**不改 `XDG_CONFIG_HOME`**，fontconfig、GTK 与 dconf 仍读 `~/.config`，字体设置照常生效（早先的启动脚本改过 `XDG_CONFIG_HOME`，导致修复版丢掉用户 fonts.conf、字体回落到 Droid Sans）。重新构建后再次运行脚本即可更新程序，启动项和配置保持不变。
+ 
+ ### 发布
+ 
+diff --git a/app/fontconfig_test.go b/app/fontconfig_test.go
+index 58a7af4..aa27aa2 100644
+--- a/app/fontconfig_test.go
++++ b/app/fontconfig_test.go
+@@ -2,7 +2,6 @@ package app
+ 
+ import (
+ 	"os"
+-	"strconv"
+ 	"testing"
+ 	"time"
+ 
+@@ -34,37 +33,30 @@ func clearFontEnv(t *testing.T) {
+ 	}
+ }
+ 
+-// stubFont makes detection report fam at pt (or nothing) for one test.
+-func stubFont(t *testing.T, fam string, pt float32, hasSize bool) {
++// stubFont makes detection report chain at pt (or nothing) for one test.
++func stubFont(t *testing.T, chain string, pt float32, hasSize bool) {
+ 	t.Helper()
+-	oldFamily, oldSize, oldDetected := fcFamily, fcSize, fcDetected
+-	fcFamily = func() string { return fam }
++	oldFamilies, oldSize := fcFamilies, fcSize
++	fcFamilies = func() string { return chain }
+ 	fcSize = func() (float32, bool) { return pt, hasSize }
+-	fcDetected = func() string {
+-		if fam == "" {
+-			return ""
+-		}
+-		if hasSize {
+-			return fam + " " + strconv.FormatFloat(float64(pt), 'f', -1, 32) + "pt"
+-		}
+-		return fam
+-	}
+-	t.Cleanup(func() { fcFamily, fcSize, fcDetected = oldFamily, oldSize, oldDetected })
++	t.Cleanup(func() { fcFamilies, fcSize = oldFamilies, oldSize })
+ }
+ 
+ // TestFollowSystemFontOn checks that, by default, the theme takes the
+-// detected family and the size converted from points to DIP.
++// whole family chain fontconfig resolves and the size converted from
++// points to DIP.
+ func TestFollowSystemFontOn(t *testing.T) {
+ 	clearFontEnv(t)
+-	stubFont(t, "测试字体", 12, true)
++	chain := "LXGW WenKai Screen,Noto Sans,Twemoji"
++	stubFont(t, chain, 12, true)
+ 	a := New()
+-	if fam, size := a.resolvedFont(); fam != "测试字体" || size != 16 {
+-		t.Fatalf("resolved %q %v, want 测试字体 16", fam, size)
++	if fam, size := a.resolvedFont(); fam != chain || size != 16 {
++		t.Fatalf("resolved %q %v, want %q 16", fam, size, chain)
+ 	}
+ 	tt := ui.NewTester(a.View, 640, 420)
+ 	tt.Advance(50 * time.Millisecond)
+-	if lightTheme.Font != "测试字体" || lightTheme.FontSize != 16 {
+-		t.Errorf("theme font %q at %v, want 测试字体 at 16", lightTheme.Font, lightTheme.FontSize)
++	if lightTheme.Font != chain || lightTheme.FontSize != 16 {
++		t.Errorf("theme font %q at %v, want %q at 16", lightTheme.Font, lightTheme.FontSize, chain)
+ 	}
+ }
+ 
+@@ -99,10 +91,10 @@ func TestFontSizeEnvOverride(t *testing.T) {
+ }
+ 
+ // TestFontFamilyEnvOverride checks that BAIDUNETGO_FONT wins over the
+-// detected family, and "-" forces the built-in one.
++// detected chain, and "-" forces the built-in one.
+ func TestFontFamilyEnvOverride(t *testing.T) {
+ 	clearFontEnv(t)
+-	stubFont(t, "测试字体", 12, true)
++	stubFont(t, "测试字体,回落字体", 12, true)
+ 	t.Setenv("BAIDUNETGO_FONT", "自定义字体")
+ 	a := New()
+ 	if fam, _ := a.resolvedFont(); fam != "自定义字体" {
+@@ -115,9 +107,9 @@ func TestFontFamilyEnvOverride(t *testing.T) {
+ }
+ 
+ // TestFontSizeClamped checks the point-to-DIP conversion's bounds: tiny
+-// sizes rise to 11 and huge ones fall to 17.
++// sizes rise to the minimum and huge ones fall to the maximum.
+ func TestFontSizeClamped(t *testing.T) {
+-	cases := map[float32]float32{6: 11, 9: 12, 12: 16, 14: 17, 24: 17}
++	cases := map[float32]float32{6: fontMinDIP, 9: 12, 12: 16, 14: fontMaxDIP, 24: fontMaxDIP}
+ 	for pt, want := range cases {
+ 		if got := themeFontSize(pt); got != want {
+ 			t.Errorf("themeFontSize(%v) = %v, want %v", pt, got, want)
+@@ -141,6 +133,36 @@ func TestFontDetectionFailureFallback(t *testing.T) {
+ 	}
+ }
+ 
++// TestFontDetail checks what the settings page says about the font in
++// effect: the whole chain, the points fontconfig gave, and the DIP the
++// theme uses.
++func TestFontDetail(t *testing.T) {
++	clearFontEnv(t)
++	stubFont(t, "LXGW WenKai Screen,Noto Sans,Twemoji", 12, true)
++	a := New()
++	want := "LXGW WenKai Screen · Noto Sans · Twemoji，12pt（16 DIP）"
++	if got := a.fontDetail(); got != want {
++		t.Errorf("fontDetail() = %q, want %q", got, want)
++	}
++
++	// An environment override has no point size to show.
++	t.Setenv("BAIDUNETGO_FONT", "自定义字体")
++	if got, want := a.fontDetail(), "自定义字体，16 DIP"; got != want {
++		t.Errorf("fontDetail() with an override = %q, want %q", got, want)
++	}
++
++	// The built-in font is named as such.
++	t.Setenv("BAIDUNETGO_FONT", "-")
++	if got, want := a.fontDetail(), "内置字体，16 DIP"; got != want {
++		t.Errorf("fontDetail() built-in = %q, want %q", got, want)
++	}
++	off := false
++	a.settings.FollowSystemFont = &off
++	if got, want := a.fontDetail(), "内置字体，13 DIP"; got != want {
++		t.Errorf("fontDetail() turned off = %q, want %q", got, want)
++	}
++}
++
+ // TestFollowSystemFontSetting flips the switch on the settings page and
+ // checks that the choice takes effect at once.
+ func TestFollowSystemFontSetting(t *testing.T) {
+@@ -181,12 +203,51 @@ func TestFollowSystemFontSetting(t *testing.T) {
+ 	}
+ }
+ 
++// TestFontRedeectButton checks the settings page's 重新检测 button: it
++// forgets the cached answer, so a font installed while the app runs shows
++// at once.
++func TestFontRedeectButton(t *testing.T) {
++	clearFontEnv(t)
++	oldFamilies, oldSize, oldReset := fcFamilies, fcSize, fcReset
++	t.Cleanup(func() { fcFamilies, fcSize, fcReset = oldFamilies, oldSize, oldReset })
++	chain := "测试字体"
++	fcFamilies = func() string { return chain }
++	fcSize = func() (float32, bool) { return 12, true }
++	detected := 0
++	fcReset = func() {
++		detected++
++		chain = "新字体,回落字体"
++	}
++	a, tt, _ := signedIn(t)
++	a.router.Replace("/settings")
++	tt.Advance(300 * time.Millisecond)
++	btn, ok := tt.AccessByRole(ui.RoleButton, "重新检测")
++	if !ok {
++		t.Fatalf("no 重新检测 button; texts %q", tt.Texts())
++	}
++	if got := a.fontDetail(); got != "测试字体，12pt（16 DIP）" {
++		t.Fatalf("fontDetail() before = %q", got)
++	}
++	b := btn.Bounds
++	tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++	tt.Advance(300 * time.Millisecond)
++	if detected != 1 {
++		t.Errorf("detection reset %d times, want once", detected)
++	}
++	if fam, _ := a.resolvedFont(); fam != "新字体,回落字体" {
++		t.Errorf("resolved family after 重新检测 = %q", fam)
++	}
++	if got, want := a.fontDetail(), "新字体 · 回落字体，12pt（16 DIP）"; got != want {
++		t.Errorf("fontDetail() after = %q, want %q", got, want)
++	}
++}
++
+ // TestFontFollowSnapshot draws the settings page following the machine's
+-// real fontconfig, for a look at the glyphs and line height.
++// real fontconfig, for a look at the glyphs, the chain and the line height.
+ func TestFontFollowSnapshot(t *testing.T) {
+ 	clearFontEnv(t)
+ 	a, tt, _ := signedIn(t)
+ 	a.router.Replace("/settings")
+ 	tt.Advance(500 * time.Millisecond)
+-	save(t, tt, "font-follow")
++	save(t, tt, "font-chain")
+ }
+diff --git a/app/settings_page.go b/app/settings_page.go
+index 0f9d25f..2670296 100644
+--- a/app/settings_page.go
++++ b/app/settings_page.go
+@@ -296,14 +296,20 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 				follow := s.followSystemFont()
+ 				detail := ""
+ 				if follow {
+-					detail = fcDetected()
+-					if detail == "" {
++					if fcFamilies() == "" {
+ 						detail = "未检测到 fontconfig，使用内置字体"
++					} else {
++						detail = a.fontDetail()
+ 					}
+ 				} else {
+-					detail = "已关闭，使用内置字体 13"
++					detail = "已关闭，使用内置字体 13 DIP"
+ 				}
+-				settingRow(c, t, p, "跟随系统字体", "", detail, func() {
++				settingRowWrapped(c, t, p, "跟随系统字体", detail, func() {
++					if follow {
++						if pill(c, t, p, "", "重新检测", false).Clicked() {
++							fcReset() // re-read fontconfig: fonts may have been installed meanwhile
++						}
++					}
+ 					if ui.Switch(c, &follow).Label("跟随系统字体").Changed() {
+ 						v := follow
+ 						s.FollowSystemFont = &v
+@@ -368,6 +374,17 @@ func section(c *ui.Context, t *ui.Theme, p *palette, title string, rows func())
+ // settingRow is one setting: what it is, in what unit when it is a number,
+ // with a line more under it when needed, and its control at the end.
+ func settingRow(c *ui.Context, t *ui.Theme, p *palette, title, unit, detail string, control func()) {
++	settingRowOf(c, t, p, title, unit, detail, false, control)
++}
++
++// settingRowWrapped is settingRow with a detail that may take more than one
++// line, for a long one such as the font family chain, so the end of it is
++// read rather than clipped.
++func settingRowWrapped(c *ui.Context, t *ui.Theme, p *palette, title, detail string, control func()) {
++	settingRowOf(c, t, p, title, "", detail, true, control)
++}
++
++func settingRowOf(c *ui.Context, t *ui.Theme, p *palette, title, unit, detail string, wrap bool, control func()) {
+ 	ui.Row(c).MinHeight(48).Padding(8, 0).Gap(12).AlignItems(ui.Center).Children(func() {
+ 		ui.Column(c).Grow(1).Shrink(1).Gap(2).Children(func() {
+ 			ui.Row(c).Gap(5).AlignItems(ui.Baseline).Children(func() {
+@@ -377,7 +394,10 @@ func settingRow(c *ui.Context, t *ui.Theme, p *palette, title, unit, detail stri
+ 				}
+ 			})
+ 			if detail != "" {
+-				ui.Text(c, detail).FontSize(11).TextColor(t.TextMuted).SingleLine()
++				d := ui.Text(c, detail).FontSize(11).TextColor(t.TextMuted)
++				if !wrap {
++					d.SingleLine()
++				}
+ 			}
+ 		})
+ 		ui.Row(c).Gap(8).AlignItems(ui.Center).Shrink(0).Children(control)
+diff --git a/app/theme.go b/app/theme.go
+index 90c58e3..2487241 100644
+--- a/app/theme.go
++++ b/app/theme.go
+@@ -4,6 +4,7 @@ import (
+ 	"math"
+ 	"os"
+ 	"strconv"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/egoist/mygo/ui"
+@@ -119,18 +120,21 @@ func init() {
+ }
+ 
+ // The built-in font, used when the user does not follow fontconfig: 13
+-// DIP and MyGo's own system family.
++// DIP and MyGo's own system family. fontMinDIP and fontMaxDIP clamp what
++// fontconfig reports, so a very small or huge setting stays usable.
+ const (
+ 	builtinFontSize = 13
+ 	builtinFont     = ""
++	fontMinDIP      = 11
++	fontMaxDIP      = 17
+ )
+ 
+ // Detection is behind variables so tests can stand in for fc-match
+ // without one installed.
+ var (
+-	fcFamily   = fontconfig.Family
++	fcFamilies = fontconfig.Families
+ 	fcSize     = fontconfig.Size
+-	fcDetected = fontconfig.Detected
++	fcReset    = fontconfig.Reset
+ )
+ 
+ // applyTheme sets the app's theme for this frame, following the system's
+@@ -149,21 +153,19 @@ func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
+ }
+ 
+ // resolvedFont is the interface font for this frame: fontconfig's default
+-// sans-serif while the user follows the system, else the built-in 13 DIP
+-// with no family. BAIDUNETGO_FONT and BAIDUNETGO_FONT_SIZE win, for tests
+-// and as an escape hatch; their empty values leave the setting alone.
++// sans-serif family chain (the face it picks, then the fallbacks its
++// fonts.conf names for the glyphs it lacks) while the user follows the
++// system, else the built-in 13 DIP with no family. BAIDUNETGO_FONT and
++// BAIDUNETGO_FONT_SIZE win, for tests and as an escape hatch; their empty
++// values leave the setting alone.
+ func (a *App) resolvedFont() (family string, size float32) {
+ 	family, size = builtinFont, builtinFontSize
+ 	if a.settings.followSystemFont() {
+-		if f := fcFamily(); f != "" {
+-			family = f
+-		}
+-		if pt, ok := fcSize(); ok && pt > 0 {
+-			size = themeFontSize(pt)
+-		}
+-		if family == builtinFont {
+-			// Nothing detected: keep the built-in size too.
+-			size = builtinFontSize
++		if chain := fcFamilies(); chain != "" {
++			family = chain
++			if pt, ok := fcSize(); ok && pt > 0 {
++				size = themeFontSize(pt)
++			}
+ 		}
+ 	}
+ 	if v, ok := os.LookupEnv("BAIDUNETGO_FONT"); ok && v != "" {
+@@ -181,11 +183,47 @@ func (a *App) resolvedFont() (family string, size float32) {
+ 	return family, size
+ }
+ 
+-// themeFontSize converts a point size to DIP (1pt ≈ 4/3 DIP at 96dpi),
++// themeFontSize converts a point size to DIP (1pt = 4/3 DIP at 96dpi, as
++// MyGo lays text out: a FontSize of 16 draws the way Pango draws 12pt),
+ // then clamps it so a very small or huge fontconfig setting stays usable.
+ func themeFontSize(pt float32) float32 {
+ 	dip := float32(math.Round(float64(pt) * 4 / 3))
+-	return min(max(dip, 11), 17)
++	return min(max(dip, fontMinDIP), fontMaxDIP)
++}
++
++// fontDetail names the font in effect for the settings page: the family
++// chain handed to MyGo, then the point size fontconfig reported and the
++// DIP the theme uses, as "LXGW WenKai Screen · Noto Sans · Twemoji，12pt
++// （16 DIP）". A chain set through the environment has no point size to
++// show, and the built-in font is named as such.
++func (a *App) fontDetail() string {
++	family, size := a.resolvedFont()
++	dip := strconv.FormatFloat(float64(size), 'f', -1, 32)
++	if family == "" {
++		return "内置字体，" + dip + " DIP"
++	}
++	names := strings.Split(family, ",")
++	for i, name := range names {
++		names[i] = strings.TrimSpace(name)
++	}
++	chain := strings.Join(names, " · ")
++	if pt, ok := fcSize(); ok && pt > 0 && a.settings.followSystemFont() && !fontEnvSet() && !sizeEnvSet() {
++		return chain + "，" + strconv.FormatFloat(float64(pt), 'f', -1, 32) + "pt（" + dip + " DIP）"
++	}
++	return chain + "，" + dip + " DIP"
++}
++
++// fontEnvSet reports whether BAIDUNETGO_FONT overrides the detected
++// family, in which case fontconfig's point size is not the size in effect.
++func fontEnvSet() bool {
++	v, ok := os.LookupEnv("BAIDUNETGO_FONT")
++	return ok && v != ""
++}
++
++// sizeEnvSet reports whether BAIDUNETGO_FONT_SIZE overrides the size.
++func sizeEnvSet() bool {
++	v, ok := os.LookupEnv("BAIDUNETGO_FONT_SIZE")
++	return ok && v != ""
+ }
+ 
+ // Motion shared across the app: one curve, no bounce, and three lengths
+diff --git a/internal/fontconfig/doc.go b/internal/fontconfig/doc.go
+index 7036e61..9f384fb 100644
+--- a/internal/fontconfig/doc.go
++++ b/internal/fontconfig/doc.go
+@@ -1,11 +1,19 @@
+-// Package fontconfig reads the desktop's default sans-serif font from
+-// fontconfig, which on Linux is what the rest of the desktop draws with.
+-// MyGo only asks GTK for its gtk-font-name and takes no size, so on a
+-// desktop without XSettings (Hyprland, for one) it finds nothing and
+-// falls back to a built-in face; this package gives the app the face
+-// fontconfig itself resolves for sans-serif.
++// Package fontconfig reads the desktop's default sans-serif font chain
++// from fontconfig, which on Linux is what the rest of the desktop draws
++// with. MyGo only asks GTK for its gtk-font-name and takes no size, so on
++// a desktop without XSettings (Hyprland, for one) it finds nothing and
++// falls back to a built-in face; this package gives the app the family
++// chain fontconfig itself resolves for sans-serif, fallbacks included,
++// and the size it reports.
+ //
+-// Detection runs once and is cached. On a platform without fontconfig,
+-// and when fc-match is missing, fails or prints nothing usable, the
+-// functions return empty results and the caller keeps its own font.
++// The chain matters: a fonts.conf that prepends "LXGW WenKai Screen" to
++// sans-serif and then lists Noto Sans and Twemoji means "this face first,
++// those for the glyphs it lacks". Passing only the first family loses
++// the fallbacks, so missing glyphs go wherever fontconfig's own default
++// list happens to point.
++//
++// Detection runs once and is cached until Reset. On a platform without
++// fontconfig, and when fc-match is missing, fails or prints nothing
++// usable, the functions return empty results and the caller keeps its own
++// font.
+ package fontconfig
+diff --git a/internal/fontconfig/fontconfig_linux.go b/internal/fontconfig/fontconfig_linux.go
+index 37cec2e..8581d15 100644
+--- a/internal/fontconfig/fontconfig_linux.go
++++ b/internal/fontconfig/fontconfig_linux.go
+@@ -11,9 +11,15 @@ import (
+ 	"time"
+ )
+ 
+-// timeout bounds fc-match: it answers at once, so a longer wait only
+-// delays a frame.
+-const timeout = 500 * time.Millisecond
++const (
++	// timeout bounds fc-match: it answers in milliseconds, so a longer
++	// wait only delays a frame.
++	timeout = 500 * time.Millisecond
++	// maxFamilies keeps the list short enough to draw and to read: the
++	// first fontconfig picks, its fallbacks for missing glyphs, and a few
++	// more in the order fontconfig itself would try them.
++	maxFamilies = 6
++)
+ 
+ // fcMatch is the program detection runs. Tests point it at a fake
+ // script; the PATH is searched when it holds a bare name.
+@@ -21,63 +27,141 @@ var fcMatch = "fc-match"
+ 
+ // result is what fc-match said once; a zero result means none.
+ type result struct {
+-	family  string
+-	size    float32
+-	hasSize bool
++	families []string // the best match's families, then its fallbacks
++	size     float32  // the point size fontconfig resolved for the match
++	hasSize  bool
+ }
+ 
+ var (
+-	once   sync.Once
+-	cached result
++	mu       sync.Mutex
++	cached   result
++	detected bool // whether cached holds an answer, failure included
+ )
+ 
+-// detect runs fc-match for the default sans-serif and parses its family
+-// and size. It runs at most once per process, as detection is cached.
++// detect runs fc-match for the default sans-serif and parses the chain of
++// families it would use and the size. It runs at most once per process,
++// until Reset, as detection is cached.
+ func detect() result {
+-	once.Do(func() {
+-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+-		defer cancel()
+-		out, err := exec.CommandContext(ctx, fcMatch, "-f", "%{family[0]}\n%{size}\n", "sans-serif").Output()
+-		if err != nil {
+-			return
+-		}
+-		cached = parse(string(out))
+-	})
++	mu.Lock()
++	defer mu.Unlock()
++	if detected {
++		return cached
++	}
++	detected = true
++	cached = probe()
+ 	return cached
+ }
+ 
+-// parse reads the family from the first line and the size from the
+-// second, ignoring anything unusable.
++// probe asks fc-match for every match of the default sans-serif, best
++// first, with each one's families and point size.
++func probe() result {
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++	out, err := exec.CommandContext(ctx, fcMatch, "-s", "-f", "%{family}\t%{size}\n", "sans-serif").Output()
++	if err != nil {
++		return result{}
++	}
++	return parse(string(out))
++}
++
++// parse reads one match per line, each "families,comma,separated<TAB>size",
++// in fontconfig's order. The first usable family of each line joins the
++// chain, deduplicated and capped; the size comes from the first line, the
++// match itself, as the fallback lines carry other fonts' own sizes.
+ func parse(out string) result {
+-	lines := strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n")
+ 	var r result
+-	if len(lines) > 0 {
+-		r.family = cleanFamily(lines[0])
+-	}
+-	if len(lines) > 1 {
+-		if pt, err := strconv.ParseFloat(strings.TrimSpace(lines[1]), 32); err == nil && pt > 0 {
+-			r.size, r.hasSize = float32(pt), true
++	seen := map[string]bool{}
++	for i, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
++		families, size := line, ""
++		if k := strings.IndexByte(line, '\t'); k >= 0 {
++			families, size = line[:k], line[k+1:]
++		}
++		if i == 0 {
++			if pt, err := strconv.ParseFloat(strings.TrimSpace(size), 32); err == nil && pt > 0 {
++				r.size, r.hasSize = float32(pt), true
++			}
++		}
++		name := pickFamily(strings.Split(families, ","))
++		if name == "" || seen[name] {
++			continue
++		}
++		seen[name] = true
++		r.families = append(r.families, name)
++		if len(r.families) >= maxFamilies {
++			break
+ 		}
+ 	}
+-	if r.family == "" {
++	if len(r.families) == 0 {
+ 		return result{}
+ 	}
+ 	return r
+ }
+ 
++// pickFamily is the name to use for one match: the first all-ASCII one,
++// which is the family's own name rather than a localized alias Pango may
++// know under another name, else the first usable one at all.
++func pickFamily(names []string) string {
++	first := ""
++	for _, name := range names {
++		name = cleanFamily(name)
++		if name == "" {
++			continue
++		}
++		if first == "" {
++			first = name
++		}
++		if isASCII(name) {
++			return name
++		}
++	}
++	return first
++}
++
+ // cleanFamily drops the emptiness and placeholders fc-match can print in
+ // place of a real family.
+ func cleanFamily(s string) string {
+ 	s = strings.TrimSpace(s)
+-	switch {
+-	case s == "", s == "-", strings.EqualFold(s, "system"), strings.EqualFold(s, "sans-serif"):
++	switch strings.ToLower(s) {
++	case "", "-", "system", "system-ui", "sans-serif", "serif", "monospace", "ui-sans-serif", "ui-serif", "ui-monospace":
+ 		return ""
+ 	}
++	for _, r := range s {
++		if r < 0x20 || r == 0x7f {
++			return ""
++		}
++	}
+ 	return s
+ }
+ 
+-// Family is the default sans-serif family fontconfig resolves, or "".
+-func Family() string { return detect().family }
++// isASCII reports whether s is plain ASCII, so a localized family name
++// such as 霞鹜文楷 屏幕阅读版 does not stand for the family.
++func isASCII(s string) bool {
++	for _, r := range s {
++		if r > 0x7e || r < 0x20 {
++			return false
++		}
++	}
++	return true
++}
++
++// List is the ordered chain of families fontconfig resolves for
++// sans-serif, best first, each the family's ASCII name where it has one.
++func List() []string {
++	families := detect().families
++	return append([]string(nil), families...)
++}
++
++// Families is that chain as the comma-separated list MyGo's theme takes
++// for its font, or "" when nothing was found.
++func Families() string { return strings.Join(detect().families, ",") }
++
++// Family is the first, best family of the chain, or "".
++func Family() string {
++	if families := detect().families; len(families) > 0 {
++		return families[0]
++	}
++	return ""
++}
+ 
+ // Size is that family's size in points, and whether fontconfig gave one.
+ func Size() (float32, bool) {
+@@ -86,14 +170,26 @@ func Size() (float32, bool) {
+ }
+ 
+ // Detected describes the detected font for the interface, as
+-// "霞鹜文楷 屏幕阅读版 12pt", or "" when nothing was found.
++// "LXGW WenKai Screen, Noto Sans, Twemoji 12pt", or "" when nothing was
++// found.
+ func Detected() string {
+ 	r := detect()
+-	if r.family == "" {
++	if len(r.families) == 0 {
+ 		return ""
+ 	}
++	s := strings.Join(r.families, ", ")
+ 	if r.hasSize {
+-		return r.family + " " + strconv.FormatFloat(float64(r.size), 'f', -1, 32) + "pt"
++		s += " " + strconv.FormatFloat(float64(r.size), 'f', -1, 32) + "pt"
+ 	}
+-	return r.family
++	return s
++}
++
++// Reset forgets the cached answer, so the next call asks fc-match again;
++// the settings page's 重新检测 button uses it to pick up fonts installed
++// while the app runs.
++func Reset() {
++	mu.Lock()
++	detected = false
++	cached = result{}
++	mu.Unlock()
+ }
+diff --git a/internal/fontconfig/fontconfig_linux_test.go b/internal/fontconfig/fontconfig_linux_test.go
+index 9e3c12c..cb4c86d 100644
+--- a/internal/fontconfig/fontconfig_linux_test.go
++++ b/internal/fontconfig/fontconfig_linux_test.go
+@@ -6,7 +6,6 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+-	"sync"
+ 	"testing"
+ 	"time"
+ )
+@@ -23,33 +22,131 @@ func fakeFc(t *testing.T, body string) {
+ 	}
+ 	old := fcMatch
+ 	fcMatch = p
+-	once = sync.Once{}
+-	cached = result{}
++	Reset()
+ 	t.Cleanup(func() {
+ 		fcMatch = old
+-		once = sync.Once{}
+-		cached = result{}
++		Reset()
+ 	})
+ }
+ 
+-// TestDetectParses checks the normal answer: a family on the first line
+-// and a point size on the second.
+-func TestDetectParses(t *testing.T) {
+-	fakeFc(t, `printf '霞鹜文楷 屏幕阅读版\n12\n'`)
++// match formats one fc-match -s line: families comma-separated, a tab and
++// the size.
++func match(size string, families ...string) string {
++	return strings.Join(families, ",") + "\t" + size
++}
++
++// TestChain checks the normal answer: the best match's localized and own
++// name, then fontconfig's fallbacks, all in order, and the size of the
++// match itself rather than of a fallback.
++func TestChain(t *testing.T) {
++	fakeFc(t, `printf '`+match("12", "霞鹜文楷 屏幕阅读版", "LXGW WenKai Screen")+"\n"+
++		match("58.56", "Twemoji")+"\n"+
++		match("12", "Noto Sans")+"\n"+
++		match("12", "DejaVu Sans")+"\n'")
++	if got := Family(); got != "LXGW WenKai Screen" {
++		t.Errorf("Family() = %q, want the ASCII family name", got)
++	}
++	if got, want := Families(), "LXGW WenKai Screen,Twemoji,Noto Sans,DejaVu Sans"; got != want {
++		t.Errorf("Families() = %q, want %q", got, want)
++	}
++	if got, want := strings.Join(List(), "|"), "LXGW WenKai Screen|Twemoji|Noto Sans|DejaVu Sans"; got != want {
++		t.Errorf("List() = %q, want %q", got, want)
++	}
++	if pt, ok := Size(); !ok || pt != 12 {
++		t.Errorf("Size() = %v, %v, want 12", pt, ok)
++	}
++	if got := Detected(); got != "LXGW WenKai Screen, Twemoji, Noto Sans, DejaVu Sans 12pt" {
++		t.Errorf("Detected() = %q", got)
++	}
++}
++
++// TestChainKeepsLocalizedName checks that a match with no ASCII name keeps
++// its one name, so the chain still names a real family.
++func TestChainKeepsLocalizedName(t *testing.T) {
++	fakeFc(t, `printf '`+match("12", "霞鹜文楷 屏幕阅读版")+"\n'")
+ 	if got := Family(); got != "霞鹜文楷 屏幕阅读版" {
+ 		t.Errorf("Family() = %q", got)
+ 	}
++}
++
++// TestChainFiltersPlaceholders checks that placeholders and blanks are
++// dropped from the chain rather than passed to Pango.
++func TestChainFiltersPlaceholders(t *testing.T) {
++	fakeFc(t, `printf '`+match("12", "System")+"\n"+
++		match("12", "sans-serif")+"\n"+
++		match("12", "serif")+"\n"+
++		match("12", "")+"\n"+
++		match("12", "Real Font")+"\n'")
++	if got, want := Families(), "Real Font"; got != want {
++		t.Errorf("Families() = %q, want %q", got, want)
++	}
++}
++
++// TestChainDedupes checks that a family fontconfig lists more than once,
++// as it does for each matching file, joins the chain once.
++func TestChainDedupes(t *testing.T) {
++	fakeFc(t, `printf '`+match("12", "DejaVu Sans")+"\n"+
++		match("12", "DejaVu Sans")+"\n"+
++		match("12", "Arial")+"\n"+
++		match("12", "DejaVu Sans")+"\n'")
++	if got, want := Families(), "DejaVu Sans,Arial"; got != want {
++		t.Errorf("Families() = %q, want %q", got, want)
++	}
++}
++
++// TestChainCap checks that only the first maxFamilies families are kept.
++func TestChainCap(t *testing.T) {
++	var body strings.Builder
++	body.WriteString("printf '")
++	for i := 0; i < maxFamilies+4; i++ {
++		if i > 0 {
++			body.WriteString(`\n`)
++		}
++		body.WriteString(match("12", "Font "+string(rune('A'+i))))
++	}
++	body.WriteString("'\n")
++	fakeFc(t, body.String())
++	if got := len(List()); got != maxFamilies {
++		t.Errorf("List() has %d families, want %d", got, maxFamilies)
++	}
++}
++
++// TestSizeFirstLineOnly checks that a fallback font's own size, such as
++// Twemoji's 58.56, does not become the interface size.
++func TestSizeFirstLineOnly(t *testing.T) {
++	fakeFc(t, `printf '`+match("12", "Main Font")+"\n"+
++		match("58.56", "Twemoji")+"\n'")
+ 	if pt, ok := Size(); !ok || pt != 12 {
+-		t.Errorf("Size() = %v, %v", pt, ok)
++		t.Errorf("Size() = %v, %v, want 12", pt, ok)
+ 	}
+-	if got := Detected(); got != "霞鹜文楷 屏幕阅读版 12pt" {
+-		t.Errorf("Detected() = %q", got)
++}
++
++// TestParseNoSize checks that a missing or unusable size line keeps the
++// families and reports no size.
++func TestParseNoSize(t *testing.T) {
++	for _, size := range []string{"", "not-a-number", "0", "-3"} {
++		fakeFc(t, `printf '`+match(size, "Some Font")+"\n'")
++		if got := Families(); got != "Some Font" {
++			t.Errorf("Families() = %q for size %q", got, size)
++		}
++		if _, ok := Size(); ok {
++			t.Errorf("Size() said it had a size for %q", size)
++		}
++		if got := Detected(); got != "Some Font" {
++			t.Errorf("Detected() = %q for size %q", got, size)
++		}
+ 	}
+ }
+ 
+ // TestDetectEmpty checks that no output means no font, not a panic.
+ func TestDetectEmpty(t *testing.T) {
+ 	fakeFc(t, `exit 0`)
++	if got := Families(); got != "" {
++		t.Errorf("Families() = %q", got)
++	}
++	if got := List(); got != nil {
++		t.Errorf("List() = %q", got)
++	}
+ 	if got := Family(); got != "" {
+ 		t.Errorf("Family() = %q", got)
+ 	}
+@@ -64,8 +161,8 @@ func TestDetectEmpty(t *testing.T) {
+ // TestDetectFailure checks a failing fc-match: empty, silently.
+ func TestDetectFailure(t *testing.T) {
+ 	fakeFc(t, `exit 1`)
+-	if got := Family(); got != "" {
+-		t.Errorf("Family() = %q", got)
++	if got := Families(); got != "" {
++		t.Errorf("Families() = %q", got)
+ 	}
+ 	if _, ok := Size(); ok {
+ 		t.Error("Size() said it had a size")
+@@ -77,8 +174,8 @@ func TestDetectFailure(t *testing.T) {
+ func TestDetectTimeout(t *testing.T) {
+ 	fakeFc(t, `exec sleep 5`) // exec, so the timeout kills it rather than a shell
+ 	start := time.Now()
+-	if got := Family(); got != "" {
+-		t.Errorf("Family() = %q", got)
++	if got := Families(); got != "" {
++		t.Errorf("Families() = %q", got)
+ 	}
+ 	if _, ok := Size(); ok {
+ 		t.Error("Size() said it had a size")
+@@ -88,64 +185,27 @@ func TestDetectTimeout(t *testing.T) {
+ 	}
+ }
+ 
+-// TestDetectNonNumericSize checks that an unparseable size line keeps the
+-// family but reports no size.
+-func TestDetectNonNumericSize(t *testing.T) {
+-	fakeFc(t, `printf 'Some Font\nnot-a-number\n'`)
+-	if got := Family(); got != "Some Font" {
+-		t.Errorf("Family() = %q", got)
+-	}
+-	if _, ok := Size(); ok {
+-		t.Error("Size() said it had a size")
+-	}
+-	if got := Detected(); got != "Some Font" {
+-		t.Errorf("Detected() = %q", got)
+-	}
+-}
+-
+-// TestDetectZeroSize checks that a zero size is treated as none.
+-func TestDetectZeroSize(t *testing.T) {
+-	fakeFc(t, `printf 'Some Font\n0\n'`)
+-	if _, ok := Size(); ok {
+-		t.Error("Size() said it had a size")
+-	}
+-}
+-
+-// TestDetectFiltersPlaceholder checks that a placeholder family such as
+-// "System" is dropped along with its size.
+-func TestDetectFiltersPlaceholder(t *testing.T) {
+-	for _, fam := range []string{"System", "system", "-", "  "} {
+-		fakeFc(t, "printf '"+strings.ReplaceAll(fam, "'", `\'`)+"\n12\n'")
+-		if got := Family(); got != "" {
+-			t.Errorf("Family() = %q for placeholder %q", got, fam)
+-		}
+-		if _, ok := Size(); ok {
+-			t.Errorf("Size() said it had a size for placeholder %q", fam)
+-		}
+-	}
+-}
+-
+ // TestDetectCached checks that detection runs once: the script counts its
+-// calls, and changing the answer without clearing the cache is ignored.
++// calls, and changing the answer without Reset is ignored.
+ func TestDetectCached(t *testing.T) {
+ 	dir := t.TempDir()
+ 	counter := filepath.Join(dir, "count")
+ 	p := filepath.Join(dir, "fc-match")
+-	script := "#!/bin/sh\necho x >> " + counter + "\nprintf 'Cached Font\\n11\\n'\n"
++	script := "#!/bin/sh\necho x >> " + counter + "\nprintf '" + match("11", "Cached Font") + "\\n'\n"
+ 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	old := fcMatch
+ 	fcMatch = p
+-	once = sync.Once{}
+-	cached = result{}
++	Reset()
+ 	t.Cleanup(func() {
+ 		fcMatch = old
+-		once = sync.Once{}
+-		cached = result{}
++		Reset()
+ 	})
+ 	for i := 0; i < 3; i++ {
+ 		Family()
++		Families()
++		List()
+ 		Size()
+ 		Detected()
+ 	}
+@@ -157,3 +217,33 @@ func TestDetectCached(t *testing.T) {
+ 		t.Errorf("fc-match ran %d times, want once", n)
+ 	}
+ }
++
++// TestResetDetectsAgain checks that Reset makes the next call ask again,
++// which the settings page's 重新检测 button needs.
++func TestResetDetectsAgain(t *testing.T) {
++	fakeFc(t, `printf '`+match("12", "First Font")+"\n'")
++	if got := Family(); got != "First Font" {
++		t.Fatalf("Family() = %q", got)
++	}
++	dir := t.TempDir()
++	p := filepath.Join(dir, "fc-match")
++	if err := os.WriteFile(p, []byte("#!/bin/sh\nprintf '"+match("13", "Second Font")+"\\n'\n"), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	fcMatch = p
++	Reset()
++	if got := Family(); got != "Second Font" {
++		t.Errorf("Family() after Reset = %q, want Second Font", got)
++	}
++	if pt, ok := Size(); !ok || pt != 13 {
++		t.Errorf("Size() after Reset = %v, %v", pt, ok)
++	}
++}
++
++// TestCRLF checks that fc-match's output survives CRLF line endings.
++func TestCRLF(t *testing.T) {
++	fakeFc(t, `printf '`+match("12", "Main Font")+`\r\n`+match("12", "Fallback")+`\r\n'`)
++	if got, want := Families(), "Main Font,Fallback"; got != want {
++		t.Errorf("Families() = %q, want %q", got, want)
++	}
++}
+diff --git a/internal/fontconfig/fontconfig_other.go b/internal/fontconfig/fontconfig_other.go
+index bd9649d..115236c 100644
+--- a/internal/fontconfig/fontconfig_other.go
++++ b/internal/fontconfig/fontconfig_other.go
+@@ -5,6 +5,12 @@ package fontconfig
+ // On platforms without fontconfig the app keeps MyGo's own system font:
+ // there is nothing to detect, and the empty answers say so.
+ 
++// List is nil, as there is no fontconfig here.
++func List() []string { return nil }
++
++// Families is "", as there is no fontconfig here.
++func Families() string { return "" }
++
+ // Family is "", as there is no fontconfig here.
+ func Family() string { return "" }
+ 
+@@ -13,3 +19,6 @@ func Size() (float32, bool) { return 0, false }
+ 
+ // Detected is "", as there is no fontconfig here.
+ func Detected() string { return "" }
++
++// Reset does nothing, as there is nothing to forget.
++func Reset() {}
+diff --git a/main.go b/main.go
+index 2c987a4..95d169b 100644
+--- a/main.go
++++ b/main.go
+@@ -5,6 +5,8 @@ package main
+ import (
+ 	"log"
+ 	"os"
++	"path/filepath"
++	"strings"
+ 
+ 	"github.com/egoist/mygo"
+ 	_ "github.com/egoist/mygo/locales/zh-Hans" // MyGo's own strings in Chinese
+@@ -20,6 +22,7 @@ func main() {
+ 	// One name however it is launched, so that go run, mygo dev and the
+ 	// packaged app share the session and settings.
+ 	mygo.App.SetName("BaiduNetGo")
++	useProfile()
+ 	if selfTest() {
+ 		if err := mygo.App.Run(); err != nil {
+ 			log.Fatal(err)
+@@ -70,3 +73,26 @@ func main() {
+ 		log.Fatal(err)
+ 	}
+ }
++
++// useProfile gives this build the data and cache directory
++// BAIDUNETGO_PROFILE names, so a local build can keep its own saved
++// session, settings, transfers and caches beside an installed copy, as
++// tools/install-patched-local.sh does for the patched build.
++//
++// It changes no XDG variable on purpose. XDG_CONFIG_HOME also tells
++// fontconfig, GTK and dconf where their configuration is, so a launcher
++// that pointed it at a profile directory made the interface lose the
++// user's fonts.conf (falling back to Droid Sans here) along with the
++// desktop's settings: the profile must cover this app's data only.
++func useProfile() {
++	dir := strings.TrimSpace(os.Getenv("BAIDUNETGO_PROFILE"))
++	if dir == "" {
++		return
++	}
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		log.Printf("profile %s: %v", dir, err)
++		return
++	}
++	mygo.App.SetPath(mygo.PathUserData, dir)
++	mygo.App.SetPath(mygo.PathCache, filepath.Join(dir, "cache"))
++}
+diff --git a/main_test.go b/main_test.go
+new file mode 100644
+index 0000000..742f1c7
+--- /dev/null
++++ b/main_test.go
+@@ -0,0 +1,49 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/egoist/mygo"
++)
++
++// TestUseProfile checks that BAIDUNETGO_PROFILE moves this app's data and
++// cache into the profile, and leaves the environment alone: a launcher
++// that changed XDG_CONFIG_HOME instead made fontconfig and GTK lose the
++// user's configuration, fonts included.
++func TestUseProfile(t *testing.T) {
++	dir := filepath.Join(t.TempDir(), "BaiduNetGo")
++	t.Setenv("BAIDUNETGO_PROFILE", dir)
++	xdg := os.Getenv("XDG_CONFIG_HOME")
++	t.Cleanup(func() {
++		mygo.App.SetPath(mygo.PathUserData, "")
++		mygo.App.SetPath(mygo.PathCache, "")
++	})
++	useProfile()
++	if got, err := mygo.App.Path(mygo.PathUserData); err != nil || got != dir {
++		t.Errorf("PathUserData = %q, %v; want %q", got, err, dir)
++	}
++	if got, err := mygo.App.Path(mygo.PathCache); err != nil || got != filepath.Join(dir, "cache") {
++		t.Errorf("PathCache = %q, %v; want %q", got, err, filepath.Join(dir, "cache"))
++	}
++	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
++		t.Errorf("profile directory not made: %v", err)
++	}
++	if got := os.Getenv("XDG_CONFIG_HOME"); got != xdg {
++		t.Errorf("XDG_CONFIG_HOME changed to %q, want %q", got, xdg)
++	}
++}
++
++// TestUseProfileUnset checks that no profile leaves whatever data
++// directory was in place alone, the default one included.
++func TestUseProfileUnset(t *testing.T) {
++	sentinel := t.TempDir()
++	mygo.App.SetPath(mygo.PathUserData, sentinel)
++	t.Cleanup(func() { mygo.App.SetPath(mygo.PathUserData, "") })
++	t.Setenv("BAIDUNETGO_PROFILE", "   ")
++	useProfile()
++	if got, err := mygo.App.Path(mygo.PathUserData); err != nil || got != sentinel {
++		t.Errorf("PathUserData = %q, %v with no profile; want %q", got, err, sentinel)
++	}
++}
+diff --git a/tools/install-patched-local.sh b/tools/install-patched-local.sh
+index dd987d7..b41b005 100755
+--- a/tools/install-patched-local.sh
++++ b/tools/install-patched-local.sh
+@@ -9,11 +9,16 @@
+ #
+ #   go build -trimpath -ldflags='-s -w' -o build/baidunetgo-patched .
+ #
+-# makes. The patched app gets its own profile under
+-# ~/.config/baidunetgo-patched-profile, seeded once with the installed
+-# app's saved login and settings, so it starts signed in; its transfers
+-# stay its own. Both can run at once because they use different profiles
+-# and single-instance locks.
++# makes. The patched app gets its own data directory under
++# ~/.config/baidunetgo-patched-profile/BaiduNetGo (BAIDUNETGO_PROFILE), seeded
++# once with the installed app's saved login and settings, so it starts
++# signed in; its transfers stay its own. Both can run at once because they
++# use different profiles and single-instance locks.
++#
++# Only the app's own data moves: the launcher changes no XDG_* variable.
++# Pointing the XDG config directory at the profile (as an earlier version
++# did) also moved fontconfig, GTK and dconf, so the patched build lost the
++# user's fonts.conf and drew in fontconfig's built-in fallback instead.
+ #
+ # Run it again after rebuilding to replace the binary; the launcher entry
+ # and profile stay as they are.
+@@ -27,6 +32,7 @@ data=${XDG_DATA_HOME:-$HOME/.local/share}
+ apps="$data/applications"
+ icons="$data/icons/hicolor"
+ profile="$HOME/.config/baidunetgo-patched-profile"
++data_dir="$profile/BaiduNetGo"
+ 
+ if [ ! -x "$bin" ]; then
+ 	echo "没有可执行文件：$bin" >&2
+@@ -52,25 +58,33 @@ else
+ 	install -m644 "$root/resources/icon.png" "$icons/512x512/apps/$name.png"
+ fi
+ 
+-# A launcher script, not the binary: the patched app keeps its own profile
+-# so that it cannot share transfers.json or session.enc with the installed
+-# app, and a first run seeds that profile with the installed app's login.
++# A launcher script, not the binary: the patched app keeps its own data
++# directory so that it cannot share transfers.json or session.enc with the
++# installed app, and a first run seeds that directory with the installed
++# app's login. BAIDUNETGO_PROFILE changes what MyGo calls this app's data
++# and cache directories only; XDG_* stays as the desktop set it, so the
++# app keeps reading the user's fontconfig fonts.conf, GTK settings and
++# dconf.
+ cat >"$bindir/$name-run" <<WRAPPER
+ #!/usr/bin/env bash
+ set -eu
+-base="\${XDG_CONFIG_HOME:-\$HOME/.config}"
+-profile="\$base/baidunetgo-patched-profile"
+-mkdir -p "\$profile"
+-if [ ! -e "\$profile/seed.done" ]; then
++profile="\$HOME/.config/baidunetgo-patched-profile"
++data="\$profile/BaiduNetGo"
++mkdir -p "\$data"
++if [ ! -e "\$data/seed.done" ]; then
+ 	for f in session.enc settings.json; do
+-		src="\$base/BaiduNetGo/\$f"
+-		if [ -f "\$src" ] && [ ! -e "\$profile/\$f" ]; then
+-			cp -p "\$src" "\$profile/\$f" || true
+-		fi
++		# The earlier launcher moved the XDG config directory to \$profile,
++		# which put the data in \$profile/BaiduNetGo; older builds kept it
++		# beside it. Take either before the installed app's.
++		for src in "\$profile/\$f" "\$HOME/.config/BaiduNetGo/\$f"; do
++			if [ -f "\$src" ] && [ ! -e "\$data/\$f" ]; then
++				cp -p "\$src" "\$data/\$f" || true
++			fi
++		done
+ 	done
+-	: >"\$profile/seed.done"
++	: >"\$data/seed.done"
+ fi
+-export XDG_CONFIG_HOME="\$profile"
++export BAIDUNETGO_PROFILE="\$data"
+ exec "$bindir/$name" "\$@"
+ WRAPPER
+ chmod 755 "$bindir/$name-run"
+@@ -105,7 +119,7 @@ fi
+ echo "已安装："
+ echo "  启动项  $apps/$name.desktop"
+ echo "  程序    $bindir/$name"
+-echo "  配置    $profile"
++echo "  配置    $data_dir"
+ echo
+-echo "fuzzel 里搜索「修复」或「patch」即可看到；首次启动沿用原版登录。"
++echo "fuzzel 里搜索「修复」或「patch」即可看到；首次启动沿用原版登录（字体等桌面配置不再受影响）。"
+ echo "重新构建后再次运行本脚本即可更新程序，启动项与配置保持不变。"

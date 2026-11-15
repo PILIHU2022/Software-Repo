@@ -21,17 +21,23 @@ diff --git a/CHANGELOG.md b/CHANGELOG.md
 index 79dba51..cfb7875 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -8,3 +8,4 @@
+@@ -6,7 +6,8 @@
+ 
+ ### 新增
  
 -- 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录并提示手动安装（当前构建未内置更新签名密钥，不做自动安装）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
 +- 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录（构建未内置更新签名密钥，下载的包不做签名校验）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
 +- Linux 上下载完的更新可就地安装并自动重启：设置页「更新」小节在下载后多出「安装并重启」按钮，把安装包里与正在运行的程序同名的二进制原子替换到运行路径上（先 `filepath.EvalSymlinks` 解析掉 `~/.local/bin` 之类的符号链接，替换的是真实文件，旧程序留作 `<exe>.old` 供回退），完成后 toast 并重启应用；由 pacman 或系统包管理器安装的程序（如 `/opt` 下，root 所有）目录不可写，会拒绝并提示改用包管理器更新，Windows/macOS 仍在下载后提示手动安装。Arch 用户也可以直接用 Software-Repo 发布的 `baidunetgo-<版本>-1-x86_64.pkg.tar.zst`（`sudo pacman -U …`）随包管理器更新，说明见 `docs/UPDATES.md`。
  - 设置页「关于」新增社区修复版声明：本版本基于上游 pengstem/baidunetgo，由 DeepSeek 与 GLM 协作修复与增强；README 顶部也加了同样的说明。
+ - 文件操作撤销：`Cmd+Z`（macOS 为 ⌘Z、其它平台为 Ctrl+Z）撤销上一步文件操作——移动（含剪切粘贴、拖拽移动）把文件移回原处和原名，复制删除这次复制出的副本，重命名改回原名，新建文件夹移入回收站，删除到回收站则从回收站还原，回收站的还原会再次删除；替换过的同名文件在撤销时一并恢复。撤销栈只在内存里、按会话保留（最多 50 步，重启不保留、注销清空），只撤最后一步；撤销失败（如原处已有同名项目）会报错并保留该步以便重试，上传完成与清空回收站 / 彻底删除不记入撤销。
+ - 界面字体族与字号跟随本机 fontconfig：按 `fc-match -s sans-serif` 取完整 family 链（含用户 fonts.conf 的 fallback）与 pt 字号，可在设置「外观」里查看实际生效的链、重新检测或关闭改用内置字体；`BAIDUNETGO_FONT` / `BAIDUNETGO_FONT_SIZE` 可临时覆盖。
 diff --git a/app/settings_page.go b/app/settings_page.go
 index 2670296..fa5ee61 100644
 --- a/app/settings_page.go
 +++ b/app/settings_page.go
-@@ -17,4 +17,5 @@ import (
+@@ -15,11 +15,13 @@ import (
+ 	"github.com/pengstem/baidunetgo/internal/updates"
+ )
  
 -// updatesNow and updatesDownload do the checking and the fetching; they
 -// are variables so tests can stand in for them.
@@ -39,29 +45,47 @@ index 2670296..fa5ee61 100644
 +// fetching and the installing; they are variables so tests can stand in for
 +// them.
  var (
-@@ -22,2 +23,3 @@ var (
+ 	updatesNow      = updates.Check
  	updatesDownload = updates.Download
 +	updatesInstall  = updates.Install
  )
-@@ -35,2 +37,5 @@ type updateState struct {
+ 
+ // updateState is what the settings page's 更新 section shows: whether a
+@@ -33,6 +35,9 @@ type updateState struct {
+ 	downloading bool          // the found version's package downloads now
+ 	progress    float32       // how far that download went, 0 to 1
  	lastPath    string        // where the last package landed
 +	installing  bool          // the downloaded package installs now
 +	installed   bool          // the package is installed and the app restarts
 +	installErr  string        // why the last install failed
  	err         string        // why the last check or download failed
-@@ -89,2 +94,3 @@ func (a *App) checkUpdates(auto bool) {
+ 	editing     bool          // the 更新地址 dialog is open
+ 	draft       string        // what that dialog edits
+@@ -87,11 +92,13 @@ func (a *App) checkUpdates(auto bool) {
+ 	if feed == "" {
+ 		st.autoDone = true
  		st.lastCheck, st.found, st.lastResult = time.Now(), nil, ""
 +		st.installing, st.installed, st.installErr = false, false, ""
  		st.err = "更新地址未配置：等待发布通道就绪后填入"
-@@ -94,2 +100,3 @@ func (a *App) checkUpdates(auto bool) {
+ 		return
+ 	}
+ 	cur := version()
  	st.checking, st.err, st.found, st.autoDone = true, "", nil, true
 +	st.installing, st.installed, st.installErr = false, false, ""
  	go func() {
-@@ -106,2 +113,3 @@ func (a *App) checkUpdates(auto bool) {
+ 		info, err := updatesNow(context.Background(), feed, mygo.App.Version())
+ 		a.update(func() {
+@@ -104,6 +111,7 @@ func (a *App) checkUpdates(auto bool) {
+ 				return
+ 			}
  			st.err, st.lastPath = "", ""
 +			st.installing, st.installed, st.installErr = false, false, ""
  			st.found = info
-@@ -134,8 +142,9 @@ func (a *App) maybeCheckUpdates() {
+ 			if info.Newer {
+ 				st.lastResult = "发现新版本 " + info.Version
+@@ -132,12 +140,13 @@ func (a *App) maybeCheckUpdates() {
+ }
+ 
  // downloadUpdate fetches the found version's package into the download
 -// folder on a goroutine, reporting the progress into the settings page.
 -// It does not install anything: this build carries no update signing key,
@@ -75,11 +99,18 @@ index 2670296..fa5ee61 100644
 -	if st.found == nil || st.downloading || st.checking {
 +	if st.found == nil || st.downloading || st.checking || st.installing {
  		return
-@@ -161,2 +170,3 @@ func (a *App) downloadUpdate() {
+ 	}
+ 	info := *st.found
+@@ -159,12 +168,53 @@ func (a *App) downloadUpdate() {
+ 				return
+ 			}
  			st.progress, st.lastPath = 1, p
 +			st.installing, st.installed, st.installErr = false, false, ""
  			st.lastResult = "已下载：" + filepath.Base(p)
-@@ -167,2 +177,42 @@ func (a *App) downloadUpdate() {
+ 			a.toast("已下载到 "+p, "success")
+ 		})
+ 	}()
+ }
  
 +// installUpdate installs the downloaded package over the running app and
 +// restarts it. The package holds the same binary the app runs, so it is
@@ -122,11 +153,19 @@ index 2670296..fa5ee61 100644
 +}
 +
  // saveUpdateURL keeps the 更新地址 dialog's address, forgetting the last
-@@ -177,2 +227,3 @@ func (a *App) saveUpdateURL() {
+ // check's result, which answered the old address.
+ func (a *App) saveUpdateURL() {
+@@ -175,6 +225,7 @@ func (a *App) saveUpdateURL() {
+ 	}
+ 	a.settings.UpdateURL = v
  	a.updates.found, a.updates.lastResult, a.updates.err, a.updates.lastPath = nil, "", "", ""
 +	a.updates.installing, a.updates.installed, a.updates.installErr = false, false, ""
  	a.updates.autoDone = false // a new address is worth a fresh check
-@@ -221,2 +272,8 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 	a.applySettings()
+ }
+@@ -219,10 +270,19 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			checkDetail = "正在检查更新…"
+ 		case st.downloading:
  			checkDetail = "正在下载 " + st.found.Version + "：" + itoa(int(math.Round(float64(st.progress)*100))) + "%"
 +		case st.installing:
 +			checkDetail = "正在安装 " + st.found.Version + "…"
@@ -135,13 +174,18 @@ index 2670296..fa5ee61 100644
 +		case st.installErr != "":
 +			checkDetail = "安装失败：" + st.installErr + "；已下载的包仍在 " + st.lastPath
  		case st.err != "":
-@@ -225,2 +282,5 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			checkDetail = st.err
+ 		case st.lastPath != "":
  			checkDetail = "已下载：" + st.lastPath
 +			if !updates.CanInstall() {
 +				checkDetail += "，请手动安装"
 +			}
  		case st.found != nil && st.found.Newer:
-@@ -236,5 +296,12 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			checkDetail = "发现新版本 " + st.found.Version
+ 			if st.found.Notes != "" {
+@@ -234,9 +294,16 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			checkDetail = "更新地址未配置：等待发布通道就绪后填入"
+ 		}
  		settingRow(c, t, p, "检查更新", "", checkDetail, func() {
 -			if st.downloading {
 +			switch {
@@ -155,7 +199,11 @@ index 2670296..fa5ee61 100644
 +				ui.Spinner(c).Label("重启中")
 +				return
  			}
-@@ -248,2 +315,7 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 			if pill(c, t, p, "refresh-cw", "立即检查", false).Disabled(st.checking).Clicked() {
+ 				a.checkUpdates(false)
+@@ -246,6 +313,11 @@ func (a *App) updatesSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 					a.downloadUpdate()
+ 				}
  			}
 +			if st.lastPath != "" && updates.CanInstall() {
 +				if pill(c, t, p, "circle-check", "安装并重启", true).Clicked() {
@@ -163,22 +211,32 @@ index 2670296..fa5ee61 100644
 +				}
 +			}
  		})
+ 		shown := s.UpdateURL
+ 		if shown == "" {
 diff --git a/docs/UPDATES.md b/docs/UPDATES.md
 index 04b51f7..b8cdf51 100644
 --- a/docs/UPDATES.md
 +++ b/docs/UPDATES.md
-@@ -2,3 +2,3 @@
+@@ -1,13 +1,14 @@
+ # 更新检查（internal/updates）
  
 -设置页的「更新」小节由 `internal/updates` 提供能力：向一个 feed 地址询问最新版本，发现新版本时把安装包下载到本机，由用户手动安装。本文是给下一个接手自动化发布的人的交接文档。
 +设置页的「更新」小节由 `internal/updates` 提供能力：向一个 feed 地址询问最新版本，发现新版本时把安装包下载到本机；Linux 上可以在设置页就地安装并自动重启，其它平台由用户手动安装。本文是给下一个接手自动化发布的人的交接文档。
  
-@@ -9,3 +9,4 @@
+ ## 现状
+ 
+ - 设置里可以填「更新地址」（feed 的 URL），留空表示未配置；未配置时功能显示为「待配置」状态，不发任何网络请求、不报错、不崩溃。
+ - 「自动检查更新」开关默认开（`settings.AutoUpdate`，nil 即开，写法同 `FollowSystemFont`）。应用启动并登录后静默检查一次（`App.maybeCheckUpdates`，在 `Attach` 里触发）；失败不打扰，结果只写进设置页。
  - 「立即检查」手动检查；发现新版本后出现「下载」按钮，把该平台（`GOOS-GOARCH`）的安装包下载到下载目录（`settings.downloadDir()`），先写 `.part` 再改名落盘；完成后 toast「已下载到 …」。
 -- **不自动安装。** MyGo 内建的 `mygo.Updater` 需要在 `mygo build` 时注入 feed 与签名公钥（`mygo.config.ts` 的 `updates.enabled/feed/publicKey`，经 ldflags 进入构建）；本地未签名的构建即使接了 feed 也过不了签名校验。所以现阶段只下载、提示手动安装。
 +- 下载完成后，Linux 上出现「安装并重启」按钮，把该包装到正在运行的程序上并重启（见「自动安装（Linux）」）；Windows/macOS 没有这个按钮，下载完只提示手动安装。
 +- **不走 MyGo 内建更新器。** MyGo 内建的 `mygo.Updater` 需要在 `mygo build` 时注入 feed 与签名公钥（`mygo.config.ts` 的 `updates.enabled/feed/publicKey`，经 ldflags 进入构建）；本地未签名的构建即使接了 feed 也过不了签名校验。所以自动安装由本仓库自己实现（`internal/updates/install.go`），不校验签名，只装 feed 给的包。
  - feed 地址的优先级：`settings.UpdateURL` 非空时用它；否则用构建时注入的 `updates.defaultFeed`（见下）；都为空即未配置。
-@@ -44,5 +45,16 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+ - 设置里还预留了 `UpdateChannel`（`stable`/`beta`，默认空），当前没有任何代码读它，供将来区分发布通道。
+ 
+@@ -42,9 +43,20 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+ 
+ `mygo build` 的场景可以在 `mygo.config.ts`（或打包脚本）里加对应 ldflags。feed 一旦固定，也可以直接把它作为默认值写进构建，用户零配置。
  
 -## 手动安装
 +## 自动安装（Linux）
@@ -197,12 +255,18 @@ index 04b51f7..b8cdf51 100644
 +
 +其余平台的包仍在系统下载目录（或设置里指定的位置）：macOS 打开 dmg 拖进「应用程序」；Windows 运行 zip 里的安装器或直接替换 exe。应用不校验下载文件的签名——feed 本身要可信（HTTPS、域名可控）。
  
-@@ -58,3 +70,3 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+ ## 接入 GitHub Actions 的交接清单
+ 
+@@ -56,11 +68,11 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+ 3. **填入地址**：把该 URL 填进设置页「更新地址」；或作为默认值打进构建（上面的 defaultFeed 注入点）。`mygo.json` 里**不要**手工加 `updates` 字段——那会激活 MyGo 内建更新器，在没有签名公钥时构建会失败或行为改变。
+ 4. **（可选）迁移到 MyGo 内建更新器**：如果以后想自动安装，需要
     - `mygo.config.ts` 里配置 `updates.enabled/feed/publicKey`（feed 要求公开可访问的仓库），生成并保管好 minisign 私钥，每次发版用 `mygo build` 注入；
 -   - 代码上把 `app/settings_page.go` 里 `checkUpdates`/`downloadUpdate` 对 `updatesNow`/`updatesDownload` 的调用整体替换为 `mygo.Updater.Check` / `Update.Install` / `mygo.App.Relaunch()`，`internal/updates` 的 `isNewer` 与 feed 解析即可废弃；
 +   - 代码上把 `app/settings_page.go` 里 `checkUpdates`/`downloadUpdate`/`installUpdate` 对 `updatesNow`/`updatesDownload`/`updatesInstall` 的调用整体替换为 `mygo.Updater.Check` / `Update.Install` / `mygo.App.Relaunch()`，`internal/updates` 的 `isNewer`、feed 解析与 `install.go` 即可废弃；
     - 设置页的「更新地址」行改为只读展示或删除，`settings.UpdateURL` 保留做兼容。
-@@ -64,3 +76,3 @@ go build -ldflags "-X github.com/pengstem/baidunetgo/internal/updates.defaultFee
+    - 迁移前注意：本实现的下载不校验签名，切换时旧的「下载目录里的安装包」流程直接消失，不影响已下载文件。
+ 
+ ## 测试
  
 -- `go test ./internal/updates`：版本比较、feed 解析（宽容格式、缺字段、坏 JSON、非 200、超时）、下载（文件名、内容、`.part` 不残留、进度回调、失败清理、取消）。
 +- `go test ./internal/updates`：版本比较、feed 解析（宽容格式、缺字段、坏 JSON、非 200、超时）、下载（文件名、内容、`.part` 不残留、进度回调、失败清理、取消）、安装（tar.gz / zip 就地替换、`0755`、`.old` 备份、缺二进制、不支持的包、不可写目录、失败不残留、各平台 `canInstallOn`）。
@@ -743,7 +807,7 @@ diff --git a/internal/updates/updates.go b/internal/updates/updates.go
 index fe0ce8a..0b3a34b 100644
 --- a/internal/updates/updates.go
 +++ b/internal/updates/updates.go
-@@ -1,6 +1,8 @@
+@@ -1,8 +1,10 @@
  // Package updates checks a feed for a newer BaiduNetGo build and
 -// downloads its package for this platform. This build signs nothing and
 -// installs nothing: a newer version is fetched to the download folder for
@@ -756,3 +820,5 @@ index fe0ce8a..0b3a34b 100644
 +// a feed run by the release workflow takes over and MyGo's own updater
 +// replaces this package.
  package updates
+ 
+ import (

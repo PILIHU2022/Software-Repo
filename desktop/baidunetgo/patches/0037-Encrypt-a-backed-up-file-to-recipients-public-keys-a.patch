@@ -1,0 +1,1386 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 13:46:17 +0800
+Subject: [PATCH] =?UTF-8?q?Encrypt=20a=20backed-up=20file=20to=20recipient?=
+ =?UTF-8?q?s'=20public=20keys=20and=20sign=20it=20with=20the=20user's=20ow?=
+ =?UTF-8?q?n=20key=20=E2=80=94=20the=20OpenPGP=20message=20carries=20both?=
+ =?UTF-8?q?=20key=20and=20passphrase=20packets=20when=20both=20are=20set,?=
+ =?UTF-8?q?=20and=20gpg=20decrypts=20and=20verifies=20what=20we=20produce?=
+ =?UTF-8?q?=20and=20the=20other=20way=20around.?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ internal/pgp/keys.go      | 511 +++++++++++++++++++++++
+ internal/pgp/keys_test.go | 843 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 1354 insertions(+)
+ create mode 100644 internal/pgp/keys.go
+ create mode 100644 internal/pgp/keys_test.go
+
+diff --git a/internal/pgp/keys.go b/internal/pgp/keys.go
+new file mode 100644
+index 0000000..e0cf878
+--- /dev/null
++++ b/internal/pgp/keys.go
+@@ -0,0 +1,511 @@
++package pgp
++
++import (
++	"bytes"
++	"crypto"
++	"errors"
++	"fmt"
++	"hash"
++	"io"
++
++	"github.com/ProtonMail/go-crypto/openpgp"
++	"github.com/ProtonMail/go-crypto/openpgp/armor"
++	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
++	"github.com/ProtonMail/go-crypto/openpgp/packet"
++)
++
++// Key is an OpenPGP key (entity): a recipient's public key, or the user's own
++// key pair for signing and decrypting. It is an *openpgp.Entity from
++// github.com/ProtonMail/go-crypto/openpgp.
++type Key = *openpgp.Entity
++
++// ErrSignature reports that a message carries a signature that could not be
++// verified: the signer's key was not among the keys given to DecryptAny, or
++// the signed data does not match the signature (tampering).
++var ErrSignature = errors.New("pgp: signature verification failed")
++
++// ErrNoKey reports that neither the private keys nor the passphrase given to
++// DecryptAny (or the EncryptKeys arguments) can produce a usable key.
++var ErrNoKey = errors.New("pgp: no usable private key or passphrase")
++
++// ErrNotPrivateKey reports that the armored data parsed fine but holds no
++// private key material (a public key, a signature, or something else).
++var ErrNotPrivateKey = errors.New("pgp: armored data contains no private key")
++
++// ErrNoKeys reports that the input holds no OpenPGP key material at all.
++var ErrNoKeys = errors.New("pgp: no OpenPGP keys found in input")
++
++// generatedRSABits is the size of RSA keys produced by GenerateKeyPair. 3072
++// bits gives ~128-bit security, generates in a few seconds, and both gpg and
++// BouncyCastle handle it comfortably.
++const generatedRSABits = 3072
++
++// VerifyResult describes who signed a decrypted message.
++//
++// Verified is true when the message carried no signature, or when the
++// signature matched one of the keys given to DecryptAny. When a message is
++// signed but Verified is false, DecryptAny also returns an error wrapping
++// ErrSignature; the result fields still say who the signer claimed to be.
++type VerifyResult struct {
++	Verified      bool   // false when signed and not verified
++	SignedByKeyID uint64 // 0 when unsigned
++	SignedByName  string // key's primary identity, "" when unknown
++}
++
++// ReadPublicKeys parses armored public keys: a single block or several
++// concatenated blocks, as `gpg --armor --export` produces. Binary keyrings
++// (gpg --export without --armor) are not supported.
++func ReadPublicKeys(r io.Reader) ([]Key, error) {
++	keys, err := readArmoredKeyRing(r)
++	if err != nil {
++		return nil, err
++	}
++	return keys, nil
++}
++
++// ReadPrivateKey parses an armored private key (surrounding signatures and
++// subkey packets are fine) and unlocks it with the passphrase. A
++// passphrase-less key takes "". The returned Key can sign and decrypt without
++// further unlocking: the primary key and every subkey are decrypted. A wrong
++// passphrase makes the error wrap ErrPassphrase; armor that holds no private
++// key material gives ErrNotPrivateKey.
++func ReadPrivateKey(r io.Reader, passphrase string) (Key, error) {
++	keys, err := readArmoredKeyRing(r)
++	if err != nil {
++		return nil, err
++	}
++	for _, key := range keys {
++		if key.PrivateKey != nil {
++			if err := unlockEntity(key, passphrase); err != nil {
++				return nil, err
++			}
++			return key, nil
++		}
++	}
++	return nil, ErrNotPrivateKey
++}
++
++// GenerateKeyPair makes a fresh RSA-3072 key pair (a primary signing key plus
++// an encryption subkey, SHA-256 self-signatures) for the given name and email,
++// protects the private half with the passphrase ("" leaves it passphrase-less),
++// and returns both halves ASCII-armored. The public half is a
++// "PGP PUBLIC KEY BLOCK", the private half a "PGP PRIVATE KEY BLOCK"; the
++// private half round-trips through ReadPrivateKey with the same passphrase.
++// Generation takes a few seconds.
++func GenerateKeyPair(name, email, passphrase string) (public string, private string, err error) {
++	entity, err := openpgp.NewEntity(name, "", email, &packet.Config{
++		RSABits:     generatedRSABits,
++		DefaultHash: crypto.SHA256,
++	})
++	if err != nil {
++		return "", "", fmt.Errorf("pgp: generate key pair: %w", err)
++	}
++
++	var publicBuf, privateBuf bytes.Buffer
++	if err := serializeArmored(&publicBuf, openpgp.PublicKeyType,
++		func(w io.Writer, _ *packet.Config) error { return entity.Serialize(w) }); err != nil {
++		return "", "", err
++	}
++
++	// Protect the primary key and every subkey before serializing the private
++	// half; SerializePrivateWithoutSigning emits the already-made
++	// self-signatures as they are, so the protected material needs no
++	// re-signing pass.
++	if passphrase != "" {
++		privateKeys := []*packet.PrivateKey{entity.PrivateKey}
++		for i := range entity.Subkeys {
++			privateKeys = append(privateKeys, entity.Subkeys[i].PrivateKey)
++		}
++		if err := packet.EncryptPrivateKeys(privateKeys, []byte(passphrase), keyConfig()); err != nil {
++			return "", "", fmt.Errorf("pgp: protect private key: %w", err)
++		}
++	}
++	if err := serializeArmored(&privateBuf, openpgp.PrivateKeyType,
++		entity.SerializePrivateWithoutSigning); err != nil {
++		return "", "", err
++	}
++	return publicBuf.String(), privateBuf.String(), nil
++}
++
++// EncryptKeys streams an OpenPGP message of src into dst encrypted to every
++// recipient's public key and — when passphrase != "" — also symmetrically to
++// the passphrase, so the message carries both PKESK and SKESK packets and any
++// one of the recipients' private keys or the passphrase alone can open it.
++// When signer != nil the message is signed with that private key, which is
++// unlocked with signerPass ("" for a passphrase-less key; a key that signerPass
++// cannot open makes the error wrap ErrPassphrase).
++//
++// At least one of passphrase and recipients must be given. Binary, no
++// compression, AES-256, SEIPD v1 with MDC, SHA-256 signatures; the output is
++// not armored. Both directions are fully streamed: no file is buffered whole.
++func EncryptKeys(dst io.Writer, src io.Reader, passphrase string, recipients []Key, signer Key, signerPass string) error {
++	if passphrase == "" && len(recipients) == 0 {
++		return fmt.Errorf("%w: give a passphrase, at least one recipient, or both", ErrNoKey)
++	}
++	cfg := config()
++
++	// The signing key must be usable before any packet is written, so a bad
++	// signerPassphrase fails without leaving a partial message behind.
++	var signKey *packet.PrivateKey
++	if signer != nil {
++		key, ok := signer.SigningKeyById(cfg.Now(), 0)
++		if !ok {
++			return fmt.Errorf("pgp: signer key has no valid signing key")
++		}
++		if key.PrivateKey == nil {
++			return errors.New("pgp: signer key has no private half")
++		}
++		signKey = key.PrivateKey
++		if err := decryptPrivateKey(signKey, signerPass); err != nil {
++			return err
++		}
++	}
++
++	// The SKESK packet (if any) must come first, then the PKESK packets, then
++	// the encrypted data. The passphrase KDF produces the session key
++	// directly (32 bytes, AES-256), so the same session key is shared by both
++	// packet kinds — exactly what gpg writes with -c and -r combined.
++	var sessionKey []byte
++	if passphrase != "" {
++		key, err := packet.SerializeSymmetricKeyEncrypted(dst, []byte(passphrase), cfg)
++		if err != nil {
++			return fmt.Errorf("pgp: start encryption: %w", err)
++		}
++		sessionKey = key
++	} else {
++		sessionKey = make([]byte, packet.CipherAES256.KeySize())
++		if _, err := io.ReadFull(cfg.Random(), sessionKey); err != nil {
++			return fmt.Errorf("pgp: start encryption: %w", err)
++		}
++	}
++	for _, recipient := range recipients {
++		encryptKey, ok := recipient.EncryptionKey(cfg.Now())
++		if !ok {
++			return fmt.Errorf("pgp: recipient key %08X has no valid encryption subkey", recipient.PrimaryKey.KeyId)
++		}
++		if err := packet.SerializeEncryptedKey(dst, encryptKey.PublicKey, packet.CipherAES256, sessionKey, cfg); err != nil {
++			return fmt.Errorf("pgp: start encryption: %w", err)
++		}
++	}
++	payload, err := packet.SerializeSymmetricallyEncrypted(dst, packet.CipherAES256, false,
++		packet.CipherSuite{Cipher: packet.CipherAES256}, sessionKey, cfg)
++	if err != nil {
++		return fmt.Errorf("pgp: start encryption: %w", err)
++	}
++
++	if signKey != nil {
++		ops := &packet.OnePassSignature{
++			Version:    3,
++			SigType:    packet.SigTypeBinary,
++			Hash:       crypto.SHA256,
++			PubKeyAlgo: signKey.PubKeyAlgo,
++			KeyId:      signKey.KeyId,
++			IsLast:     true,
++		}
++		if err := ops.Serialize(payload); err != nil {
++			return fmt.Errorf("pgp: sign: %w", err)
++		}
++		return writeSignedBody(payload, src, signKey, cfg)
++	}
++	return writeBody(payload, src)
++}
++
++// DecryptAny decrypts a message that is key-encrypted, passphrase-encrypted,
++// or both, into dst. Pass whichever secret material is available: passphrase
++// and/or unlocked private keys (a locked private key is also tried with the
++// passphrase). The result says who signed the message; VerifyResult.Verified
++// is true for an unsigned message and for a signature that checked out
++// against one of the keys given. A signed message whose signature fails to
++// verify — tampered data, or a signer whose key is not among the keys given —
++// makes the error wrap ErrSignature after the whole body has been consumed.
++// A wrong passphrase or failing integrity check wraps ErrPassphrase; input
++// that is neither encrypted nor signed OpenPGP data wraps ErrNotEncrypted.
++// An unencrypted but signed message (gpg --sign) is accepted too: it is just
++// copied through and verified.
++func DecryptAny(dst io.Writer, src io.Reader, passphrase string, keys []Key) (VerifyResult, error) {
++	result := VerifyResult{Verified: true}
++
++	// The OpenPGP reader asks for secret material again when the first
++	// attempt did not produce a usable session key. Answer at most once; a
++	// second request means nothing the caller gave us can decrypt the message.
++	prompted := false
++	prompt := func(candidates []openpgp.Key, symmetric bool) ([]byte, error) {
++		if prompted {
++			return nil, fmt.Errorf("%w: the passphrase and keys did not decrypt the message", ErrPassphrase)
++		}
++		prompted = true
++		// Try to unlock locked private keys with the passphrase first: a
++		// message encrypted only to public keys never asks for a passphrase.
++		if passphrase != "" && len(candidates) > 0 {
++			var locked []*packet.PrivateKey
++			for _, key := range candidates {
++				for _, priv := range entityPrivateKeys(key.Entity) {
++					if priv.Encrypted {
++						locked = append(locked, priv)
++					}
++				}
++			}
++			if err := packet.DecryptPrivateKeys(locked, []byte(passphrase)); err == nil {
++				return nil, nil // the keys are unlocked now; ReadMessage retries them
++			}
++		}
++		if symmetric {
++			return []byte(passphrase), nil
++		}
++		return nil, fmt.Errorf("%w: the passphrase does not unlock any given private key", ErrPassphrase)
++	}
++
++	md, err := openpgp.ReadMessage(src, openpgp.EntityList(keys), prompt, config())
++	if err != nil {
++		if errors.Is(err, ErrPassphrase) {
++			return result, err // our own prompt error, already descriptive
++		}
++		if errors.Is(err, pgperrors.ErrKeyIncorrect) {
++			// No SKESK packet to try the passphrase against, and no given key
++			// holds a secret for any PKESK packet.
++			return result, fmt.Errorf("%w: the message is not encrypted to any given key and no passphrase applies", ErrNoKey)
++		}
++		if prompted {
++			return result, fmt.Errorf("%w: %v", ErrPassphrase, err)
++		}
++		return result, fmt.Errorf("%w: %v", ErrNotEncrypted, err)
++	}
++	if !md.IsEncrypted && !md.IsSigned {
++		return result, ErrNotEncrypted
++	}
++
++	if err := copyStream(dst, md.UnverifiedBody); err != nil {
++		// A wrong passphrase or tampered ciphertext shows up as a failed MDC
++		// (integrity) check, a failed session-key decryption, or a key error
++		// once the body has been read.
++		var sessionKeyErr pgperrors.DecryptWithSessionKeyError
++		if errors.As(err, &sessionKeyErr) ||
++			errors.Is(err, pgperrors.ErrMDCHashMismatch) ||
++			errors.Is(err, pgperrors.ErrKeyIncorrect) {
++			return result, fmt.Errorf("%w: %v", ErrPassphrase, err)
++		}
++		return result, fmt.Errorf("pgp: decrypt: %w", err)
++	}
++
++	if md.IsSigned {
++		result.SignedByKeyID = md.SignedByKeyId
++		if md.SignedBy != nil {
++			result.SignedByName = signerName(md.SignedBy.Entity)
++			if md.SignatureError != nil {
++				result.Verified = false
++				return result, fmt.Errorf("%w: %v", ErrSignature, md.SignatureError)
++			}
++		} else {
++			// The message claims a signature by a key we were not given, so
++			// there is no way to trust it.
++			result.Verified = false
++			result.SignedByName = ""
++			return result, fmt.Errorf("%w: signed by unknown key %08X", ErrSignature, md.SignedByKeyId)
++		}
++	}
++	return result, nil
++}
++
++// EncryptKeysFile encrypts srcPath into dstPath with EncryptKeys: encrypted to
++// the given recipients' public keys and, when passphrase != "", also to the
++// passphrase, signed when signer != nil. The destination is created with mode
++// 0600 and is removed again if encryption fails, so no partial ciphertext is
++// ever left behind. It returns the number of bytes written to dstPath.
++func EncryptKeysFile(dstPath, srcPath, passphrase string, recipients []Key, signer Key, signerPass string) (int64, error) {
++	return transformFile(dstPath, srcPath, passphrase, func(dst io.Writer, src io.Reader, _ string) error {
++		return EncryptKeys(dst, src, passphrase, recipients, signer, signerPass)
++	})
++}
++
++// readArmoredKeyRing parses every armored block in r, as `gpg --armor
++// --export` writes them: concatenated, each block one or more keys.
++func readArmoredKeyRing(r io.Reader) ([]Key, error) {
++	var keys []Key
++	for {
++		block, err := armor.Decode(r)
++		if err == io.EOF {
++			break
++		}
++		if err != nil {
++			if len(keys) > 0 {
++				break // trailing junk after usable keys: ignore it
++			}
++			return nil, fmt.Errorf("%w: %v", ErrNoKeys, err)
++		}
++		if block.Type != openpgp.PublicKeyType && block.Type != openpgp.PrivateKeyType {
++			return nil, fmt.Errorf("%w: unexpected armor block type %q", ErrNoKeys, block.Type)
++		}
++		el, err := openpgp.ReadKeyRing(block.Body)
++		if err != nil && len(el) == 0 {
++			return nil, fmt.Errorf("pgp: parse keys: %w", err)
++		}
++		keys = append(keys, el...)
++	}
++	if len(keys) == 0 {
++		return nil, ErrNoKeys
++	}
++	return keys, nil
++}
++
++// unlockEntity decrypts the primary private key and every subkey of key with
++// the passphrase. A passphrase-less key or subkey is left alone.
++func unlockEntity(key Key, passphrase string) error {
++	for _, priv := range entityPrivateKeys(key) {
++		if err := decryptPrivateKey(priv, passphrase); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// entityPrivateKeys lists the primary private key and all subkey private
++// parts of an entity that exist.
++func entityPrivateKeys(entity *openpgp.Entity) []*packet.PrivateKey {
++	if entity == nil {
++		return nil
++	}
++	var keys []*packet.PrivateKey
++	if entity.PrivateKey != nil {
++		keys = append(keys, entity.PrivateKey)
++	}
++	for i := range entity.Subkeys {
++		if entity.Subkeys[i].PrivateKey != nil {
++			keys = append(keys, entity.Subkeys[i].PrivateKey)
++		}
++	}
++	return keys
++}
++
++// decryptPrivateKey unlocks one private key part. A wrong passphrase wraps
++// ErrPassphrase.
++func decryptPrivateKey(priv *packet.PrivateKey, passphrase string) error {
++	if !priv.Encrypted {
++		return nil
++	}
++	if err := priv.Decrypt([]byte(passphrase)); err != nil || priv.Encrypted {
++		return fmt.Errorf("%w: the passphrase does not unlock the private key", ErrPassphrase)
++	}
++	return nil
++}
++
++// keyConfig is the packet configuration used to protect generated private
++// keys: the same cipher and S2K as the message layer.
++func keyConfig() *packet.Config {
++	return config()
++}
++
++// signerName returns the primary identity of a signing key, "" when it has
++// none.
++func signerName(entity *openpgp.Entity) string {
++	if entity == nil {
++		return ""
++	}
++	if identity := entity.PrimaryIdentity(); identity != nil {
++		return identity.Name
++	}
++	return ""
++}
++
++// serializeArmored writes fn's packets into an armored block of the given
++// type.
++func serializeArmored(w io.Writer, blockType string, fn func(io.Writer, *packet.Config) error) error {
++	armored, err := armor.Encode(w, blockType, nil)
++	if err != nil {
++		return fmt.Errorf("pgp: armor: %w", err)
++	}
++	if err := fn(armored, config()); err != nil {
++		return fmt.Errorf("pgp: serialize key: %w", err)
++	}
++	if err := armored.Close(); err != nil {
++		return fmt.Errorf("pgp: armor: %w", err)
++	}
++	return nil
++}
++
++// writeBody streams src through the literal data packet that finishes the
++// message.
++func writeBody(payload io.WriteCloser, src io.Reader) error {
++	literal, err := packet.SerializeLiteral(payload, true, "", 0)
++	if err != nil {
++		return fmt.Errorf("pgp: encrypt: %w", err)
++	}
++	copyErr := copyStream(literal, src)
++	closeErr := literal.Close()
++	if copyErr != nil {
++		return fmt.Errorf("pgp: encrypt: %w", errors.Join(copyErr, closeErr))
++	}
++	if closeErr != nil {
++		return fmt.Errorf("pgp: finish encryption: %w", closeErr)
++	}
++	return nil
++}
++
++// signedBodyWriter hashes the data it streams into the literal data packet;
++// at Close it appends the signature packet and closes the encrypted payload.
++type signedBodyWriter struct {
++	payload io.WriteCloser // the SEIPD writer, closed only once, here
++	literal io.WriteCloser // the literal data writer over a no-op closer of payload
++	hash    hash.Hash      // SHA-256 of the message
++	signer  *packet.PrivateKey
++	cfg     *packet.Config
++}
++
++// writeSignedBody wraps src in a one-pass-signature signed literal data
++// packet over payload.
++func writeSignedBody(payload io.WriteCloser, src io.Reader, signer *packet.PrivateKey, cfg *packet.Config) error {
++	h := crypto.SHA256.New()
++	literal, err := packet.SerializeLiteral(noOpCloser{payload}, true, "", 0)
++	if err != nil {
++		return fmt.Errorf("pgp: sign: %w", err)
++	}
++	w := &signedBodyWriter{payload: payload, literal: literal, hash: h, signer: signer, cfg: cfg}
++
++	copyErr := copyStream(w, src)
++	closeErr := w.Close()
++	if copyErr != nil {
++		return fmt.Errorf("pgp: encrypt: %w", errors.Join(copyErr, closeErr))
++	}
++	if closeErr != nil {
++		return fmt.Errorf("pgp: finish encryption: %w", closeErr)
++	}
++	return nil
++}
++
++func (w *signedBodyWriter) Write(p []byte) (int, error) {
++	w.hash.Write(p)
++	return w.literal.Write(p)
++}
++
++// Close finishes the literal data, appends the signature packet, and closes
++// the encrypted payload. The signature is v4, binary, SHA-256, with the
++// issuer key id and fingerprint subpackets.
++func (w *signedBodyWriter) Close() error {
++	if err := w.literal.Close(); err != nil {
++		return errors.Join(err, w.payload.Close())
++	}
++	sig := &packet.Signature{
++		Version:           4,
++		SigType:           packet.SigTypeBinary,
++		PubKeyAlgo:        w.signer.PubKeyAlgo,
++		Hash:              crypto.SHA256,
++		CreationTime:      w.cfg.Now(),
++		IssuerKeyId:       &w.signer.KeyId,
++		IssuerKeyVersion:  uint8(w.signer.Version),
++		IssuerFingerprint: w.signer.Fingerprint,
++	}
++	if err := sig.Sign(w.hash, w.signer, w.cfg); err != nil {
++		return errors.Join(err, w.payload.Close())
++	}
++	if err := sig.Serialize(w.payload); err != nil {
++		return errors.Join(err, w.payload.Close())
++	}
++	return w.payload.Close()
++}
++
++// noOpCloser is an io.WriteCloser whose Close does nothing, so a writer we
++// still need to write to later (the signature packet) is not closed early.
++type noOpCloser struct {
++	io.Writer
++}
++
++func (noOpCloser) Close() error { return nil }
+diff --git a/internal/pgp/keys_test.go b/internal/pgp/keys_test.go
+new file mode 100644
+index 0000000..574323d
+--- /dev/null
++++ b/internal/pgp/keys_test.go
+@@ -0,0 +1,843 @@
++package pgp
++
++import (
++	"bytes"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/ProtonMail/go-crypto/openpgp"
++)
++
++// Generated key pairs are expensive (a few seconds of RSA-3072 math each), so
++// the Go-side tests share two memoized pairs: Alice, passphrase-less, and
++// Bob, protected with a passphrase.
++var (
++	testKeysOnce  sync.Once
++	alicePubArm   string
++	alicePrivArm  string
++	bobPubArm     string
++	bobPrivArm    string
++	testKeysError error
++	aliceKey      Key
++	bobKey        Key
++)
++
++// testKeys returns the memoized key pairs. The returned private halves are
++// already parsed and unlocked.
++func testKeys(tb testing.TB) (alicePub, alicePriv, bobPub, bobPriv string) {
++	tb.Helper()
++	testKeysOnce.Do(func() {
++		alicePubArm, alicePrivArm, testKeysError = GenerateKeyPair("Alice Backups", "alice@example.com", "")
++		if testKeysError != nil {
++			return
++		}
++		bobPubArm, bobPrivArm, testKeysError = GenerateKeyPair("Bob Backups", "bob@example.com", "bob passphrase")
++		if testKeysError != nil {
++			return
++		}
++		aliceKey, testKeysError = ReadPrivateKey(strings.NewReader(alicePrivArm), "")
++		if testKeysError != nil {
++			return
++		}
++		bobKey, testKeysError = ReadPrivateKey(strings.NewReader(bobPrivArm), "bob passphrase")
++	})
++	if testKeysError != nil {
++		tb.Fatalf("generate test key pairs: %v", testKeysError)
++	}
++	return alicePubArm, alicePrivArm, bobPubArm, bobPrivArm
++}
++
++// alice reads the memoized passphrase-less key pair, unlocked for signing and
++// decrypting.
++func alice(tb testing.TB) Key {
++	tb.Helper()
++	testKeys(tb)
++	return aliceKey
++}
++
++// bob reads the memoized passphrase-protected key pair, unlocked for
++// decrypting.
++func bob(tb testing.TB) Key {
++	tb.Helper()
++	testKeys(tb)
++	return bobKey
++}
++
++// mustParsePublic parses armored public keys, failing the test on error.
++func mustParsePublic(tb testing.TB, armor string) []Key {
++	tb.Helper()
++	keys, err := ReadPublicKeys(strings.NewReader(armor))
++	if err != nil {
++		tb.Fatalf("ReadPublicKeys: %v", err)
++	}
++	return keys
++}
++
++// TestKeysRoundTrip encrypts to a generated recipient's public key and
++// decrypts with the private half, with and without key protection.
++func TestKeysRoundTrip(t *testing.T) {
++	_, alicePriv, _, bobPriv := testKeys(t)
++
++	for _, tc := range []struct {
++		name       string
++		publicArm  string
++		privArm    string
++		privPass   string
++		passphrase string
++	}{
++		{"passphrase-less key", alicePubArm, alicePriv, "", ""},
++		{"protected key", bobPubArm, bobPriv, "bob passphrase", ""},
++		{"protected key with message passphrase", bobPubArm, bobPriv, "bob passphrase", "message passphrase"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			plain := randomBytes(t, 1<<20)
++			recipients := mustParsePublic(t, tc.publicArm)
++
++			var cipher bytes.Buffer
++			if err := EncryptKeys(&cipher, bytes.NewReader(plain), tc.passphrase, recipients, nil, ""); err != nil {
++				t.Fatalf("EncryptKeys: %v", err)
++			}
++
++			key, err := ReadPrivateKey(strings.NewReader(tc.privArm), tc.privPass)
++			if err != nil {
++				t.Fatalf("ReadPrivateKey: %v", err)
++			}
++			var got bytes.Buffer
++			result, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", []Key{key})
++			if err != nil {
++				t.Fatalf("DecryptAny: %v", err)
++			}
++			if !result.Verified || result.SignedByKeyID != 0 || result.SignedByName != "" {
++				t.Fatalf("unexpected VerifyResult %+v", result)
++			}
++			if !bytes.Equal(got.Bytes(), plain) {
++				t.Fatalf("round trip mismatch: got %d bytes, want %d", got.Len(), len(plain))
++			}
++		})
++	}
++}
++
++// TestKeysTwoRecipients encrypts to two recipients and checks that either
++// private key alone decrypts.
++func TestKeysTwoRecipients(t *testing.T) {
++	testKeys(t)
++	plain := randomBytes(t, 1<<20)
++	recipients := mustParsePublic(t, alicePubArm+"\n"+bobPubArm)
++
++	var cipher bytes.Buffer
++	if err := EncryptKeys(&cipher, bytes.NewReader(plain), "", recipients, nil, ""); err != nil {
++		t.Fatalf("EncryptKeys: %v", err)
++	}
++
++	for _, tc := range []struct {
++		name string
++		key  Key
++	}{
++		{"alice", alice(t)},
++		{"bob", bob(t)},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var got bytes.Buffer
++			if _, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", []Key{tc.key}); err != nil {
++				t.Fatalf("DecryptAny with %s: %v", tc.name, err)
++			}
++			if !bytes.Equal(got.Bytes(), plain) {
++				t.Fatalf("round trip mismatch with %s", tc.name)
++			}
++		})
++	}
++}
++
++// TestKeysPassphraseAndRecipients encrypts with a passphrase AND to a
++// recipient, so the message carries both SKESK and PKESK packets, and checks
++// both ways in.
++func TestKeysPassphraseAndRecipients(t *testing.T) {
++	testKeys(t)
++	const passphrase = "both ways passphrase"
++	plain := randomBytes(t, 1<<20)
++	recipients := mustParsePublic(t, alicePubArm)
++
++	var cipher bytes.Buffer
++	if err := EncryptKeys(&cipher, bytes.NewReader(plain), passphrase, recipients, nil, ""); err != nil {
++		t.Fatalf("EncryptKeys: %v", err)
++	}
++
++	// Way in 1: the passphrase alone.
++	var got bytes.Buffer
++	if _, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), passphrase, nil); err != nil {
++		t.Fatalf("DecryptAny with passphrase only: %v", err)
++	}
++	if !bytes.Equal(got.Bytes(), plain) {
++		t.Fatal("passphrase round trip mismatch")
++	}
++
++	// Way in 2: the recipient's private key alone.
++	got.Reset()
++	if _, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", []Key{alice(t)}); err != nil {
++		t.Fatalf("DecryptAny with private key only: %v", err)
++	}
++	if !bytes.Equal(got.Bytes(), plain) {
++		t.Fatal("private key round trip mismatch")
++	}
++
++	// The passphrase does not open a recipient-only message, and the
++	// passphrase-less private half is not even needed for the symmetric path.
++	if err := EncryptKeys(&bytes.Buffer{}, bytes.NewReader(plain), passphrase, nil, nil, ""); err != nil {
++		t.Fatalf("EncryptKeys without recipients: %v", err)
++	}
++}
++
++// TestKeysFileHelpers exercises EncryptKeysFile: reported byte count, 0600
++// destination mode, and no partial output after a failure.
++func TestKeysFileHelpers(t *testing.T) {
++	testKeys(t)
++	dir := t.TempDir()
++	plain := randomBytes(t, 1<<20)
++
++	srcPath := filepath.Join(dir, "photo.jpg")
++	if err := os.WriteFile(srcPath, plain, 0o644); err != nil {
++		t.Fatal(err)
++	}
++	encPath := srcPath + Suffix
++	recipients := mustParsePublic(t, alicePubArm)
++
++	encN, err := EncryptKeysFile(encPath, srcPath, "", recipients, nil, "")
++	if err != nil {
++		t.Fatalf("EncryptKeysFile: %v", err)
++	}
++	fi, err := os.Stat(encPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if encN != fi.Size() {
++		t.Fatalf("EncryptKeysFile returned %d bytes, file has %d", encN, fi.Size())
++	}
++	if mode := fi.Mode().Perm(); mode != 0o600 {
++		t.Fatalf("encrypted file mode = %04o, want 0600", mode)
++	}
++
++	// The symmetric DecryptFile cannot open a key-encrypted file: it reports
++	// that no passphrase applies instead of decrypting garbage.
++	decPath := filepath.Join(dir, "restored.jpg")
++	if _, err := DecryptFile(decPath, encPath, ""); !errors.Is(err, ErrNotEncrypted) {
++		t.Fatalf("DecryptFile of a key-encrypted file error = %v, want ErrNotEncrypted", err)
++	}
++	if _, err := os.Stat(decPath); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("output %q exists after failed DecryptFile (stat error: %v)", decPath, err)
++	}
++
++	var restored bytes.Buffer
++	result, err := DecryptAny(&restored, mustRead(t, encPath), "", []Key{alice(t)})
++	if err != nil {
++		t.Fatalf("DecryptAny: %v", err)
++	}
++	if !bytes.Equal(restored.Bytes(), plain) || !result.Verified {
++		t.Fatal("file round trip mismatch")
++	}
++
++	// A failed encryption removes the partial destination.
++	failedDst := filepath.Join(dir, "failed.gpg")
++	if _, err := EncryptKeysFile(failedDst, filepath.Join(dir, "missing"), "", recipients, nil, ""); err == nil {
++		t.Fatal("EncryptKeysFile with a missing source returned nil error")
++	}
++	if _, err := os.Stat(failedDst); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("destination %q survives a failed EncryptKeysFile (stat error: %v)", failedDst, err)
++	}
++}
++
++func mustRead(t *testing.T, path string) *bytes.Reader {
++	t.Helper()
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return bytes.NewReader(data)
++}
++
++// TestKeysSigning checks that a signed message verifies with the signer's
++// identity, and that a tampered message fails with ErrSignature.
++func TestKeysSigning(t *testing.T) {
++	testKeys(t)
++	plain := randomBytes(t, 64<<10)
++	recipients := mustParsePublic(t, alicePubArm)
++
++	var cipher bytes.Buffer
++	if err := EncryptKeys(&cipher, bytes.NewReader(plain), "", recipients, alice(t), ""); err != nil {
++		t.Fatalf("EncryptKeys with signer: %v", err)
++	}
++
++	var got bytes.Buffer
++	result, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", []Key{alice(t)})
++	if err != nil {
++		t.Fatalf("DecryptAny: %v", err)
++	}
++	if !result.Verified {
++		t.Fatal("signature did not verify")
++	}
++	if result.SignedByKeyID != alice(t).PrimaryKey.KeyId {
++		t.Fatalf("SignedByKeyID = %X, want %X", result.SignedByKeyID, alice(t).PrimaryKey.KeyId)
++	}
++	if want := "Alice Backups <alice@example.com>"; result.SignedByName != want {
++		t.Fatalf("SignedByName = %q, want %q", result.SignedByName, want)
++	}
++	if !bytes.Equal(got.Bytes(), plain) {
++		t.Fatal("signed round trip mismatch")
++	}
++
++	// Tamper one byte inside the encrypted body: the signature must fail
++	// (whether the MDC catches it first or the signature check does).
++	tampered := append([]byte(nil), cipher.Bytes()...)
++	tampered[len(tampered)/2] ^= 0x01
++	got.Reset()
++	_, err = DecryptAny(&got, bytes.NewReader(tampered), "", []Key{alice(t)})
++	if err == nil {
++		t.Fatal("DecryptAny of a tampered message returned nil error")
++	}
++	if !errors.Is(err, ErrSignature) && !errors.Is(err, ErrPassphrase) {
++		t.Fatalf("tampered message error = %v, want ErrSignature or ErrPassphrase", err)
++	}
++	t.Logf("tampered message error: %v", err)
++}
++
++// TestKeysSignWithoutEncryption checks a message a given key can decrypt but
++// that was signed by a key that is not given: the signature cannot be checked,
++// which is an ErrSignature error with the signer's id still reported.
++func TestKeysSignWithoutEncryption(t *testing.T) {
++	testKeys(t)
++	// Encrypted to both, signed by Alice, opened with Bob's key alone: Bob can
++	// read the message but cannot check Alice's signature.
++	recipients := mustParsePublic(t, alicePubArm+"\n"+bobPubArm)
++	var cipher bytes.Buffer
++	if err := EncryptKeys(&cipher, strings.NewReader("signed by alice, read by bob"), "", recipients, alice(t), ""); err != nil {
++		t.Fatalf("EncryptKeys: %v", err)
++	}
++	var got bytes.Buffer
++	result, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", []Key{bob(t)})
++	if err == nil {
++		t.Fatal("DecryptAny without the signer's key returned nil error")
++	}
++	if !errors.Is(err, ErrSignature) {
++		t.Fatalf("error = %v, want ErrSignature", err)
++	}
++	if result.Verified || result.SignedByKeyID != alice(t).PrimaryKey.KeyId {
++		t.Fatalf("unexpected VerifyResult %+v", result)
++	}
++}
++
++// TestKeysWrongSignerPassphrase checks that a protected signer key with a
++// wrong passphrase fails with ErrPassphrase before anything is written.
++func TestKeysWrongSignerPassphrase(t *testing.T) {
++	testKeys(t)
++	recipients := mustParsePublic(t, alicePubArm)
++	// Parse Bob's protected key without unlocking it.
++	locked, err := openpgp.ReadArmoredKeyRing(strings.NewReader(bobPrivArm))
++	if err != nil {
++		t.Fatalf("ReadArmoredKeyRing: %v", err)
++	}
++	var cipher bytes.Buffer
++	err = EncryptKeys(&cipher, strings.NewReader("x"), "", recipients, locked[0], "wrong passphrase")
++	if err == nil {
++		t.Fatal("EncryptKeys with a wrong signer passphrase returned nil error")
++	}
++	if !errors.Is(err, ErrPassphrase) {
++		t.Fatalf("error = %v, want ErrPassphrase", err)
++	}
++	if cipher.Len() != 0 {
++		t.Fatalf("EncryptKeys wrote %d bytes before failing", cipher.Len())
++	}
++}
++
++// TestKeysWrongSecret checks that neither an unrelated private key nor the
++// wrong passphrase opens a recipient-encrypted message, with clear errors.
++func TestKeysWrongSecret(t *testing.T) {
++	testKeys(t)
++	recipients := mustParsePublic(t, alicePubArm)
++	plain := randomBytes(t, 1<<15)
++
++	var cipher bytes.Buffer
++	if err := EncryptKeys(&cipher, bytes.NewReader(plain), "", recipients, nil, ""); err != nil {
++		t.Fatalf("EncryptKeys: %v", err)
++	}
++
++	// Only Bob's key, which is not a recipient: no secret fits the message.
++	var got bytes.Buffer
++	_, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", []Key{bob(t)})
++	if err == nil {
++		t.Fatal("DecryptAny with an unrelated key returned nil error")
++	}
++	if !errors.Is(err, ErrNoKey) {
++		t.Fatalf("error = %v, want ErrNoKey", err)
++	}
++	if got.Len() != 0 {
++		t.Fatalf("DecryptAny wrote %d bytes despite having no secret", got.Len())
++	}
++
++	// No material at all.
++	got.Reset()
++	if _, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", nil); !errors.Is(err, ErrNoKey) {
++		t.Fatalf("error = %v, want ErrNoKey", err)
++	}
++
++	// A passphrase does not open a key-only message either.
++	got.Reset()
++	if _, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "some passphrase", nil); !errors.Is(err, ErrNoKey) {
++		t.Fatalf("error = %v, want ErrNoKey", err)
++	}
++
++	// No recipients and no passphrase at encryption time is refused at once.
++	got.Reset()
++	if err := EncryptKeys(&got, bytes.NewReader(plain), "", nil, nil, ""); !errors.Is(err, ErrNoKey) {
++		t.Fatalf("EncryptKeys error = %v, want ErrNoKey", err)
++	}
++}
++
++// TestKeysWrongKeyPassphrase checks that ReadPrivateKey reports a wrong
++// passphrase as ErrPassphrase and refuses public-only armor.
++func TestKeysReadPrivateKeyErrors(t *testing.T) {
++	testKeys(t)
++	if _, err := ReadPrivateKey(strings.NewReader(bobPrivArm), "not the passphrase"); !errors.Is(err, ErrPassphrase) {
++		t.Fatalf("ReadPrivateKey error = %v, want ErrPassphrase", err)
++	}
++	if _, err := ReadPrivateKey(strings.NewReader(alicePubArm), ""); !errors.Is(err, ErrNotPrivateKey) {
++		t.Fatalf("ReadPrivateKey of a public key error = %v, want ErrNotPrivateKey", err)
++	}
++	if _, err := ReadPublicKeys(strings.NewReader("not armor at all")); err == nil {
++		t.Fatal("ReadPublicKeys of junk returned nil error")
++	}
++}
++
++// TestKeysStreamingSpeed encrypts and decrypts 8 MiB with one recipient and
++// logs the elapsed time as a sanity check that nothing buffers the whole file
++// (a strict gate would be flaky on loaded CI machines).
++func TestKeysStreamingSpeed(t *testing.T) {
++	testKeys(t)
++	plain := randomBytes(t, 8<<20)
++	recipients := mustParsePublic(t, alicePubArm)
++
++	start := time.Now()
++	var cipher bytes.Buffer
++	if err := EncryptKeys(&cipher, bytes.NewReader(plain), "", recipients, nil, ""); err != nil {
++		t.Fatalf("EncryptKeys: %v", err)
++	}
++	encryptTime := time.Since(start)
++
++	start = time.Now()
++	var got bytes.Buffer
++	if _, err := DecryptAny(&got, bytes.NewReader(cipher.Bytes()), "", []Key{alice(t)}); err != nil {
++		t.Fatalf("DecryptAny: %v", err)
++	}
++	decryptTime := time.Since(start)
++
++	if !bytes.Equal(got.Bytes(), plain) {
++		t.Fatal("8 MiB round trip mismatch")
++	}
++	t.Logf("8 MiB with one recipient: encrypt %v, decrypt %v", encryptTime, decryptTime)
++	if encryptTime > 30*time.Second || decryptTime > 30*time.Second {
++		t.Errorf("8 MiB took encrypt %v / decrypt %v; streaming looks broken", encryptTime, decryptTime)
++	}
++}
++
++// TestGPGSeesKeysMessageParameters inspects EncryptKeys output from gpg's
++// point of view: RSA PKESK packets (algo 1), a classic SEIPD v1 (aead 0) with
++// AES-256 (cipher 9), and — in the combined case — an SKESK packet (s2k 3,
++// hash 8) alongside them, and no compression anywhere.
++func TestGPGSeesKeysMessageParameters(t *testing.T) {
++	gpg := newGPGEnv(t)
++	gpg.generateKey(t, "Test <t@x>", "encr")
++	dir := t.TempDir()
++	recipients := mustParsePublic(t, gpg.exportKey(t, "Test <t@x>", false))
++
++	srcPath := writeInput(t, dir, "in.bin", []byte("packet parameter check"))
++	for _, tc := range []struct {
++		name       string
++		passphrase string
++		want       []string
++	}{
++		// In the recipient-only dump the cipher and AEAD mode sit inside the
++		// encrypted PKESK payload, which gpg cannot open without the secret
++		// key, so only the outer packet shapes are checked.
++		{"recipient only", "", []string{"pubkey enc packet", "algo 1", "mdc_method: 2"}},
++		{"passphrase and recipient", "combined passphrase",
++			[]string{"pubkey enc packet", "symkey enc packet", "cipher 9", "aead 0", "s2k 3", "hash 8", "mdc_method: 2"}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			encPath := filepath.Join(dir, tc.name+".gpg")
++			if _, err := EncryptKeysFile(encPath, srcPath, tc.passphrase, recipients, nil, ""); err != nil {
++				t.Fatalf("EncryptKeysFile: %v", err)
++			}
++			dump := gpg.listPackets(t, encPath, tc.passphrase)
++			t.Logf("gpg packet dump:\n%s", dump)
++			for _, want := range tc.want {
++				if !strings.Contains(dump, want) {
++					t.Errorf("gpg packet dump is missing %q", want)
++				}
++			}
++			if strings.Contains(dump, ":compressed packet:") {
++				t.Error("packet dump contains a compressed packet; encryption must be uncompressed")
++			}
++		})
++	}
++}
++
++// --- gpg interoperability --------------------------------------------------
++
++// generateKey creates a fresh RSA-3072 key with the given usage in the
++// throwaway GNUPGHOME. An empty passphrase keeps the tests simple: the keys
++// never leave the temporary home.
++func (e *gpgEnv) generateKey(t *testing.T, userid, usage string) {
++	t.Helper()
++	cmd := e.command(t,
++		"--batch", "--yes", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", "",
++		"--quick-generate-key", userid, "rsa3072", usage,
++	)
++	var stderr bytes.Buffer
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --quick-generate-key %q: %v\n%s", userid, err, stderr.String())
++	}
++}
++
++// fingerprint returns the primary key fingerprint of userid, for
++// --quick-add-key.
++func (e *gpgEnv) fingerprint(t *testing.T, userid string) string {
++	t.Helper()
++	cmd := e.command(t, "--batch", "--list-keys", "--with-colons", "--with-fingerprint", userid)
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --list-keys %q: %v\n%s", userid, err, stderr.String())
++	}
++	for _, line := range strings.Split(stdout.String(), "\n") {
++		if fields := strings.Split(strings.TrimSpace(line), ":"); len(fields) > 9 && fields[0] == "fpr" {
++			return fields[9]
++		}
++	}
++	t.Fatalf("gpg --list-keys %q returned no public key record", userid)
++	return ""
++}
++
++// addEncryptionSubkey gives a signing-capable key an RSA encryption subkey,
++// because --quick-generate-key with the sign usage creates none.
++func (e *gpgEnv) addEncryptionSubkey(t *testing.T, userid string) {
++	t.Helper()
++	cmd := e.command(t,
++		"--batch", "--yes", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", "",
++		"--quick-add-key", e.fingerprint(t, userid), "rsa3072", "encr", "never",
++	)
++	var stderr bytes.Buffer
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --quick-add-key %q: %v\n%s", userid, err, stderr.String())
++	}
++}
++
++// exportKey runs gpg --armor --export (secret when secret is true) for userid
++// and returns the armored block(s).
++func (e *gpgEnv) exportKey(t *testing.T, userid string, secret bool) string {
++	t.Helper()
++	kind := "--export"
++	if secret {
++		kind = "--export-secret-keys"
++	}
++	cmd := e.command(t, "--batch", "--armor", kind, userid)
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg %s %q: %v\n%s", kind, userid, err, stderr.String())
++	}
++	return stdout.String()
++}
++
++// importKey feeds armored keys to gpg --import.
++func (e *gpgEnv) importKey(t *testing.T, armored string) {
++	t.Helper()
++	cmd := e.command(t, "--batch", "--yes", "--no-tty", "--import")
++	cmd.Stdin = strings.NewReader(armored)
++	var stderr bytes.Buffer
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --import: %v\n%s", err, stderr.String())
++	}
++}
++
++// encryptTo runs gpg --encrypt --recipient on inPath into outPath.
++func (e *gpgEnv) encryptTo(t *testing.T, inPath, outPath, recipient string, extra ...string) {
++	t.Helper()
++	args := []string{
++		"--batch", "--yes", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", "",
++		"--trust-model", "always",
++		"--encrypt", "--recipient", recipient,
++		"--output", outPath,
++	}
++	args = append(args, extra...)
++	args = append(args, inPath)
++	cmd := e.command(t, args...)
++	var stderr bytes.Buffer
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --encrypt %s: %v\n%s", inPath, err, stderr.String())
++	}
++}
++
++// signFile runs gpg --sign on inPath into outPath with signer as local-user.
++func (e *gpgEnv) signFile(t *testing.T, inPath, outPath, signer string, extra ...string) {
++	t.Helper()
++	args := []string{
++		"--batch", "--yes", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", "",
++		"--sign", "--local-user", signer,
++		"--output", outPath,
++	}
++	args = append(args, extra...)
++	args = append(args, inPath)
++	cmd := e.command(t, args...)
++	var stderr bytes.Buffer
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		t.Fatalf("gpg --sign %s: %v\n%s", inPath, err, stderr.String())
++	}
++}
++
++// writeInput writes plaintext bytes to a file in dir and returns its path.
++func writeInput(t *testing.T, dir, name string, plain []byte) string {
++	t.Helper()
++	path := filepath.Join(dir, name)
++	if err := os.WriteFile(path, plain, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++// TestGPGDecryptsGoKeysOutput encrypts with EncryptKeys to gpg's exported
++// public key and lets gpg decrypt it with the matching secret key: the
++// direction a `gpg -d` user on another machine takes.
++func TestGPGDecryptsGoKeysOutput(t *testing.T) {
++	gpg := newGPGEnv(t)
++	gpg.generateKey(t, "Test <t@x>", "encr")
++	dir := t.TempDir()
++
++	publicArm := gpg.exportKey(t, "Test <t@x>", false)
++	recipients := mustParsePublic(t, publicArm)
++
++	for _, size := range []int{0, 1 << 20} {
++		name := "1 MiB"
++		if size == 0 {
++			name = "empty"
++		}
++		t.Run(name, func(t *testing.T) {
++			plain := randomBytes(t, size)
++			srcPath := writeInput(t, dir, "in-"+name+".bin", plain)
++			encPath := srcPath + Suffix
++			if _, err := EncryptKeysFile(encPath, srcPath, "", recipients, nil, ""); err != nil {
++				t.Fatalf("EncryptKeysFile: %v", err)
++			}
++
++			got := gpg.decryptFile(t, encPath, "")
++			if !bytes.Equal(got, plain) {
++				t.Fatalf("gpg decrypted %d bytes, want %d equal bytes", len(got), len(plain))
++			}
++		})
++	}
++}
++
++// TestGPGDecryptsGoPassphraseAndKeysOutput encrypts to a recipient AND with a
++// passphrase; gpg opens the message with the passphrase alone.
++func TestGPGDecryptsGoPassphraseAndKeysOutput(t *testing.T) {
++	gpg := newGPGEnv(t)
++	gpg.generateKey(t, "Test <t@x>", "encr")
++	dir := t.TempDir()
++
++	recipients := mustParsePublic(t, gpg.exportKey(t, "Test <t@x>", false))
++	const passphrase = "combined passphrase"
++
++	plain := randomBytes(t, 1<<20)
++	srcPath := writeInput(t, dir, "in.bin", plain)
++	encPath := srcPath + Suffix
++	if _, err := EncryptKeysFile(encPath, srcPath, passphrase, recipients, nil, ""); err != nil {
++		t.Fatalf("EncryptKeysFile: %v", err)
++	}
++
++	got := gpg.decryptFile(t, encPath, passphrase)
++	if !bytes.Equal(got, plain) {
++		t.Fatalf("gpg decrypted %d bytes, want %d equal bytes", len(got), len(plain))
++	}
++}
++
++// TestGPGVerifiesGoSignature signs with a Go-generated key and lets gpg
++// verify and decrypt: import the private half (the owner's key on another
++// machine), then gpg -d.
++func TestGPGVerifiesGoSignature(t *testing.T) {
++	gpg := newGPGEnv(t)
++	testKeys(t)
++	gpg.importKey(t, alicePrivArm)
++	dir := t.TempDir()
++
++	plain := randomBytes(t, 1<<20)
++	srcPath := writeInput(t, dir, "in.bin", plain)
++	encPath := srcPath + Suffix
++	if _, err := EncryptKeysFile(encPath, srcPath, "", mustParsePublic(t, alicePubArm), alice(t), ""); err != nil {
++		t.Fatalf("EncryptKeysFile: %v", err)
++	}
++
++	got := gpg.decryptFile(t, encPath, "")
++	if !bytes.Equal(got, plain) {
++		t.Fatalf("gpg decrypted %d bytes, want %d equal bytes", len(got), len(plain))
++	}
++
++	// A tampered ciphertext must make gpg fail the verification.
++	tampered, err := os.ReadFile(encPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tampered[len(tampered)/2] ^= 0x01
++	tamperedPath := writeInput(t, dir, "tampered.gpg", tampered)
++	cmd := gpg.command(t,
++		"--batch", "--yes", "--no-tty",
++		"--pinentry-mode", "loopback",
++		"--passphrase", "",
++		"--decrypt", tamperedPath,
++	)
++	if err := cmd.Run(); err == nil {
++		t.Fatal("gpg accepted a tampered signed message")
++	} else {
++		t.Logf("gpg rejected the tampered message: %v", err)
++	}
++}
++
++// TestGoDecryptsGPGKeysOutput lets gpg encrypt to its own key and DecryptAny
++// open the message with gpg's exported secret key.
++func TestGoDecryptsGPGKeysOutput(t *testing.T) {
++	gpg := newGPGEnv(t)
++	gpg.generateKey(t, "Test <t@x>", "encr")
++	dir := t.TempDir()
++
++	plain := randomBytes(t, 1<<20)
++	srcPath := writeInput(t, dir, "in.bin", plain)
++	encPath := filepath.Join(dir, "in.gpg")
++	gpg.encryptTo(t, srcPath, encPath, "Test <t@x>")
++
++	key, err := ReadPrivateKey(strings.NewReader(gpg.exportKey(t, "Test <t@x>", true)), "")
++	if err != nil {
++		t.Fatalf("ReadPrivateKey of gpg's secret key: %v", err)
++	}
++
++	var got bytes.Buffer
++	result, err := DecryptAny(&got, mustRead(t, encPath), "", []Key{key})
++	if err != nil {
++		t.Fatalf("DecryptAny of gpg output: %v", err)
++	}
++	if !result.Verified || result.SignedByKeyID != 0 {
++		t.Fatalf("unexpected VerifyResult %+v for an unsigned message", result)
++	}
++	if !bytes.Equal(got.Bytes(), plain) {
++		t.Fatalf("decrypted %d bytes, want %d equal bytes", got.Len(), len(plain))
++	}
++}
++
++// TestGoVerifiesGPGSignature verifies gpg-signed output with DecryptAny, both
++// the signed-only message (gpg --sign) and the signed-and-encrypted one
++// (gpg --encrypt --sign), checking name and key id.
++func TestGoVerifiesGPGSignature(t *testing.T) {
++	gpg := newGPGEnv(t)
++	gpg.generateKey(t, "Test <t@x>", "sign")
++	dir := t.TempDir()
++
++	gpgPublic := mustParsePublic(t, gpg.exportKey(t, "Test <t@x>", false))
++	plain := randomBytes(t, 64<<10)
++
++	for _, tc := range []struct {
++		name  string
++		setup func(t *testing.T) (signerOrRecipient string, keys []Key)
++		enc   bool
++	}{
++		{"signed only", func(t *testing.T) (string, []Key) {
++			return "Test <t@x>", gpgPublic
++		}, false},
++		{"signed and encrypted", func(t *testing.T) (string, []Key) {
++			// A sign-only key cannot encrypt; give it an encryption subkey.
++			// Decrypting needs the secret half, which also carries the
++			// signing key for verification.
++			gpg.addEncryptionSubkey(t, "Test <t@x>")
++			key, err := ReadPrivateKey(strings.NewReader(gpg.exportKey(t, "Test <t@x>", true)), "")
++			if err != nil {
++				t.Fatalf("ReadPrivateKey of gpg's secret key: %v", err)
++			}
++			return "Test <t@x>", []Key{key}
++		}, true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			userid, keys := tc.setup(t)
++			srcPath := writeInput(t, dir, "in.bin", plain)
++			signedPath := filepath.Join(dir, "signed.gpg")
++			if tc.enc {
++				gpg.encryptTo(t, srcPath, signedPath, userid, "--sign", "--local-user", userid)
++			} else {
++				gpg.signFile(t, srcPath, signedPath, userid)
++			}
++
++			var got bytes.Buffer
++			result, err := DecryptAny(&got, mustRead(t, signedPath), "", keys)
++			if err != nil {
++				t.Fatalf("DecryptAny of gpg-signed output: %v", err)
++			}
++			if !result.Verified {
++				t.Fatal("gpg's signature did not verify")
++			}
++			if result.SignedByName != userid {
++				t.Fatalf("SignedByName = %q, want %q", result.SignedByName, userid)
++			}
++			if result.SignedByKeyID == 0 {
++				t.Fatal("SignedByKeyID = 0 for a signed message")
++			}
++			if !bytes.Equal(got.Bytes(), plain) {
++				t.Fatalf("decrypted %d bytes, want %d equal bytes", got.Len(), len(plain))
++			}
++		})
++	}
++}
++
++// TestGoRejectsTamperedGPGSignature feeds gpg a tampered signed message and
++// expects ErrSignature.
++func TestGoRejectsTamperedGPGSignature(t *testing.T) {
++	gpg := newGPGEnv(t)
++	gpg.generateKey(t, "Test <t@x>", "sign")
++	dir := t.TempDir()
++
++	gpgPublic := mustParsePublic(t, gpg.exportKey(t, "Test <t@x>", false))
++	srcPath := writeInput(t, dir, "in.bin", []byte("signed by gpg, then modified"))
++	signedPath := filepath.Join(dir, "signed.gpg")
++	gpg.signFile(t, srcPath, signedPath, "Test <t@x>")
++
++	signed, err := os.ReadFile(signedPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	signed[len(signed)/2] ^= 0x01
++
++	var got bytes.Buffer
++	result, err := DecryptAny(&got, bytes.NewReader(signed), "", gpgPublic)
++	if err == nil {
++		t.Fatal("DecryptAny accepted a tampered gpg signature")
++	}
++	if !errors.Is(err, ErrSignature) {
++		t.Fatalf("error = %v, want ErrSignature", err)
++	}
++	if result.Verified {
++		t.Fatal("VerifyResult.Verified is true for a tampered signature")
++	}
++	t.Logf("tampered gpg signature error: %v", err)
++}

@@ -1,0 +1,1829 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 13:46:18 +0800
+Subject: [PATCH] =?UTF-8?q?Let=20the=20=E5=A4=87=E4=BB=BD=20section=20encr?=
+ =?UTF-8?q?ypt=20to=20imported=20recipient=20keys=20(=E4=BB=85=E5=AF=86?=
+ =?UTF-8?q?=E7=A0=81=20/=20=E6=94=B6=E4=BB=B6=E4=BA=BA=E5=AF=86=E9=92=A5?=
+ =?UTF-8?q?=20/=20=E5=AF=86=E7=A0=81+=E5=AF=86=E9=92=A5)=20and=20sign=20ev?=
+ =?UTF-8?q?ery=20upload=20with=20an=20imported=20or=20freshly=20generated?=
+ =?UTF-8?q?=20key,=20keeping=20the=20keys=20in=20armored=20files=20beside?=
+ =?UTF-8?q?=20the=20sealed=20passphrases,=20since=20a=20backup=20meant=20f?=
+ =?UTF-8?q?or=20another=20machine=20should=20not=20need=20this=20machine's?=
+ =?UTF-8?q?=20passphrase.?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ app/backup.go      | 490 ++++++++++++++++++++++++++++++++++++++++++++-
+ app/backup_key.go  |  96 +++++++--
+ app/backup_page.go | 441 +++++++++++++++++++++++++++++++++++++++-
+ app/backup_test.go | 427 +++++++++++++++++++++++++++++++++++++++
+ app/settings.go    |  63 +++++-
+ docs/BACKUP.md     |  26 ++-
+ 6 files changed, 1506 insertions(+), 37 deletions(-)
+
+diff --git a/app/backup.go b/app/backup.go
+index 02e7973..b2346c5 100644
+--- a/app/backup.go
++++ b/app/backup.go
+@@ -1,9 +1,12 @@
+ package app
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
++	"fmt"
++	"io"
+ 	"log"
+ 	"os"
+ 	"path/filepath"
+@@ -15,6 +18,7 @@ import (
+ 
+ 	"github.com/pengstem/baidunetgo/internal/backup"
+ 	"github.com/pengstem/baidunetgo/internal/baidu"
++	"github.com/pengstem/baidunetgo/internal/pgp"
+ )
+ 
+ // The 备份 section of the settings page mirrors local folders into the
+@@ -29,6 +33,13 @@ const (
+ 	// backupTempPrefix starts the name of the temporary file the state is
+ 	// written through, before it is renamed into place.
+ 	backupTempPrefix = ".backup-state-"
++	// backupKeysPlaceholder stands in for the passphrase of a run that
++	// encrypts to recipient keys only: the engine refuses an encrypted run
++	// with an empty passphrase before EncryptStream is ever called
++	// (internal/backup's Run checks cfg.Encrypt), and the EncryptStream
++	// closure this app builds for key-only runs ignores the passphrase it
++	// is handed, so the placeholder is never used as one.
++	backupKeysPlaceholder = "recipient-keys"
+ )
+ 
+ // backupFirstDelay is how long after signing in the first automatic run
+@@ -49,6 +60,31 @@ var backupPickFolders = func(a *App) ([]string, error) {
+ 	return mygo.Dialog.Open(opts)
+ }
+ 
++// backupPickKeyFile asks for one armored key file (a recipient's public key,
++// or the signer's private key); a variable so tests can stand in for the
++// native chooser. It runs on a goroutine.
++var backupPickKeyFile = func(a *App) (string, error) {
++	files, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
++		Parent:      a.win,
++		Title:       "选择密钥文件",
++		ButtonLabel: "打开",
++	})
++	if err != nil || len(files) == 0 {
++		return "", err
++	}
++	return files[0], nil
++}
++
++// backupSaveKeyFile asks where to save an armored public key; a variable so
++// tests can stand in for the native dialog. It runs on a goroutine.
++var backupSaveKeyFile = func(a *App, name string) (string, error) {
++	return mygo.Dialog.Save(mygo.SaveDialogOptions{
++		Parent:      a.win,
++		Title:       "保存公钥",
++		DefaultPath: name,
++	})
++}
++
+ // backupClient adapts the signed-in netdisk client to the backup engine's
+ // Client: the engine lists and creates netdisk folders and uploads local
+ // files, overwriting what is there, which a re-run relies on.
+@@ -111,12 +147,55 @@ type backupState struct {
+ 	passSet  bool
+ 	passRead bool
+ 
++	// The recipients' public keys and the signer's private key, parsed from
++	// backup-recipients.asc and backup-signer.asc once, as the passphrase
++	// is read once. recRaw is the armored text the recipients file holds,
++	// kept so that removing one key rewrites it without the others. The
++	// signer is parsed without unlocking it, enough to name it; signing
++	// unlocks with signerPass at use time.
++	recipients []pgp.Key
++	recRaw     string
++	recRead    bool
++	signer     pgp.Key
++	signerPass string
++	signerRead bool
++
+ 	// pwdOpen, pwd, pwd2 and pwdErr are the 设置密码… dialog.
+ 	pwdOpen bool
+ 	pwd     string
+ 	pwd2    string
+ 	pwdErr  string
+ 
++	// recOpen, recErr, recPaste and recPasteOpen are the 收件人 dialog and
++	// its 粘贴 dialog.
++	recOpen      bool
++	recErr       string
++	recPaste     string
++	recPasteOpen bool
++
++	// sigOpen, sigErr, sigPaste and sigPasteOpen are the 签名密钥 dialog and
++	// its 粘贴 dialog; sigFile and sigPass are a private key read from a
++	// file or pasted, waiting for its passphrase to be verified;
++	// sigGenOpen, genName, genEmail, genPass, genPass2 and genErr are the
++	// 生成新密钥对 dialog, genBusy its wait, and genPublic the public half
++	// of a generated pair, offered in the genPublicOpen dialog.
++	sigOpen       bool
++	sigErr        string
++	sigPaste      string
++	sigPasteOpen  bool
++	sigFile       string
++	sigPass       string
++	sigPassOpen   bool
++	sigGenOpen    bool
++	genName       string
++	genEmail      string
++	genPass       string
++	genPass2      string
++	genErr        string
++	genBusy       bool
++	genPublic     string
++	genPublicOpen bool
++
+ 	// destOpen and destPicker are the 备份到 dialog: the netdisk folder
+ 	// chooser, reused from the move and copy dialogs.
+ 	destOpen   bool
+@@ -177,6 +256,326 @@ func (a *App) backupStatePath() string {
+ 	return ""
+ }
+ 
++// backupKeysLoaded makes sure the recipients and the signer were read, once.
++// It reads them on a goroutine, as the key files sit beside the state and
++// parsing an armored key is not free.
++func (a *App) backupKeysLoaded() {
++	b := &a.backup
++	if b.recRead && b.signerRead {
++		return
++	}
++	b.recRead, b.signerRead = true, true
++	dir := a.backupDir()
++	if dir == "" {
++		return
++	}
++	kr := a.backupKeyring()
++	go func() {
++		rec, raw := loadBackupRecipients(dir)
++		signer := loadBackupSigner(dir)
++		pass, _ := readBackupSignerPass(dir, kr)
++		a.update(func() {
++			a.backup.recipients, a.backup.recRaw = rec, raw
++			a.backup.signer, a.backup.signerPass = signer, pass
++		})
++	}()
++}
++
++// shortKeyID formats the last 8 hex digits of a key's ID, as gpg shows the
++// short form of a long key ID.
++func shortKeyID(id uint64) string {
++	return fmt.Sprintf("%08X", id&0xFFFFFFFF)
++}
++
++// keyName is a key's primary identity, "Name <email>", or its short key ID
++// when the key names nobody.
++func keyName(k pgp.Key) string {
++	if k == nil {
++		return ""
++	}
++	if id := k.PrimaryIdentity(); id != nil && id.Name != "" {
++		return id.Name
++	}
++	return shortKeyID(k.PrimaryKey.KeyId)
++}
++
++// splitArmoredBlocks splits concatenated armored public-key blocks, keeping
++// each one whole; anything before, between or after them is dropped.
++func splitArmoredBlocks(text string) []string {
++	const begin = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
++	const end = "-----END PGP PUBLIC KEY BLOCK-----"
++	var out []string
++	for {
++		i := strings.Index(text, begin)
++		if i < 0 {
++			break
++		}
++		j := strings.Index(text[i:], end)
++		if j < 0 {
++			break
++		}
++		j += i + len(end)
++		out = append(out, strings.TrimSpace(text[i:j]))
++		text = text[j:]
++	}
++	return out
++}
++
++// recipientsFromArmored parses the armored public-key blocks of text: the
++// keys in them, deduplicated by key ID, and the kept blocks joined back
++// together, ready for the recipients file. A block holding a private key, or
++// one that does not parse, rejects the whole text with a message for the
++// user.
++func recipientsFromArmored(text string) ([]pgp.Key, string, error) {
++	if strings.Contains(text, "-----BEGIN PGP PRIVATE KEY BLOCK-----") {
++		return nil, "", errors.New("这是私钥：收件人需要公钥，请用 gpg --armor --export 导出后再添加")
++	}
++	blocks := splitArmoredBlocks(text)
++	if len(blocks) == 0 {
++		return nil, "", errors.New("没有找到 OpenPGP 公钥块（-----BEGIN PGP PUBLIC KEY BLOCK-----）")
++	}
++	var keys []pgp.Key
++	var kept []string
++	seen := map[uint64]bool{}
++	for _, block := range blocks {
++		ks, err := pgp.ReadPublicKeys(strings.NewReader(block))
++		if err != nil {
++			return nil, "", fmt.Errorf("无法识别的密钥：%v", err)
++		}
++		for _, k := range ks {
++			if k.PrivateKey != nil {
++				return nil, "", errors.New("这是私钥：收件人需要公钥，请用 gpg --armor --export 导出后再添加")
++			}
++		}
++		added := false
++		for _, k := range ks {
++			if !seen[k.PrimaryKey.KeyId] {
++				seen[k.PrimaryKey.KeyId] = true
++				keys = append(keys, k)
++				added = true
++			}
++		}
++		if added {
++			kept = append(kept, block)
++		}
++	}
++	return keys, strings.Join(kept, "\n\n"), nil
++}
++
++// loadBackupRecipients reads and parses the recipients file; a missing,
++// unreadable or corrupt one is no recipients at all.
++func loadBackupRecipients(dir string) ([]pgp.Key, string) {
++	data, err := os.ReadFile(filepath.Join(dir, backupRecipientsFile))
++	if err != nil {
++		return nil, ""
++	}
++	keys, raw, err := recipientsFromArmored(string(data))
++	if err != nil {
++		return nil, ""
++	}
++	return keys, raw
++}
++
++// loadBackupSigner reads the signer's armored private key, parsed without
++// unlocking it — enough to name the key, signing unlocks it with the sealed
++// passphrase. A missing or unreadable one is no signer.
++func loadBackupSigner(dir string) pgp.Key {
++	data, err := os.ReadFile(filepath.Join(dir, backupSignerFile))
++	if err != nil {
++		return nil
++	}
++	// ReadPublicKeys parses private blocks too, which is what this file
++	// holds; a private key among them is the signer.
++	keys, err := pgp.ReadPublicKeys(bytes.NewReader(data))
++	if err != nil {
++		return nil
++	}
++	for _, k := range keys {
++		if k.PrivateKey != nil {
++			return k
++		}
++	}
++	return nil
++}
++
++// addBackupRecipients adds the armored public-key blocks of text to the
++// recipients, deduplicating by key ID. It reports how many keys were new.
++// The file is rewritten on a goroutine.
++func (a *App) addBackupRecipients(text string) (int, error) {
++	b := &a.backup
++	keys, raw, err := recipientsFromArmored(b.recRaw + "\n" + text)
++	if err != nil {
++		return 0, err
++	}
++	dir := a.backupDir()
++	if dir == "" {
++		return 0, errors.New("无法保存收件人：找不到应用的数据目录")
++	}
++	added := len(keys) - len(b.recipients)
++	b.recipients, b.recRaw = keys, raw
++	go func() {
++		if err := writeBackupKeyFile(dir, backupRecipientsFile, raw); err != nil {
++			log.Printf("backup: recipients: %v", err)
++			a.update(func() { a.toast("无法保存收件人密钥："+err.Error(), "error") })
++		}
++	}()
++	return added, nil
++}
++
++// removeBackupRecipient takes the recipient at i out of the recipients and
++// rewrites the recipients file without its block, on a goroutine. A block
++// that holds several keys goes away with the one removed.
++func (a *App) removeBackupRecipient(i int) {
++	b := &a.backup
++	if i < 0 || i >= len(b.recipients) {
++		return
++	}
++	id := b.recipients[i].PrimaryKey.KeyId
++	var kept []string
++	for _, block := range splitArmoredBlocks(b.recRaw) {
++		ks, err := pgp.ReadPublicKeys(strings.NewReader(block))
++		if err != nil {
++			continue
++		}
++		drop := false
++		for _, k := range ks {
++			if k.PrimaryKey.KeyId == id {
++				drop = true
++			}
++		}
++		if !drop {
++			kept = append(kept, block)
++		}
++	}
++	raw := strings.Join(kept, "\n\n")
++	keys, _, err := recipientsFromArmored(raw)
++	if err != nil {
++		keys, raw = nil, ""
++	}
++	b.recipients, b.recRaw = keys, raw
++	if dir := a.backupDir(); dir != "" {
++		go func() {
++			if err := writeBackupKeyFile(dir, backupRecipientsFile, raw); err != nil {
++				log.Printf("backup: recipients: %v", err)
++			}
++		}()
++	}
++}
++
++// importBackupSigner verifies the armored private key of sigFile with pass
++// and makes it the signer: the key file and the sealed passphrase are
++// written on a goroutine, the caches are set at once so this session's runs
++// can sign.
++func (a *App) importBackupSigner(text, pass string) error {
++	key, err := pgp.ReadPrivateKey(strings.NewReader(text), pass)
++	if err != nil {
++		switch {
++		case errors.Is(err, pgp.ErrNotPrivateKey):
++			err = errors.New("这不是私钥：签名密钥需要私钥块（-----BEGIN PGP PRIVATE KEY BLOCK-----）")
++		case errors.Is(err, pgp.ErrPassphrase):
++			err = errors.New("密码不对，这把私钥解不开")
++		default:
++			err = fmt.Errorf("无法识别的密钥：%v", err)
++		}
++		return err
++	}
++	dir := a.backupDir()
++	if dir == "" {
++		return errors.New("无法保存签名密钥：找不到应用的数据目录")
++	}
++	b := &a.backup
++	b.signer, b.signerPass = key, pass
++	go func() {
++		if err := writeBackupKeyFile(dir, backupSignerFile, strings.TrimSpace(text)); err != nil {
++			a.update(func() { a.toast("无法保存签名密钥："+err.Error(), "error") })
++			return
++		}
++		if err := writeBackupSignerPass(dir, a.backupKeyring(), pass); err != nil {
++			a.update(func() { a.toast("无法保存签名密钥密码："+err.Error(), "error") })
++		}
++	}()
++	return nil
++}
++
++// removeBackupSigner forgets the signer: the key file is deleted and the
++// sealed passphrase cleared, both on a goroutine, and signing turns off.
++func (a *App) removeBackupSigner() {
++	b := &a.backup
++	b.signer, b.signerPass = nil, ""
++	b.sigErr = ""
++	if a.settings.Backup.Sign {
++		a.settings.Backup.Sign = false
++		a.applyBackupSettings()
++	}
++	if dir := a.backupDir(); dir != "" {
++		go func() {
++			if err := removeBackupKeyFile(dir, backupSignerFile); err != nil {
++				log.Printf("backup: signer: %v", err)
++				return
++			}
++			if err := writeBackupSignerPass(dir, a.backupKeyring(), ""); err != nil {
++				log.Printf("backup: signer passphrase: %v", err)
++			}
++		}()
++	}
++}
++
++// generateBackupSigner makes a fresh key pair for signing, after the dialog
++// checked its fields. It runs pgp.GenerateKeyPair on a goroutine — it takes
++// a few seconds — then saves the private half as the signer, seals the
++// passphrase, and offers the public half for copying and saving.
++func (a *App) generateBackupSigner(name, email, pass string) {
++	b := &a.backup
++	dir := a.backupDir()
++	if dir == "" {
++		b.genErr, b.genBusy = "无法保存签名密钥：找不到应用的数据目录", false
++		return
++	}
++	b.genBusy = true
++	go func() {
++		public, private, err := pgp.GenerateKeyPair(name, email, pass)
++		a.update(func() {
++			b.genBusy = false
++			if err != nil {
++				b.genErr = "生成密钥失败：" + err.Error()
++				return
++			}
++			if err := writeBackupKeyFile(dir, backupSignerFile, private); err != nil {
++				b.genErr = "无法保存签名密钥：" + err.Error()
++				return
++			}
++			if err := writeBackupSignerPass(dir, a.backupKeyring(), pass); err != nil {
++				b.genErr = "无法保存签名密钥密码：" + err.Error()
++				return
++			}
++			b.signer = loadBackupSigner(dir)
++			b.signerPass = pass
++			b.genErr = ""
++			b.sigGenOpen = false
++			b.genPublic = public
++			b.genPublicOpen = true
++		})
++	}()
++}
++
++// saveBackupPublic asks where to save the generated public half and writes
++// it there, 0644 — a public key is no secret.
++func (a *App) saveBackupPublic() {
++	b := &a.backup
++	public := b.genPublic
++	go func() {
++		p, err := backupSaveKeyFile(a, "baidunetgo-backup公钥.asc")
++		if err != nil || p == "" {
++			return
++		}
++		if err := os.WriteFile(p, []byte(public), 0o644); err != nil {
++			a.update(func() { a.toast("无法保存公钥："+err.Error(), "error") })
++			return
++		}
++		a.update(func() { a.toast("公钥已保存", "success") })
++	}()
++}
++
+ // backupFileLoaded reads backup-state.json once, on the UI thread, so the
+ // page can show what the last run did and a run can skip what is unchanged.
+ func (a *App) backupFileLoaded() {
+@@ -320,24 +719,38 @@ func cleanLocal(p string) string {
+ 
+ // backupConfig returns what a run backs up now, and why it cannot start.
+ func (a *App) backupConfig() (backup.Config, string) {
++	s := &a.settings
+ 	cfg := backup.Config{
+-		Dest:     a.settings.backupDest(),
+-		Folders:  append([]backup.Folder(nil), a.settings.Backup.Folders...),
+-		Encrypt:  a.settings.Backup.Encrypt,
+-		Parallel: min(a.settings.upload(), backup.MaxParallel),
++		Dest:     s.backupDest(),
++		Folders:  append([]backup.Folder(nil), s.Backup.Folders...),
++		Encrypt:  s.Backup.Encrypt,
++		Parallel: min(s.upload(), backup.MaxParallel),
+ 	}
+ 	if len(cfg.Folders) == 0 {
+ 		return cfg, "还没有添加要备份的文件夹"
+ 	}
+-	if cfg.Encrypt && a.backup.pass == "" {
+-		return cfg, "加密备份需要先设置密码"
++	mode := s.backupEncryptMode()
++	switch mode {
++	case backupModePassphrase, backupModeBoth:
++		if a.backup.pass == "" {
++			return cfg, "加密备份需要先设置密码"
++		}
++	}
++	if mode == backupModeKeys || mode == backupModeBoth {
++		if len(a.backup.recipients) == 0 {
++			return cfg, "收件人密钥加密需要先添加收件人密钥"
++		}
++	}
++	if s.Backup.Sign && a.backup.signer == nil {
++		return cfg, "签名备份需要先设置签名密钥"
+ 	}
+ 	return cfg, ""
+ }
+ 
+ // startBackup mirrors the configured folders into the netdisk on a
+ // goroutine. manual marks the 立即备份 button's press, which says at once
+-// when it cannot run, and asks for a passphrase rather than failing quietly.
++// when it cannot run, and opens the dialog for the missing piece — a
++// passphrase, a recipient, a signer — rather than failing quietly.
+ // It reports whether the run started.
+ func (a *App) startBackup(manual bool) bool {
+ 	if a.backup.running {
+@@ -352,12 +765,19 @@ func (a *App) startBackup(manual bool) bool {
+ 	}
+ 	a.backupFileLoaded()
+ 	a.backupPassLoaded()
++	a.backupKeysLoaded()
+ 	cfg, why := a.backupConfig()
+ 	if why != "" {
+ 		if manual {
+-			if cfg.Encrypt && a.backup.pass == "" {
++			mode := a.settings.backupEncryptMode()
++			switch {
++			case (mode == backupModePassphrase || mode == backupModeBoth) && a.backup.pass == "":
+ 				a.openBackupPassword()
+-			} else {
++			case (mode == backupModeKeys || mode == backupModeBoth) && len(a.backup.recipients) == 0:
++				a.openBackupRecipients()
++			case a.settings.Backup.Sign && a.backup.signer == nil:
++				a.openBackupSigner()
++			default:
+ 				a.toast(why, "error")
+ 			}
+ 		}
+@@ -374,7 +794,33 @@ func (a *App) startBackup(manual bool) bool {
+ 	a.backup.progress = backup.Progress{}
+ 
+ 	cl := backupClient{c: s.client, parallel: a.settings.upload()}
+-	pass, st := a.backup.pass, a.backup.st
++	b := a.backup
++	mode := a.settings.backupEncryptMode()
++	pass := b.pass
++	if mode == backupModeKeys {
++		pass = backupKeysPlaceholder // ignored by the EncryptStream below
++	}
++	// Key encryption streams through pgp.EncryptKeys with the configured
++	// recipients and — when 签名 is on — the signer. The passphrase the
++	// engine hands in is ignored: passphrase-only runs without signing keep
++	// the engine's own pgp.Encrypt, and in 密码+密钥 mode the passphrase is
++	// given to EncryptKeys directly.
++	signOn := a.settings.Backup.Sign
++	if mode == backupModeKeys || mode == backupModeBoth || signOn {
++		recipients, signerPass := b.recipients, b.signerPass
++		var signer pgp.Key
++		if signOn {
++			signer = b.signer
++		}
++		var streamPass string
++		if mode != backupModeKeys {
++			streamPass = b.pass
++		}
++		cfg.EncryptStream = func(dst io.Writer, src io.Reader, _ string) error {
++			return pgp.EncryptKeys(dst, src, streamPass, recipients, signer, signerPass)
++		}
++	}
++	st := b.st
+ 	report := a.backupReporter()
+ 
+ 	go func() {
+@@ -461,7 +907,7 @@ func (a *App) finishedBackup(s *session, cfg backup.Config, res backup.Result, e
+ 			msg += "，失败 " + itoa(res.Failed) + " 个"
+ 		}
+ 		if cfg.Encrypt {
+-			msg += "，已加密"
++			msg += "，已加密（" + a.backupEncryptSummary() + "）"
+ 		}
+ 		a.toast(msg, "success")
+ 	}
+@@ -657,9 +1103,31 @@ func (a *App) backupStatus() string {
+ 	if len(b.errs) > 0 {
+ 		detail += " · 有错误"
+ 	}
++	if mode := a.settings.backupEncryptMode(); mode != "" {
++		detail += " · .gpg（" + a.backupEncryptSummary() + "）"
++	}
+ 	return detail
+ }
+ 
++// backupEncryptSummary says briefly how encrypted runs encrypt, as the
++// status line and the finished toast show it: which secret opens the files
++// and whether they are signed.
++func (a *App) backupEncryptSummary() string {
++	var parts []string
++	switch a.settings.backupEncryptMode() {
++	case backupModeKeys:
++		parts = append(parts, "收件人 "+itoa(len(a.backup.recipients)))
++	case backupModeBoth:
++		parts = append(parts, "密码", "收件人 "+itoa(len(a.backup.recipients)))
++	default:
++		parts = append(parts, "密码")
++	}
++	if a.settings.Backup.Sign && a.backup.signer != nil {
++		parts = append(parts, "已签名")
++	}
++	return strings.Join(parts, " · ")
++}
++
+ // backupFolderStatus is the line of one configured folder: what the state
+ // knows of it and when it was last backed up.
+ func (a *App) backupFolderStatus(local string) string {
+diff --git a/app/backup_key.go b/app/backup_key.go
+index 4713da5..27a844d 100644
+--- a/app/backup_key.go
++++ b/app/backup_key.go
+@@ -29,14 +29,23 @@ const (
+ 	// backupKeyName is the entry the key is kept under in the store; the
+ 	// session keeps its own under "session-key".
+ 	backupKeyName = "backup-key"
++	// backupRecipientsFile holds the recipients' public keys, concatenated
++	// armored blocks exactly as pgp.ReadPublicKeys parses them.
++	backupRecipientsFile = "backup-recipients.asc"
++	// backupSignerFile holds the signer's armored private key, whose
++	// passphrase is sealed inside backupKeyFile.
++	backupSignerFile = "backup-signer.asc"
+ )
+ 
+ // errNoBackupPass is what readBackupPass returns when no passphrase is saved.
+ var errNoBackupPass = errors.New("backup: no saved passphrase")
+ 
+-// backupSecret is what the sealed file holds.
++// backupSecret is what the sealed file holds. A file written before the
++// signer existed has no signer_passphrase key: reading it leaves the field
++// empty, which is right, so no migration is needed.
+ type backupSecret struct {
+-	Passphrase string `json:"passphrase"`
++	Passphrase       string `json:"passphrase"`
++	SignerPassphrase string `json:"signer_passphrase,omitempty"`
+ }
+ 
+ // backupKeyring returns the credential store the passphrase's key lives in,
+@@ -72,39 +81,76 @@ func (a *App) backupPassLoaded() {
+ 	}()
+ }
+ 
+-// readBackupPass decrypts the saved passphrase, errNoBackupPass when none is
+-// saved.
+-func readBackupPass(dir string, kr auth.Keyring) (string, error) {
++// readBackupSecret decrypts the whole sealed file, errNoBackupPass when none
++// is saved.
++func readBackupSecret(dir string, kr auth.Keyring) (backupSecret, error) {
+ 	data, err := os.ReadFile(filepath.Join(dir, backupKeyFile))
+ 	if errors.Is(err, fs.ErrNotExist) {
+-		return "", errNoBackupPass
++		return backupSecret{}, errNoBackupPass
+ 	}
+ 	if err != nil {
+-		return "", err
++		return backupSecret{}, err
+ 	}
+ 	key, err := backupKey(dir, kr, false)
+ 	if err != nil {
+-		return "", err
++		return backupSecret{}, err
+ 	}
+ 	plain, err := openBackupSecret(key, data)
+ 	if err != nil {
+-		return "", err
++		return backupSecret{}, err
+ 	}
+ 	var s backupSecret
+ 	if err := json.Unmarshal(plain, &s); err != nil {
+-		return "", err
++		return backupSecret{}, err
+ 	}
+-	return s.Passphrase, nil
++	return s, nil
++}
++
++// readBackupPass decrypts the saved backup passphrase, errNoBackupPass when
++// none is saved.
++func readBackupPass(dir string, kr auth.Keyring) (string, error) {
++	s, err := readBackupSecret(dir, kr)
++	return s.Passphrase, err
++}
++
++// readBackupSignerPass decrypts the saved signer passphrase, errNoBackupPass
++// when none is saved.
++func readBackupSignerPass(dir string, kr auth.Keyring) (string, error) {
++	s, err := readBackupSecret(dir, kr)
++	return s.SignerPassphrase, err
+ }
+ 
+ // writeBackupPass seals pass into the backup directory, 0600, replacing what
+-// was there.
++// was there and keeping the signer passphrase that may be sealed beside it.
+ func writeBackupPass(dir string, kr auth.Keyring, pass string) error {
++	sec, err := readBackupSecret(dir, kr)
++	if err != nil {
++		sec = backupSecret{} // nothing saved yet, or it no longer opens
++	}
++	sec.Passphrase = pass
++	return writeBackupSecret(dir, kr, sec)
++}
++
++// writeBackupSignerPass seals the signer's passphrase into the backup
++// directory, 0600, keeping the backup passphrase sealed beside it. An empty
++// pass clears the signer's.
++func writeBackupSignerPass(dir string, kr auth.Keyring, pass string) error {
++	sec, err := readBackupSecret(dir, kr)
++	if err != nil {
++		sec = backupSecret{}
++	}
++	sec.SignerPassphrase = pass
++	return writeBackupSecret(dir, kr, sec)
++}
++
++// writeBackupSecret seals sec into the backup directory, 0600, replacing
++// what was there.
++func writeBackupSecret(dir string, kr auth.Keyring, sec backupSecret) error {
+ 	key, err := backupKey(dir, kr, true)
+ 	if err != nil {
+ 		return err
+ 	}
+-	plain, err := json.Marshal(backupSecret{Passphrase: pass})
++	plain, err := json.Marshal(sec)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -190,3 +236,27 @@ func openBackupSecret(key, sealed []byte) ([]byte, error) {
+ 	}
+ 	return gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], []byte(backupKeyFile))
+ }
++
++// writeBackupKeyFile writes an armored key file (the recipients' public keys
++// or the signer's private key) atomically, 0600: a temporary file beside it,
++// then a rename.
++func writeBackupKeyFile(dir, name, armored string) error {
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return err
++	}
++	p := filepath.Join(dir, name)
++	tmp := p + ".tmp"
++	if err := os.WriteFile(tmp, []byte(armored), 0o600); err != nil {
++		return err
++	}
++	return os.Rename(tmp, p)
++}
++
++// removeBackupKeyFile deletes one of those key files; a missing one is fine.
++func removeBackupKeyFile(dir, name string) error {
++	err := os.Remove(filepath.Join(dir, name))
++	if errors.Is(err, fs.ErrNotExist) {
++		return nil
++	}
++	return err
++}
+diff --git a/app/backup_page.go b/app/backup_page.go
+index 24a4cb3..73e2bdc 100644
+--- a/app/backup_page.go
++++ b/app/backup_page.go
+@@ -1,11 +1,14 @@
+ package app
+ 
+ import (
++	"os"
+ 	"path/filepath"
++	"strings"
+ 
+ 	"github.com/egoist/mygo/ui"
+ 
+ 	"github.com/pengstem/baidunetgo/internal/backup"
++	"github.com/pengstem/baidunetgo/internal/pgp"
+ )
+ 
+ // The 备份 section of the settings page: the automatic folder backup's
+@@ -14,10 +17,11 @@ import (
+ 
+ // backupSection is the settings page's 备份 group.
+ func (a *App) backupSection(c *ui.Context, t *ui.Theme, p *palette) {
+-	// The state file and the sealed passphrase are read once, here or when a
+-	// run starts; both are small files.
++	// The state file, the sealed passphrase and the key files are read once,
++	// here or when a run starts; all are small files.
+ 	a.backupFileLoaded()
+ 	a.backupPassLoaded()
++	a.backupKeysLoaded()
+ 	s := &a.settings
+ 	b := &a.backup
+ 	section(c, t, p, "备份", func() {
+@@ -40,7 +44,13 @@ func (a *App) backupSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 		})
+ 		a.backupFolderRows(c, t, p, s, b)
+ 		a.backupEncryptRow(c, t, p, s, b)
+-		a.backupPasswordRow(c, t, p, s, b)
++		a.backupEncryptModeRow(c, t, p, s, b)
++		if mode := s.backupEncryptMode(); mode != backupModeKeys {
++			a.backupPasswordRow(c, t, p, s, b)
++		}
++		a.backupRecipientsRow(c, t, p, s, b)
++		a.backupSignRow(c, t, p, s, b)
++		a.backupSignerRow(c, t, p, s, b)
+ 		a.backupRunRow(c, t, p, s, b)
+ 	})
+ }
+@@ -56,7 +66,7 @@ func (a *App) backupSwitchRow(c *ui.Context, t *ui.Theme, p *palette, s *setting
+ 		}
+ 		s.Backup.Auto = auto
+ 		a.applyBackupSettings()
+-		if auto && s.Backup.Encrypt && !b.passSet {
++		if mode := s.backupEncryptMode(); auto && (mode == backupModePassphrase || mode == backupModeBoth) && !b.passSet {
+ 			a.openBackupPassword()
+ 		}
+ 	})
+@@ -125,8 +135,100 @@ func (a *App) backupEncryptRow(c *ui.Context, t *ui.Theme, p *palette, s *settin
+ 	})
+ }
+ 
++// backupEncryptModeRow is the 加密方式 popup, shown while encryption is on:
++// 仅密码 keeps the passphrase-only behavior, 收件人密钥 encrypts to the
++// recipients' public keys only, and 密码+密钥 needs both. Switching into a
++// key mode without any recipient, or into one that needs a passphrase with
++// none set, opens the dialog for it.
++func (a *App) backupEncryptModeRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	chosen := s.backupEncryptModeIndex()
++	detail := ""
++	switch s.backupEncryptMode() {
++	case backupModeKeys:
++		detail = "加密给收件人的公钥，只有他们的私钥能解开"
++	case backupModeBoth:
++		detail = "密码和收件人公钥同时加密，谁都能用自己的一把解开"
++	default:
++		detail = "每个文件用密码加密后上传，名以 .gpg 结尾"
++	}
++	settingRow(c, t, p, "加密方式", "", detail, func() {
++		was := chosen
++		popUp(c, t, p, &chosen, backupEncryptModeLabels, nil).Label("加密方式")
++		if chosen == was {
++			return
++		}
++		mode := backupEncryptModes[chosen]
++		s.Backup.EncryptMode = mode
++		a.applyBackupSettings()
++		switch mode {
++		case backupModeKeys, backupModeBoth:
++			if len(b.recipients) == 0 {
++				a.openBackupRecipients()
++			}
++		}
++		if (mode == backupModePassphrase || mode == backupModeBoth) && !b.passSet {
++			a.openBackupPassword()
++		}
++	})
++}
++
++// backupRecipientsRow says how many recipient keys are set and opens the
++// dialog that manages them; shown in the modes that use the recipients.
++func (a *App) backupRecipientsRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	if mode := s.backupEncryptMode(); mode != backupModeKeys && mode != backupModeBoth {
++		return
++	}
++	detail := "未添加，收件人密钥加密需要至少一个"
++	if n := len(b.recipients); n > 0 {
++		detail = itoa(n) + " 个密钥"
++	}
++	settingRow(c, t, p, "收件人", "", detail, func() {
++		if pill(c, t, p, "pencil", "管理…", false).Clicked() {
++			a.openBackupRecipients()
++		}
++	})
++}
++
++// backupSignRow is the 签名 switch: on, every uploaded file is signed with
++// the signer key's private half. Turning it on without a signer key opens
++// the dialog for one.
++func (a *App) backupSignRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	detail := "关闭，上传的文件不带签名"
++	if s.Backup.Sign {
++		detail = "开启，每个上传的文件都带签名"
++		if b.signer == nil {
++			detail = "需要先设置签名密钥"
++		}
++	}
++	settingRow(c, t, p, "签名", "", detail, func() {
++		on := s.Backup.Sign
++		if !ui.Switch(c, &on).Label("签名").Changed() {
++			return
++		}
++		s.Backup.Sign = on
++		a.applyBackupSettings()
++		if on && b.signer == nil {
++			a.openBackupSigner()
++		}
++	})
++}
++
++// backupSignerRow names the signer key and opens the dialog that imports,
++// generates or removes it.
++func (a *App) backupSignerRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	detail := "未设置"
++	if b.signer != nil {
++		detail = keyName(b.signer) + " · 密钥 " + shortKeyID(b.signer.PrimaryKey.KeyId)
++	}
++	settingRow(c, t, p, "签名密钥", "", detail, func() {
++		if pill(c, t, p, "pencil", "管理…", false).Clicked() {
++			a.openBackupSigner()
++		}
++	})
++}
++
+ // backupPasswordRow shows whether the backup passphrase is set, and opens the
+-// dialog that sets it.
++// dialog that sets it. Hidden in 收件人密钥 mode, which uses no passphrase.
+ func (a *App) backupPasswordRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
+ 	detail := "未设置"
+ 	if b.passSet {
+@@ -189,6 +291,27 @@ func (a *App) backupDialogs(c *ui.Context, t *ui.Theme, p *palette) {
+ 	if b.pwdOpen {
+ 		a.backupPasswordDialog(c, t, p)
+ 	}
++	if b.recOpen {
++		a.backupRecipientsDialog(c, t, p)
++	}
++	if b.recPasteOpen {
++		a.backupRecipientPasteDialog(c, t, p)
++	}
++	if b.sigOpen {
++		a.backupSignerDialog(c, t, p)
++	}
++	if b.sigPasteOpen {
++		a.backupSignerPasteDialog(c, t, p)
++	}
++	if b.sigPassOpen {
++		a.backupSignerPassDialog(c, t, p)
++	}
++	if b.sigGenOpen {
++		a.backupSignerGenerateDialog(c, t, p)
++	}
++	if b.genPublicOpen {
++		a.backupSignerPublicDialog(c, t, p)
++	}
+ 	if b.detailsOpen {
+ 		ui.Modal(c, &b.detailsOpen, func() {
+ 			dialogTitle(c, t, "备份详情", "上次运行有 "+itoa(len(b.errs))+" 个文件或文件夹没能备份，下次运行会再试")
+@@ -248,6 +371,314 @@ func (a *App) openBackupPassword() {
+ 	b.pwdOpen = true
+ }
+ 
++// backupRecipientsDialog lists the recipients — each one's identity and short
++// key ID, with a 移除 button — and adds more from a file or pasted text.
++func (a *App) backupRecipientsDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.recOpen, func() {
++		dialogTitle(c, t, "管理收件人", "备份会加密给每个收件人的公钥，只有他们的私钥能解开")
++		ui.Scroll(c).Height(220).Children(func() {
++			ui.Column(c).Gap(8).Padding(4, 0).Children(func() {
++				if len(b.recipients) == 0 {
++					ui.Text(c, "还没有收件人。添加对方的公钥文件（.asc），备份就会加密给他们。").
++						FontSize(11).TextColor(t.TextMuted)
++				}
++				for i, k := range append([]pgp.Key(nil), b.recipients...) {
++					ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
++						ui.Column(c).Grow(1).Shrink(1).Gap(1).Children(func() {
++							ui.Text(c, keyName(k)).SingleLine().Shrink(1)
++							ui.Text(c, "密钥 "+shortKeyID(k.PrimaryKey.KeyId)).
++								FontSize(11).TextColor(t.TextMuted)
++						})
++						if pill(c, t, p, "trash-2", "移除", false).Clicked() {
++							a.removeBackupRecipient(i)
++						}
++					})
++				}
++			})
++		})
++		if b.recErr != "" {
++			ui.Text(c, b.recErr).FontSize(11).TextColor(t.Danger)
++		}
++		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
++			if pill(c, t, p, "folder", "添加密钥…", false).Clicked() {
++				a.pickBackupRecipientFile()
++			}
++			if pill(c, t, p, "pencil", "粘贴…", false).Clicked() {
++				b.recPaste, b.recErr = "", ""
++				b.recPasteOpen = true
++			}
++			if pill(c, t, p, "", "完成", true).AutoFocus().Clicked() {
++				b.recOpen, b.recErr = false, ""
++			}
++		})
++	})
++}
++
++// backupRecipientPasteDialog takes an armored public key pasted as text.
++func (a *App) backupRecipientPasteDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.recPasteOpen, func() {
++		dialogTitle(c, t, "粘贴公钥", "粘贴 armored 公钥块：-----BEGIN PGP PUBLIC KEY BLOCK----- 开头的那段")
++		ui.TextArea(c, &b.recPaste).Height(150)
++		if b.recErr != "" {
++			ui.Text(c, b.recErr).FontSize(11).TextColor(t.Danger)
++		}
++		ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++			if pill(c, t, p, "", "取消", false).Clicked() {
++				b.recPasteOpen, b.recErr = false, ""
++			}
++			if pill(c, t, p, "", "添加", true).Clicked() {
++				if _, err := a.addBackupRecipients(b.recPaste); err != nil {
++					b.recErr = err.Error()
++					return
++				}
++				b.recPasteOpen, b.recErr, b.recPaste = false, "", ""
++			}
++		})
++	})
++}
++
++// backupSignerDialog manages the signer key: the one set, with a way to
++// remove it, and the ways to import a private key (file or paste, its
++// passphrase verified first) or to generate a fresh pair.
++func (a *App) backupSignerDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.sigOpen, func() {
++		dialogTitle(c, t, "签名密钥", "备份上传时用这把私钥签名；收到备份的人用它核对文件是谁传的、传后有没有改过")
++		if b.signer != nil {
++			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
++				ui.Column(c).Grow(1).Shrink(1).Gap(1).Children(func() {
++					ui.Text(c, keyName(b.signer)).SingleLine().Shrink(1)
++					ui.Text(c, "密钥 "+shortKeyID(b.signer.PrimaryKey.KeyId)).
++						FontSize(11).TextColor(t.TextMuted)
++				})
++				if pill(c, t, p, "trash-2", "移除密钥", false).Clicked() {
++					a.removeBackupSigner()
++				}
++			})
++		} else {
++			ui.Text(c, "还没有签名密钥。导入已有的私钥，或生成一对新的。").
++				FontSize(11).TextColor(t.TextMuted)
++		}
++		if b.sigErr != "" {
++			ui.Text(c, b.sigErr).FontSize(11).TextColor(t.Danger)
++		}
++		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
++			if pill(c, t, p, "folder", "导入私钥…", false).Clicked() {
++				a.pickBackupSignerFile()
++			}
++			if pill(c, t, p, "pencil", "粘贴私钥…", false).Clicked() {
++				b.sigPaste, b.sigErr = "", ""
++				b.sigPasteOpen = true
++			}
++			if pill(c, t, p, "plus", "生成新密钥对…", false).Clicked() {
++				b.genName, b.genEmail, b.genPass, b.genPass2, b.genErr = "", "", "", "", ""
++				b.sigGenOpen = true
++			}
++			if pill(c, t, p, "", "完成", true).AutoFocus().Clicked() {
++				b.sigOpen, b.sigErr = false, ""
++			}
++		})
++	})
++}
++
++// backupSignerPasteDialog takes an armored private key pasted as text, then
++// asks for its passphrase before importing it.
++func (a *App) backupSignerPasteDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.sigPasteOpen, func() {
++		dialogTitle(c, t, "粘贴私钥", "粘贴 armored 私钥块：-----BEGIN PGP PRIVATE KEY BLOCK----- 开头的那段")
++		ui.TextArea(c, &b.sigPaste).Height(150)
++		ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++			if pill(c, t, p, "", "取消", false).Clicked() {
++				b.sigPasteOpen, b.sigErr = false, ""
++			}
++			if pill(c, t, p, "", "下一步", true).Clicked() {
++				b.sigFile, b.sigPass, b.sigErr = b.sigPaste, "", ""
++				b.sigPassOpen = true
++			}
++		})
++	})
++}
++
++// backupSignerPassDialog asks for the private key's passphrase: importing
++// verifies the key unlocks with it before anything is saved, and the right
++// passphrase is then sealed beside the backup passphrase.
++func (a *App) backupSignerPassDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.sigPassOpen, func() {
++		dialogTitle(c, t, "输入私钥密码", "导入前先验证这把私钥能解开；没有密码的私钥留空即可")
++		ui.Column(c).Width(340).Gap(4).Children(func() {
++			ui.TextInputBase(c.Key("backup-signer-pass"), &b.sigPass).Label("私钥密码").
++				Password().Grow(1).AutoFocus()
++			if b.sigErr != "" {
++				ui.Text(c, b.sigErr).FontSize(11).TextColor(t.Danger)
++			}
++		})
++		ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++			if pill(c, t, p, "", "取消", false).Clicked() {
++				b.sigPassOpen, b.sigErr, b.sigPass = false, "", ""
++			}
++			if pill(c, t, p, "", "导入", true).Clicked() {
++				a.importBackupSignerNow()
++			}
++		})
++	})
++}
++
++// backupSignerGenerateDialog makes a fresh key pair: a name, an email and a
++// passphrase of at least eight characters typed twice alike. Generation runs
++// on a goroutine and takes a few seconds.
++func (a *App) backupSignerGenerateDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.sigGenOpen, func() {
++		dialogTitle(c, t, "生成签名密钥对", "RSA-3072，约几秒钟；私钥保存在本机，公钥可发给其他设备")
++		ui.Column(c).Width(340).Gap(4).Children(func() {
++			ui.Text(c, "名称").FontSize(11).TextColor(t.TextMuted)
++			ui.TextInputBase(c.Key("backup-gen-name"), &b.genName).Label("名称").Grow(1).AutoFocus()
++			ui.Text(c, "邮箱（可选）").FontSize(11).TextColor(t.TextMuted).Margin(6, 0, 0)
++			ui.TextInputBase(c.Key("backup-gen-email"), &b.genEmail).Label("邮箱").Grow(1)
++			ui.Text(c, "密码").FontSize(11).TextColor(t.TextMuted).Margin(6, 0, 0)
++			ui.TextInputBase(c.Key("backup-gen-pass"), &b.genPass).Label("密码").
++				Password().Grow(1)
++			ui.Text(c, "确认密码").FontSize(11).TextColor(t.TextMuted).Margin(6, 0, 0)
++			ui.TextInputBase(c.Key("backup-gen-pass2"), &b.genPass2).Label("确认密码").
++				Password().Grow(1)
++			if b.genErr != "" {
++				ui.Text(c, b.genErr).FontSize(11).TextColor(t.Danger)
++			}
++		})
++		ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++			if pill(c, t, p, "", "取消", false).Clicked() {
++				b.sigGenOpen, b.genErr = false, ""
++			}
++			if b.genBusy {
++				ui.Spinner(c).Size(16, 16)
++			} else if pill(c, t, p, "plus", "生成", true).Clicked() {
++				a.generateBackupSignerNow()
++			}
++		})
++	})
++}
++
++// backupSignerPublicDialog offers the public half of a generated pair: copy
++// it, or save it as an .asc file to send to the machine or phone that should
++// verify the signatures or be a backup recipient itself.
++func (a *App) backupSignerPublicDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.genPublicOpen, func() {
++		dialogTitle(c, t, "公钥已生成", "把公钥发给其他设备：它们的备份可加密给你，也能核对你传的文件的签名")
++		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
++			if pill(c, t, p, "copy", "复制公钥", false).Clicked() {
++				a.copy(b.genPublic, "已复制公钥")
++			}
++			if pill(c, t, p, "folder", "保存公钥…", false).Clicked() {
++				a.saveBackupPublic()
++			}
++			if pill(c, t, p, "", "完成", true).AutoFocus().Clicked() {
++				b.genPublicOpen, b.genPublic = false, ""
++			}
++		})
++	})
++}
++
++// pickBackupRecipientFile reads a public key file on a goroutine — the
++// native chooser opens a window of its own — and adds it.
++func (a *App) pickBackupRecipientFile() {
++	go func() {
++		p, err := backupPickKeyFile(a)
++		if err != nil || p == "" {
++			return
++		}
++		data, err := os.ReadFile(p)
++		a.update(func() {
++			if err != nil {
++				a.backup.recErr = "读取文件失败：" + err.Error()
++				return
++			}
++			if _, err := a.addBackupRecipients(string(data)); err != nil {
++				a.backup.recErr = err.Error()
++				return
++			}
++			a.backup.recErr = ""
++		})
++	}()
++}
++
++// pickBackupSignerFile reads a private key file on a goroutine and asks for
++// its passphrase before importing it.
++func (a *App) pickBackupSignerFile() {
++	go func() {
++		p, err := backupPickKeyFile(a)
++		if err != nil || p == "" {
++			return
++		}
++		data, err := os.ReadFile(p)
++		a.update(func() {
++			b := &a.backup
++			if err != nil {
++				b.sigErr = "读取文件失败：" + err.Error()
++				return
++			}
++			b.sigFile, b.sigPass, b.sigErr = string(data), "", ""
++			b.sigPassOpen = true
++		})
++	}()
++}
++
++// importBackupSignerNow verifies and saves the private key waiting in
++// sigFile with the passphrase typed in sigPass; on success the paste and
++// passphrase dialogs close and the manager stays, showing the key.
++func (a *App) importBackupSignerNow() {
++	b := &a.backup
++	if err := a.importBackupSigner(b.sigFile, b.sigPass); err != nil {
++		b.sigErr = err.Error()
++		return
++	}
++	b.sigPassOpen, b.sigPasteOpen, b.sigOpen = false, false, true
++	b.sigErr, b.sigFile, b.sigPass, b.sigPaste = "", "", "", ""
++	a.toast("已设置签名密钥", "success")
++}
++
++// generateBackupSignerNow checks the 生成新密钥对 dialog's fields and starts
++// the generation: a name, a passphrase of at least eight characters typed
++// twice alike; the email may stay empty.
++func (a *App) generateBackupSignerNow() {
++	b := &a.backup
++	name := strings.TrimSpace(b.genName)
++	if name == "" {
++		b.genErr = "请填写名称"
++		return
++	}
++	if n := len([]rune(b.genPass)); n < 8 {
++		b.genErr = "密码至少 8 个字符"
++		return
++	}
++	if b.genPass != b.genPass2 {
++		b.genErr = "两次输入的密码不一致"
++		return
++	}
++	a.generateBackupSigner(name, strings.TrimSpace(b.genEmail), b.genPass)
++}
++
++// openBackupRecipients opens the 管理… dialog of the recipients, empty of
++// errors and paste.
++func (a *App) openBackupRecipients() {
++	a.backupKeysLoaded()
++	b := &a.backup
++	b.recErr, b.recPaste = "", ""
++	b.recOpen = true
++}
++
++// openBackupSigner opens the 签名密钥 dialog, empty of errors.
++func (a *App) openBackupSigner() {
++	a.backupKeysLoaded()
++	b := &a.backup
++	b.sigErr, b.sigPaste, b.sigFile, b.sigPass = "", "", "", ""
++	b.sigOpen = true
++}
++
+ // openBackupDest opens the 备份到 dialog on the destination chosen now.
+ func (a *App) openBackupDest() {
+ 	b := &a.backup
+diff --git a/app/backup_test.go b/app/backup_test.go
+index 9771ab9..5314311 100644
+--- a/app/backup_test.go
++++ b/app/backup_test.go
+@@ -441,3 +441,430 @@ func TestBackupSchedule(t *testing.T) {
+ 		t.Errorf("signing out left timer %v next %v", a.backup.timer, a.backup.next)
+ 	}
+ }
++
++// backupTestKeys generates one key pair for the tests: its armored halves,
++// the private half parsed and unlocked.
++func backupTestKeys(t *testing.T) (public, private string, priv pgp.Key) {
++	t.Helper()
++	public, private, err := pgp.GenerateKeyPair("备份测试", "backup@example.com", "signpass1")
++	if err != nil {
++		t.Fatalf("generate key pair: %v", err)
++	}
++	priv, err = pgp.ReadPrivateKey(strings.NewReader(private), "signpass1")
++	if err != nil {
++		t.Fatalf("read private key: %v", err)
++	}
++	return public, private, priv
++}
++
++// TestBackupEncryptModePersists checks that the 加密方式 choice and the 签名
++// switch reach settings.json, and how the mode reads back for an older
++// settings file that keeps only the Encrypt switch.
++func TestBackupEncryptModePersists(t *testing.T) {
++	settingsDir, _ := backupTestDirs(t)
++	a, _, _ := signedIn(t)
++
++	a.settings.Backup.Encrypt = true
++	a.settings.Backup.EncryptMode = backupModeKeys
++	a.applyBackupSettings()
++	data, err := os.ReadFile(filepath.Join(settingsDir, "settings.json"))
++	if err != nil {
++		t.Fatalf("settings.json: %v", err)
++	}
++	if !strings.Contains(string(data), `"encrypt_mode": "keys"`) {
++		t.Errorf("settings.json does not keep encrypt_mode: %s", data)
++	}
++
++	a.settings.Backup.EncryptMode = backupModeBoth
++	a.settings.Backup.Sign = true
++	a.applyBackupSettings()
++	data, err = os.ReadFile(filepath.Join(settingsDir, "settings.json"))
++	if err != nil {
++		t.Fatalf("settings.json: %v", err)
++	}
++	if !strings.Contains(string(data), `"encrypt_mode": "both"`) || !strings.Contains(string(data), `"sign": true`) {
++		t.Errorf("settings.json does not keep encrypt_mode and sign: %s", data)
++	}
++
++	// Reading the file back keeps both mode and sign. An older build's
++	// settings.json keeps only the Encrypt switch, no encrypt_mode: that
++	// reads as passphrase mode, and encryption off is no mode at all.
++	s := loadSettings()
++	if got := s.backupEncryptMode(); got != backupModeBoth {
++		t.Errorf("reloaded mode = %q, want both", got)
++	}
++	if !s.Backup.Sign {
++		t.Error("reloaded sign is off")
++	}
++	s.Backup.EncryptMode = ""
++	if got := s.backupEncryptMode(); got != backupModePassphrase {
++		t.Errorf("legacy mode with only encrypt on = %q, want passphrase", got)
++	}
++	s.Backup.Encrypt = false
++	if got := s.backupEncryptMode(); got != "" {
++		t.Errorf("mode with encryption off = %q, want none", got)
++	}
++}
++
++// TestBackupRecipientsManage adds a recipient through the file chooser's
++// stand-in, deduplicates it, rejects a private key, and removes it again,
++// checking that backup-recipients.asc follows each change.
++func TestBackupRecipientsManage(t *testing.T) {
++	_, stateDir := backupTestDirs(t)
++	public, private, _ := backupTestKeys(t)
++	keyFile := filepath.Join(t.TempDir(), "pub.asc")
++	if err := os.WriteFile(keyFile, []byte(public), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	old := backupPickKeyFile
++	backupPickKeyFile = func(*App) (string, error) { return keyFile, nil }
++	t.Cleanup(func() { backupPickKeyFile = old })
++
++	a, tt, _ := signedIn(t)
++	a.pickBackupRecipientFile()
++	waitUntil(t, tt, "the recipient added", func() bool {
++		return len(a.backup.recipients) == 1 && a.backup.recErr == ""
++	})
++	if got := keyName(a.backup.recipients[0]); got != "备份测试 <backup@example.com>" {
++		t.Errorf("recipient name %q, want the key's identity", got)
++	}
++
++	// The same key again is no second recipient; the armored file keeps one
++	// block, 0600.
++	if added, err := a.addBackupRecipients(public); err != nil || added != 0 {
++		t.Errorf("adding the same key again = %d added, %v, want none", added, err)
++	}
++	if len(a.backup.recipients) != 1 {
++		t.Fatalf("%d recipients after a duplicate, want 1", len(a.backup.recipients))
++	}
++	recPath := filepath.Join(stateDir, "backup-recipients.asc")
++	waitUntil(t, tt, "the recipients file", func() bool {
++		fi, err := os.Stat(recPath)
++		return err == nil && fi.Mode().Perm() == 0o600
++	})
++	data, _ := os.ReadFile(recPath)
++	if strings.Count(string(data), "BEGIN PGP PUBLIC KEY BLOCK") != 1 {
++		t.Errorf("recipients file keeps %d blocks, want 1: %s",
++			strings.Count(string(data), "BEGIN PGP PUBLIC KEY BLOCK"), data)
++	}
++
++	// A private key is refused with a message.
++	a.backup.recErr = ""
++	_, err := a.addBackupRecipients(private)
++	if err == nil || len(a.backup.recipients) != 1 {
++		t.Fatalf("a private key was %v, want an error", err)
++	}
++	if !strings.Contains(err.Error(), "私钥") {
++		t.Errorf("the private key refusal says %q, want it to name 私钥", err.Error())
++	}
++
++	// Removing the recipient rewrites the file empty and drops nothing else.
++	a.removeBackupRecipient(0)
++	waitUntil(t, tt, "the recipient removed", func() bool {
++		return len(a.backup.recipients) == 0
++	})
++	waitUntil(t, tt, "the emptied file", func() bool {
++		data, err := os.ReadFile(recPath)
++		return err == nil && !strings.Contains(string(data), "BEGIN PGP PUBLIC KEY BLOCK")
++	})
++}
++
++// TestBackupSignerGenerate runs the 生成新密钥对 path: it writes the private
++// half, seals the passphrase, and the row shows the key's identity.
++func TestBackupSignerGenerate(t *testing.T) {
++	_, stateDir := backupTestDirs(t)
++	a, tt, _ := signedIn(t)
++
++	a.openBackupSigner()
++	a.backup.genName, a.backup.genEmail = "测试签名", "sign@example.com"
++	a.backup.genPass, a.backup.genPass2 = "signpass1", "signpass1"
++	a.generateBackupSignerNow()
++	waitUntil(t, tt, "the key generated", func() bool {
++		return a.backup.genPublicOpen && a.backup.signer != nil
++	})
++	if got := keyName(a.backup.signer); got != "测试签名 <sign@example.com>" {
++		t.Errorf("signer name %q, want the generated identity", got)
++	}
++
++	// The private half is on disk, 0600, and the passphrase is sealed.
++	sigPath := filepath.Join(stateDir, "backup-signer.asc")
++	fi, err := os.Stat(sigPath)
++	if err != nil {
++		t.Fatalf("backup-signer.asc: %v", err)
++	}
++	if fi.Mode().Perm() != 0o600 {
++		t.Errorf("backup-signer.asc mode %v, want 0600", fi.Mode().Perm())
++	}
++	if data, err := os.ReadFile(sigPath); err != nil ||
++		!strings.Contains(string(data), "BEGIN PGP PRIVATE KEY BLOCK") {
++		t.Errorf("backup-signer.asc holds no private key: %v", err)
++	}
++	if pass, err := readBackupSignerPass(stateDir, nil); err != nil || pass != "signpass1" {
++		t.Errorf("readBackupSignerPass = %q, %v", pass, err)
++	}
++
++	// The signer row shows the identity.
++	a.backup.genPublicOpen, a.backup.sigOpen = false, false
++	tt.Advance(200 * time.Millisecond)
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	scrollToShow(t, tt, "签名密钥")
++	if !tt.HasText("测试签名") {
++		t.Errorf("the 签名密钥 row does not show the identity; texts %q", tt.Texts())
++	}
++	save(t, tt, "settings-backup-signer")
++}
++
++// TestBackupRunKeysMode backs a tree up encrypted to a recipient's public
++// key only: the uploaded files decrypt with the recipient's private half,
++// and carry no signature.
++func TestBackupRunKeysMode(t *testing.T) {
++	backupTestDirs(t)
++	a, tt, srv := signedIn(t)
++	public, _, priv := backupTestKeys(t)
++	if _, err := a.addBackupRecipients(public); err != nil {
++		t.Fatalf("add recipient: %v", err)
++	}
++	local, files := backupLocalTree(t)
++	a.settings.Backup = backupSettings{
++		Dest:        "/备份",
++		Folders:     []backup.Folder{{Local: local}},
++		Encrypt:     true,
++		EncryptMode: backupModeKeys,
++	}
++	a.applyBackupSettings()
++	a.runBackupNow()
++	waitBackupDone(t, tt, a)
++	if a.backup.lastErr != "" {
++		t.Fatalf("the run failed: %s", a.backup.lastErr)
++	}
++	if a.backup.uploaded != len(files) {
++		t.Fatalf("%d uploaded, want %d", a.backup.uploaded, len(files))
++	}
++	base := "/备份/" + filepath.Base(local)
++	for name, content := range files {
++		remote := base + "/" + name + pgp.Suffix
++		if !srv.Exists(remote) {
++			t.Errorf("%s is not on the fake netdisk", remote)
++			continue
++		}
++		var out bytes.Buffer
++		vr, err := pgp.DecryptAny(&out, bytes.NewReader(srv.Data(remote)), "", []pgp.Key{priv})
++		if err != nil {
++			t.Errorf("DecryptAny(%s): %v", remote, err)
++			continue
++		}
++		if out.String() != content {
++			t.Errorf("%s decrypts to %q, want %q", remote, out.String(), content)
++		}
++		if !vr.Verified || vr.SignedByKeyID != 0 {
++			t.Errorf("%s = verified %v by %d, want unsigned", remote, vr.Verified, vr.SignedByKeyID)
++		}
++		// The passphrase alone must not open a keys-only message.
++		var ignore bytes.Buffer
++		if _, err := pgp.DecryptAny(&ignore, bytes.NewReader(srv.Data(remote)), "correct horse", nil); err == nil {
++			t.Errorf("%s opened with the backup passphrase alone", remote)
++		}
++	}
++}
++
++// TestBackupRunBothMode backs a tree up encrypted to the passphrase and the
++// recipients alike: either one alone opens the files.
++func TestBackupRunBothMode(t *testing.T) {
++	backupTestDirs(t)
++	a, tt, srv := signedIn(t)
++	public, _, priv := backupTestKeys(t)
++	if _, err := a.addBackupRecipients(public); err != nil {
++		t.Fatalf("add recipient: %v", err)
++	}
++	a.backup.pass, a.backup.passSet, a.backup.passRead = "correct horse", true, true
++	local, files := backupLocalTree(t)
++	a.settings.Backup = backupSettings{
++		Dest:        "/备份",
++		Folders:     []backup.Folder{{Local: local}},
++		Encrypt:     true,
++		EncryptMode: backupModeBoth,
++	}
++	a.applyBackupSettings()
++	a.runBackupNow()
++	waitBackupDone(t, tt, a)
++	if a.backup.lastErr != "" {
++		t.Fatalf("the run failed: %s", a.backup.lastErr)
++	}
++	base := "/备份/" + filepath.Base(local)
++	for name, content := range files {
++		remote := base + "/" + name + pgp.Suffix
++		if !srv.Exists(remote) {
++			t.Errorf("%s is not on the fake netdisk", remote)
++			continue
++		}
++		var out bytes.Buffer
++		if _, err := pgp.DecryptAny(&out, bytes.NewReader(srv.Data(remote)), "correct horse", nil); err != nil {
++			t.Errorf("DecryptAny(%s) with the passphrase alone: %v", remote, err)
++			continue
++		}
++		if out.String() != content {
++			t.Errorf("%s decrypts to %q, want %q", remote, out.String(), content)
++		}
++		var out2 bytes.Buffer
++		if _, err := pgp.DecryptAny(&out2, bytes.NewReader(srv.Data(remote)), "", []pgp.Key{priv}); err != nil {
++			t.Errorf("DecryptAny(%s) with the private key alone: %v", remote, err)
++		} else if out2.String() != content {
++			t.Errorf("%s decrypts to %q, want %q", remote, out2.String(), content)
++		}
++	}
++}
++
++// TestBackupRunSigned signs every uploaded file with the generated signer:
++// DecryptAny verifies it against the signer and names who signed. The
++// default run stays unsigned.
++func TestBackupRunSigned(t *testing.T) {
++	backupTestDirs(t)
++	a, tt, srv := signedIn(t)
++	_, _, priv := backupTestKeys(t)
++	a.backup.signer, a.backup.signerPass, a.backup.signerRead = priv, "signpass1", true
++	a.backup.pass, a.backup.passSet, a.backup.passRead = "correct horse", true, true
++	local, files := backupLocalTree(t)
++	a.settings.Backup = backupSettings{
++		Dest:        "/备份",
++		Folders:     []backup.Folder{{Local: local}},
++		Encrypt:     true,
++		EncryptMode: backupModePassphrase,
++		Sign:        true,
++	}
++	a.applyBackupSettings()
++	a.runBackupNow()
++	waitBackupDone(t, tt, a)
++	if a.backup.lastErr != "" {
++		t.Fatalf("the run failed: %s", a.backup.lastErr)
++	}
++	base := "/备份/" + filepath.Base(local)
++	for name, content := range files {
++		remote := base + "/" + name + pgp.Suffix
++		if !srv.Exists(remote) {
++			t.Errorf("%s is not on the fake netdisk", remote)
++			continue
++		}
++		var out bytes.Buffer
++		vr, err := pgp.DecryptAny(&out, bytes.NewReader(srv.Data(remote)), "correct horse", []pgp.Key{priv})
++		if err != nil {
++			t.Errorf("DecryptAny(%s): %v", remote, err)
++			continue
++		}
++		if out.String() != content {
++			t.Errorf("%s decrypts to %q, want %q", remote, out.String(), content)
++		}
++		if !vr.Verified {
++			t.Errorf("%s is not verified", remote)
++		}
++		if vr.SignedByKeyID != priv.PrimaryKey.KeyId {
++			t.Errorf("%s signed by %X, want %X", remote, vr.SignedByKeyID, priv.PrimaryKey.KeyId)
++		}
++		if got, want := vr.SignedByName, keyName(priv); got != want {
++			t.Errorf("%s signed by %q, want %q", remote, got, want)
++		}
++	}
++
++	// A signed message opened without the signer's key does not verify.
++	var out bytes.Buffer
++	if _, err := pgp.DecryptAny(&out, bytes.NewReader(srv.Data(base+"/"+filepath.FromSlash("a.txt")+pgp.Suffix)), "correct horse", nil); err == nil {
++		t.Error("a signed message verified with no signer key given")
++	}
++
++	// The default run carries no signature.
++	a.settings.Backup.Sign = false
++	a.applyBackupSettings()
++	local2 := t.TempDir()
++	if err := os.WriteFile(filepath.Join(local2, "d.txt"), []byte("第四个文件"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	a.settings.Backup.Folders = []backup.Folder{{Local: local2}}
++	a.applyBackupSettings()
++	a.runBackupNow()
++	waitBackupDone(t, tt, a)
++	if a.backup.lastErr != "" {
++		t.Fatalf("the unsigned run failed: %s", a.backup.lastErr)
++	}
++	remote := "/备份/" + filepath.Base(local2) + "/d.txt" + pgp.Suffix
++	var out2 bytes.Buffer
++	vr, err := pgp.DecryptAny(&out2, bytes.NewReader(srv.Data(remote)), "correct horse", nil)
++	if err != nil {
++		t.Fatalf("DecryptAny(%s): %v", remote, err)
++	}
++	if vr.SignedByKeyID != 0 {
++		t.Errorf("the default run signed by %X, want unsigned", vr.SignedByKeyID)
++	}
++}
++
++// TestBackupKeysSection looks at the 备份 section in 收件人密钥 mode with a
++// recipient and a signer set, for the visual check without a window.
++func TestBackupKeysSection(t *testing.T) {
++	_, stateDir := backupTestDirs(t)
++	a, tt, _ := signedIn(t)
++	public, private, _ := backupTestKeys(t)
++	if _, err := a.addBackupRecipients(public); err != nil {
++		t.Fatalf("add recipient: %v", err)
++	}
++	// The signer goes through the real load path: on disk, read once by
++	// backupKeysLoaded when the section first renders.
++	if err := writeBackupKeyFile(stateDir, backupSignerFile, private); err != nil {
++		t.Fatal(err)
++	}
++	a.backup.recRead, a.backup.signerRead = false, false
++	local, _ := backupLocalTree(t)
++	a.settings.Backup = backupSettings{
++		Dest:        "/备份",
++		Folders:     []backup.Folder{{Local: local}},
++		Encrypt:     true,
++		EncryptMode: backupModeBoth,
++		Sign:        true,
++	}
++	a.applyBackupSettings()
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	scrollToShow(t, tt, "备份状态")
++	save(t, tt, "settings-backup-keys")
++	scrollToShow(t, tt, "收件人")
++	save(t, tt, "settings-backup-keys-recipients")
++	tt.SetDark(true)
++	tt.Advance(300 * time.Millisecond)
++	save(t, tt, "settings-backup-keys-dark")
++	tt.SetDark(false)
++}
++
++// TestBackupRunPromptsForMissingPieces checks that a manual run with signing
++// on but no signer key opens the signer dialog instead of failing quietly,
++// and that a keys mode without any recipient opens the recipients dialog.
++func TestBackupRunPromptsForMissingPieces(t *testing.T) {
++	backupTestDirs(t)
++	a, _, _ := signedIn(t)
++	local, _ := backupLocalTree(t)
++	a.backup.pass, a.backup.passSet, a.backup.passRead = "correct horse", true, true
++	a.settings.Backup = backupSettings{
++		Dest:    "/备份",
++		Folders: []backup.Folder{{Local: local}},
++		Encrypt: true,
++		Sign:    true,
++	}
++	a.applyBackupSettings()
++
++	a.runBackupNow()
++	if a.backup.running || !a.backup.lastRun.IsZero() {
++		t.Error("a run started without a signer key")
++	}
++	if !a.backup.sigOpen {
++		t.Errorf("no 签名密钥 dialog was opened; sigOpen %v", a.backup.sigOpen)
++	}
++
++	// Keys mode without any recipient asks for one.
++	a.settings.Backup.Sign = false
++	a.settings.Backup.EncryptMode = backupModeKeys
++	a.applyBackupSettings()
++	a.runBackupNow()
++	if a.backup.running {
++		t.Error("a run started without any recipient")
++	}
++	if !a.backup.recOpen {
++		t.Errorf("no 收件人 dialog was opened; recOpen %v", a.backup.recOpen)
++	}
++}
+diff --git a/app/settings.go b/app/settings.go
+index 250b4f8..bf49fd4 100644
+--- a/app/settings.go
++++ b/app/settings.go
+@@ -63,11 +63,64 @@ type settings struct {
+ // the settings page keeps them. The passphrase is not here: it lives in the
+ // user data dir's backup-key.enc, sealed with a key of its own.
+ type backupSettings struct {
+-	Auto     bool            `json:"auto,omitempty"`     // run by itself on the interval
+-	Dest     string          `json:"dest,omitempty"`     // netdisk destination, defaultBackupDest when empty
+-	Interval int             `json:"interval,omitempty"` // minutes between automatic runs, 0 only by hand
+-	Encrypt  bool            `json:"encrypt,omitempty"`  // encrypt every file, ".gpg" on the netdisk
+-	Folders  []backup.Folder `json:"folders,omitempty"`  // the local folders to mirror
++	Auto     bool   `json:"auto,omitempty"`     // run by itself on the interval
++	Dest     string `json:"dest,omitempty"`     // netdisk destination, defaultBackupDest when empty
++	Interval int    `json:"interval,omitempty"` // minutes between automatic runs, 0 only by hand
++	Encrypt  bool   `json:"encrypt,omitempty"`  // encrypt every file, ".gpg" on the netdisk
++	// EncryptMode is how encrypted runs encrypt, when Encrypt is on: ""
++	// or "passphrase" is the passphrase-only behavior that existed before
++	// recipient keys, "keys" encrypts to the recipients' public keys only,
++	// and "both" needs the passphrase and the recipients alike. The
++	// passphrase is not here: it lives in the user data dir's
++	// backup-key.enc, sealed with a key of its own.
++	EncryptMode string `json:"encrypt_mode,omitempty"`
++	// Sign marks that every uploaded file is signed with the signer key's
++	// private half (backup-signer.asc); its passphrase is sealed beside the
++	// backup passphrase.
++	Sign    bool            `json:"sign,omitempty"`
++	Folders []backup.Folder `json:"folders,omitempty"` // the local folders to mirror
++}
++
++// How EncryptMode names the way encrypted runs encrypt; "" is no encryption.
++const (
++	backupModePassphrase = "passphrase"
++	backupModeKeys       = "keys"
++	backupModeBoth       = "both"
++)
++
++// backupEncryptModeLabels names the 加密方式 choices, in the order of
++// backupEncryptModes.
++var backupEncryptModeLabels = []string{"仅密码", "收件人密钥", "密码+密钥"}
++
++// backupEncryptModes are the settings values behind those labels.
++var backupEncryptModes = []string{backupModePassphrase, backupModeKeys, backupModeBoth}
++
++// backupEncryptMode is the way encrypted runs encrypt now: "" for none.
++// The Encrypt switch stays the master, so an older build's settings.json —
++// encrypt without a mode — reads as passphrase-only.
++func (s settings) backupEncryptMode() string {
++	if !s.Backup.Encrypt {
++		return ""
++	}
++	switch s.Backup.EncryptMode {
++	case backupModeKeys, backupModeBoth:
++		return s.Backup.EncryptMode
++	default:
++		return backupModePassphrase
++	}
++}
++
++// backupEncryptModeIndex is where the chosen mode sits among the popup's
++// choices, 0 for 仅密码.
++func (s settings) backupEncryptModeIndex() int {
++	switch s.backupEncryptMode() {
++	case backupModeKeys:
++		return 1
++	case backupModeBoth:
++		return 2
++	default:
++		return 0
++	}
+ }
+ 
+ // defaultBackupDest is the netdisk folder backups go to when none was
+diff --git a/docs/BACKUP.md b/docs/BACKUP.md
+index a440598..d6bd7b1 100644
+--- a/docs/BACKUP.md
++++ b/docs/BACKUP.md
+@@ -25,14 +25,21 @@
+ 
+ ## 加密
+ 
+-打开「加密备份」（Android 为「加密相册」/「加密备份」）并设置口令后：
++打开「加密备份」（Android 为「加密相册」/「加密备份」）后，加密方式有三种（「加密方式」一行）：
++
++- **仅密码**（默认）：每个文件用备份口令对称加密。
++- **收件人密钥**：加密给每个收件人的公钥，只有他们的私钥能解开，不需要口令。
++- **密码+密钥**：口令和收件人公钥同时加密，拿其中任何一把都能解开。
++
++打开「加密备份」并选择「仅密码」或「密码+密钥」后设置口令：
+ 
+ - 每个文件在本地临时目录里流式加密，上传后立刻删掉临时文件；同时最多 `parallel`（1–4）个临时文件存在。
+ - 网盘上的名字是原名加 `.gpg`，例如 `IMG_0001.jpg.gpg`；扩展名保留在前，方便事后辨认。
+-- 格式是标准的 OpenPGP 对称加密（只有口令、没有公钥）：AES-256、iterated+salted SHA-256 S2K、不压缩、带完整性保护（MDC）。因此下面的命令在任何装了 GnuPG 的机器上都能解开，桌面版和 Android 版产出的文件可以互相解：
++- 格式是标准的 OpenPGP 加密：AES-256、iterated+salted SHA-256 S2K、不压缩、带完整性保护（MDC）；「收件人密钥」与「密码+密钥」模式在口令之外再加 PKESK 包（收件人公钥加密的会话密钥）。因此下面的命令在任何装了 GnuPG 的机器上都能解开，桌面版和 Android 版产出的文件可以互相解：
+ 
+ ```bash
+-gpg --decrypt IMG_0001.jpg.gpg > IMG_0001.jpg          # 会提示输入口令
++gpg --decrypt IMG_0001.jpg.gpg > IMG_0001.jpg          # 会提示输入口令（仅密码 / 密码+密钥）
++gpg --decrypt IMG_0001.jpg.gpg > IMG_0001.jpg          # 收件人密钥模式：用收件人的私钥解，提示输私钥密码
+ ```
+ 
+ 批量解密（口令写在环境变量里，避免进 shell 历史）：
+@@ -45,6 +52,19 @@ for f in *.gpg; do gpg --batch --yes --pinentry-mode loopback --passphrase "$PW"
+ 
+ 口令本身只保存在本机的凭据存储里（桌面：`mygo.Secrets` 钥匙串，取不到时退回 `backup-key.key`（0600）加密的 `backup-key.enc`；Android：Android Keystore 里的 AES/GCM 密钥加密后存 `filesDir`），**不会**写进 `settings.json`，也不会随备份上传。加密与不加密的切换不会删除网盘上旧格式的文件：关掉加密后同名的明文文件会另存为不带 `.gpg` 的名字，旧的加密副本仍在。
+ 
++### 收件人与签名
++
++「收件人」一行管理加密用的公钥，对应 `settings.json` 的 `encrypt_mode`（`passphrase` / `keys` / `both`）：
++
++- 通过文件选择器或粘贴添加 armored 公钥块（`gpg --armor --export` 导出的 `.asc`）；私钥块会被拒绝，同一个密钥按 key ID 去重。
++- 桌面版存在用户数据目录的 `backup-recipients.asc`（0600，多个 armored 块连在一起），Android 存在加密存储里；都不随备份上传。
++- 「收件人密钥」「密码+密钥」模式至少要有一个收件人，否则手动备份会先打开收件人管理。
++
++「签名」开关对应 `settings.json` 的 `sign`：打开后每个上传的 `.gpg` 都用签名密钥的私钥签一次（OpenPGP one-pass 签名，SHA-256），收到备份的人用对应的公钥就能核对文件是谁传的、传后有没有改过。
++
++- 「签名密钥」一行管理私钥：从文件或粘贴导入（先验证私钥密码），或在本机生成一对新的 RSA-3072 密钥（公钥可复制或存成 `.asc` 发给其他设备）。
++- 桌面版把私钥存在用户数据目录的 `backup-signer.asc`（0600），其密码与备份口令一起封存在 `backup-key.enc`（`signer_passphrase` 字段，旧文件没有这个字段就当作没有，无需迁移）；开了签名却没有签名密钥时，手动备份会先打开签名密钥管理。
++
+ ## 何时运行
+ 
+ - 桌面：`自动备份` 打开且设了间隔后，启动约两分钟后跑第一次，此后按间隔（15 分钟 / 30 分钟 / 1 小时 / 6 小时 / 24 小时，或仅手动）触发；同一时间只跑一个，注销、退出或改动设置会停掉当前的运行。「立即备份」可随时手动跑，运行中变为「取消」。

@@ -206,8 +206,13 @@ prepare() {
 
 apply_queue() {
     local patch
+    # --keep-cr: the queue is exported from the authoring clone's main, which
+    # now carries the Android client with a CRLF gradlew.bat. Plain `git am`
+    # strips every trailing CR (mailinfo treats the patch as CRLF-formatted
+    # mail), so the replayed tree would silently diverge from the authoring
+    # tree in exactly that file. Patches without CRs are unaffected.
     for patch in "$@"; do
-        if git -C "$WORK" am -q -3 "$patch"; then
+        if git -C "$WORK" am -q -3 --keep-cr "$patch"; then
             continue
         fi
         describe_failure "$patch"

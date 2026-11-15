@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 11:32:54 +0800
+Subject: [PATCH] Document the backup feature, the Android client and the
+ measured performance work in the README, the changelog and the architecture
+ notes, so the next session knows how the two halves share a protocol and
+ where the numbers came from.
+
+---
+ AGENTS.md    |  9 +++++++++
+ CHANGELOG.md |  4 ++++
+ CLAUDE.md    |  9 +++++++++
+ README.md    | 21 +++++++++++++++++++--
+ 4 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 7a062ad..160e5af 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -21,6 +21,8 @@ go tool mygo build                    # package for this platform into build/
+ go tool mygo build -sign "BaiduNetGo Dev"   # same, signed with a fixed self-signed cert so the keychain's "Always Allow" survives rebuilds
+ CGO_ENABLED=0 GOOS=windows go build -o /dev/null .   # cross-compile check
+ go run ./tools/appicon                # redraw the app icon, resources/icon.png, which mygo build packages
++cd android && ./gradlew :app:assembleDebug   # the Android client's APK (needs JDK 21 + SDK 37; not part of go build)
++go run ./cmd/fakepand                 # the fake netdisk as a standalone process (prints url=…), for the Android tests
+ ```
+ 
+ **Releases.** Every push to `main` releases (`.github/workflows/release.yml`): tests, then `go run ./tools/release` picks the version (last tag + patch; `#minor`/`#major` in a commit, or a higher version set by hand in `mygo.json`) and writes its `CHANGELOG.md` section (the `## Unreleased` notes if any, else the commits grouped 新增/修复/改进), then the workflow pushes a `Release vX.Y.Z [skip ci]` commit and tag to main, builds Linux/Windows on Ubuntu and `darwin/universal` on macOS, uploads to the release and publishes it. So `git pull --rebase` before pushing. The repo is private, so MyGo's self-updater (`updates` in `mygo.json`, which needs a public repo) is not set up.
+@@ -60,6 +62,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button, Cmd-Shift-V, or Cmd-V while no files are cut or copied; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
+ 
++`fakepan` also emulates the real chunked upload calls (`/api/precreate`, `pcs/superfile2`, `/api/create` with a per-part `block_list`, and `pcs/file?method=locateupload`), which is what the Android client is tested against; the desktop client keeps its simplified `/upload?id&part` path. `cmd/fakepand` runs the same fake as a standalone process for tests written in other languages (it prints `url=…` and serves until SIGINT).
++
+ `baidu.OpenAt(creds, base)` points the client at a fake server. `c.fake()` swaps in fake-friendly behavior in the few library-bound paths (download URL, upload). Errno -6/-4/111 maps to `ErrNotLoggedIn`, which signs the user out.
+ 
+ **Download hosts only serve bounded ranges.** `bytes=a-b` works. No Range header, or an open-ended `bytes=a-`, returns 403 (small files sometimes slip through). Every content read must therefore be bounded: `remote` (chunked, `remote.Parallel` at once), `transfer`, `tune`. mpv, whose ffmpeg sends open-ended ranges, reads through `internal/stream`, a loopback HTTP server with a random token per file. It splits requests into bounded chunks fetched `Ahead` at a time and re-requests the link when it expires. fakepan's `/file` enforces the same rule.
+@@ -70,6 +74,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Sign-in sources.** The saved session (`internal/auth`) comes first. If there is none, or it has expired, the app migrates the login of another client on this computer (`internal/migrate`): Baidu's own Linux client first (its Electron cookie store, read with a small pure-Go SQLite reader), then BaiduPCS-Go's active account (`internal/pcsimport`, reading `pcs_config.json`). It skips this when the user signed out on purpose (`settings.SkipImport`). The login screen also offers it as a link. Every sign-in is saved at once, and saved again when `Client.Credentials` changes (the uid found, cookies the netdisk rotated; `Client.OnChange`) and on quit.
+ 
++**Android client (`android/`).** A second product in the same repository: a Kotlin + Jetpack Compose Material 3 app built with Gradle (AGP 9.4.1, Kotlin 2.4.20, Compose BOM 2026.09.00, compileSdk 37, minSdk 26), entirely separate from `go build`. It shares no code with the desktop app but speaks the same netdisk protocol (the pan.baidu.com web endpoints plus `/api/precreate` → `pcs/superfile2` parts → `/api/create`), the same backup layout and the same `.gpg` format, so the two halves back up into one netdisk folder. `:core` (pure JVM, `com.pengstem.baidunetgo.core`) holds `net/BaiduApi` (client, chunked upload, QR sign-in), `crypto/Pgp` (BouncyCastle bcpg; BouncyCastle's v5 session-key quirk had to be turned off for gpg/Go compatibility) and `backup/` (the incremental engine over a `Netdisk` interface and a `BackupSource`, so MediaStore albums and SAF trees are just sources); `:app` (`com.pengstem.baidunetgo`) holds the Compose screens, MediaStore album scanning, the SAF folder picker, Keystore-encrypted storage, WorkManager periodic workers and the foreground backup service. `android/docs/CORE-API.md` is the contract between them. Tests: `./gradlew :core:test` runs the client against `cmd/fakepand` (the same `internal/fakepan`, started as a process and its `url=…` line read from stdout; `FAKEPAN_URL` reuses one) and OpenPGP against the real `gpg` in both directions, and `:app:testDebugUnitTest` holds codec/path tests plus Robolectric renders written to `android/screenshots/` (there is no emulator here: no `/dev/kvm`). Builds need `ANDROID_HOME`, `JAVA_HOME` (JDK 21) and a writable `GRADLE_USER_HOME`; `android/keystore/dev.jks` is a public dev-only keystore for `assembleDebug`. `docs/ANDROID.md` is the hand-over (build, CI notes, update-channel idea).
++
+ **One keyring key for every build.** `mygo.Secrets` names its service after the build (`<identifier>.dev` under `mygo dev`, the app name under `go run`, the identifier when packaged), so `OpenStore` pins the key to `com.pengstem.baidunetgo`. `auth.Store.Older` lists the old services: `Load` tries their keys and saves the session again under the pinned one.
+ 
+ **Fake netdisk (`internal/fakepan`).** An `httptest` server that emulates every web endpoint the client uses, over an in-memory tree with generated images, a PDF and a WAV. App UI tests (`app/*_test.go`, helper `signedIn` in `app/app_test.go`) drive real views with `ui.Tester` against it. When adding a new API call, add its endpoint to fakepan too.
+@@ -88,6 +94,8 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ 
+ **Transfers (`internal/transfer`).** `Manager` is a queue run by `Parallel`. Downloads fetch 4 MB blocks over `Threads` connections into `<file>.bngdl`, with a `.bngdl.json` sidecar of finished blocks for resume. Task state persists to `transfers.json` in the user data dir. `OnChange`/`OnFinish` are called outside the manager's lock and read tasks back through `Tasks()`. Don't call them while holding `m.mu`: that deadlocked once.
+ 
++**Automatic backups (`internal/backup`, `internal/pgp`, `app/backup.go`).** The settings page's 备份 section mirrors chosen local folders into a netdisk folder (`<dest>/<folder name>/<relative path>`), incrementally: `backup.Run` walks a folder, skips a file whose size and mtime are what `backup.State` records under its absolute local path, creates the remote folders it needs through the small `backup.Client` interface (`List`/`Mkdir`/`Upload`, adapted from `*baidu.Client` in `app/backup.go`), uploads up to `Parallel` files at once with the app's upload connection count, and reports progress from worker goroutines (the app coalesces it through `a.update`). Encrypted runs stream each file through `pgp.Encrypt` into a temp file in `os.TempDir()`, upload it as `<name>.gpg`, and remove it even on failure. The engine never deletes anything, collects per-file errors instead of aborting, and leaves a failed file out of the state so the next run retries it. State lives in `backup-state.json` under the user data dir (`backupStoreDir` points tests at a temp folder; nothing is written when signed in to the fake netdisk); the passphrase is not in `settings.json` but sealed with a keyring key in `backup-key.enc` (`backup-key.key` when there is no keyring) by `app/backup_key.go`, a second file/key pair so that signing out — which clears the session's — does not lose it. `app/backup.go` schedules runs (`time.AfterFunc` → `a.update`, first run a couple of minutes after launch, then every interval, one at a time, cancelled on sign-out/quit/settings change) and `app/backup_page.go` draws the section. `internal/pgp` encrypts with a passphrase only — AES-256, iterated+salted SHA-256 S2K, no compression, MDC — so `gpg -d file.gpg` opens the backup on any machine; the Android client writes the same format. `docs/BACKUP.md` is the user-facing description.
++
+ **Session storage (`internal/auth`).** Credentials are AES-GCM encrypted in `session.enc` under the user data dir. The key lives in `mygo.Secrets` (the system keyring), with a 0600 key-file fallback. macOS ties the keychain's "Always Allow" to the code signature, and an ad-hoc signature changes with every build, so each rebuild asks again unless it is signed with a fixed identity (`-sign`). A real identity turns on the hardened runtime, under which wazero's compiled code (PDFium) is killed: `entitlements.plist` grants `allow-unsigned-executable-memory` for it. Settings are plain JSON (`app/settings.go`).
+ 
+ ## MyGo UI gotchas found here
+@@ -100,6 +108,7 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - The grid view is not `ui.GridView`: GridView builds each line as an element, so a tile that a resize moves to another line is built anew and jumps. `app/grid.go` positions tiles itself, all under one parent keyed by fsid (percent `Left`/`Width`, so the width never lags), and on a cell change `Jump`s the slot's offset to where it showed and `AnimateTo`s it back to 0. Element `Transition`s don't help here: MyGo skips layout transitions on frames where the window resized.
+ - The folder's actions live in a toolbar on the path bar (`app/browser.go`'s `filesToolbar`): a new folder (`folder-plus`), the sort menu, the view switch, the clipboard-link button, refresh, and the upload pill at the end; the folder's own name and search sit before them, and the button's box is where a folder made from it flies from (`listing.makerAt`). The maker (`app/newfolder.go`) is no longer a place for buttons: the grid's last tile is a whole "新建" tile that makes a folder on a click (a plus, or an upload while files are dragged over the window, `listing.over`), and the list's maker row is only the drop hint, in the accent color saying where dropped files will go, built only while files are dragged so it takes no room at the foot of a full folder. An empty folder says "这里还空着" and offers one upload of its own, labelled apart from the toolbar's. A new folder is named in a draft row at the top (`draftID`, put back each frame by `placeDraft`); a click away with its name untouched gives up. Cmd-Shift-N starts it from the toolbar's button box.
+ - Theme: the look is a native macOS app's, modeled on Pulse (egoist's MyGo app): the sidebar draws no background so the window's `VibrancySidebar` material shows (`main.go`: `TitleBarHiddenInset`, 52 px title bar), pages marked by white glyphs on colored tiles, the chosen one on a solid accent backdrop, a value at each row's end (`navValue`); the pane is white with a title over a subtitle (`pageTitle`), round gray tool buttons (`toolButton`), capsule segmented controls (`segmented`/`segmentedOf`), which fold into pop-up buttons (`choice`/`popUp`) when the title bar is narrower than `compactBar` (`a.compact`, from its last width; in a folder the tools fold instead whenever its whole path would not fit beside them open, `foldTools`, so the path never folds while they could give way, and the folder's title bar has no subtitle, the status bar counting its items), striped 28 px list rows (`stripe`), rounded gray `group` panels for settings and summaries, and the system typeface (no embedded fonts; `figure` sets tabular digits). Waits that fill a page or stand for a task use `plugins/loading` (a folder's `Ring`, the speed test's `Radar`; the boot screen shows no wait, only the bare window); small ones in buttons, rows and dialogs keep AppKit's `ui.Spinner`. `applyTheme` swaps in the app's light/dark `ui.Theme` each frame, its interface font coming from `internal/fontconfig` (see above). Extra colors are in `palette`. Motion is one curve and three lengths (`motionHover` 120 ms, `motionFade` 160 ms, `motionPanel` 180 ms), plus `popIn` and `rowEnter`, all in `app/theme.go`; no springs or bounce.
++- Measured frame costs for a 2 000-file folder, what was changed and what it bought, plus the remaining hot spots outside the files those changes touched: `docs/PERFORMANCE.md` (benchmarks in `app/bench_test.go`; `ui.Tester` frames are the measuring tool).
+ - Shaders (`ui/shader`, sources in `app/shaders/*.kage`, wiring in `app/effects.go`): each shader draw, effect layer or gradient with stops is a "general" GPU instance that the window does not batch, so dozens of them cost frames. Measure with `MYGO_FRAME_STATS=all` (it counts instances by class); draw many small things as plain fills, and keep a shader's per-pixel loop short (`specks.kage` searches only the cells whose specks can reach the pixel, from one hash each, and returns at once outside their reach). Shaders and `Element.Effect` run interpreted on the CPU in `ui.Tester`, so the app uses them only when `a.gpu` (`p.Accelerated()`), with plain fallbacks the tests see.
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index afcc2b3..d0db857 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,8 @@
+ 
+ ### 新增
+ 
++- Android 客户端（`android/`，APK）：Kotlin + Jetpack Compose 的 Material 3 界面（动态取色、深浅色、底部四个标签页、大标题栏），扫码登录；**自动备份文件夹**（系统目录选择器选文件夹、网盘目标目录、间隔、WorkManager 后台定时与前台服务手动运行、实时进度与取消、每个文件夹的上次结果）；**相册备份**可按相册勾选要备份的相册（照片与视频、数量与体积、上次同步时间、全选 / 全不选、仅 WiFi）；两端共用一套备份语义：同样的目录布局（`<备份到>/<文件夹名>/<相对路径>`、相册为 `<备份到>/相册/<相册名>/<文件名>`）、同样的跳过规则与按大小 + 修改时间的增量判断；**加密备份**用与桌面端相同的 OpenPGP 对称加密（AES-256、iterated+salted SHA-256 S2K、不压缩、带 MDC），口令存在 Android Keystore 的 AES/GCM 密钥加密的存储里，网盘上的文件以 `.gpg` 结尾、两端都能用 `gpg -d` 解开；登录凭据与口令同样只用 Keystore 加密保存。`:core`（网盘客户端 / OpenPGP / 备份引擎，纯 JVM、可单测）与 `:app`（界面 / MediaStore / SAF / WorkManager / 前台服务）分工，网盘协议与桌面 Go 端一致（precreate → superfile2 → create 分片上传），用仓库里的 `cmd/fakepand` 假网盘做端到端测试、用本机 `gpg` 双向验证加密。构建、签名与限制见 [docs/ANDROID.md](docs/ANDROID.md)，接口约定见 `android/docs/CORE-API.md`。
++- 设置页新增「备份」小节（桌面端）：自动备份开关、备份到（默认 `/备份`，可换成网盘里任意文件夹）、间隔（仅手动 / 15 分钟 / 30 分钟 / 1 小时 / 6 小时 / 24 小时）、文件夹列表（添加与移除，每个文件夹显示上传 / 跳过 / 失败数与上次备份时间）、加密备份开关与口令设置、立即备份 / 取消、实时进度与上次结果、「查看详情」列出出错的文件；备份在后台按间隔自动运行，注销、退出或改动设置会停掉当前的运行，失败的文件下次重试。备份状态存在用户数据目录的 `backup-state.json`，口令单独用钥匙串密钥加密在 `backup-key.enc`（取不到钥匙串时退回 0600 的密钥文件），不写进 `settings.json`。加密后的文件是标准 OpenPGP（AES-256、iterated+salted SHA-256 S2K、不压缩、带 MDC），`gpg -d xxx.jpg.gpg > xxx.jpg` 即可还原，格式与 Android 端一致，细节见 [docs/BACKUP.md](docs/BACKUP.md)。
+ - 设置页「外观」新增「主题色」：八个预设色块（蓝、紫、粉、橙、绿、红、青、靛）一点即换，也可在「自定义…」里填任意 `#RRGGBB` / `#RGB`（弹窗里边填边预览，写错就地提示、不保存不关闭），还能用「默认」回到系统蓝；强调色与由它派生的悬停、按下、选中、焦点配色一起生效并保存在设置里，深色外观下自动提亮，按钮上的文字按底色明暗取黑或白以保证可读。「关于」同时新增一行显示当前版本号，第一行的应用名不再重复版本。
+ - 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录（构建未内置更新签名密钥，下载的包不做签名校验）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
+ - Linux 上下载完的更新可就地安装并自动重启：设置页「更新」小节在下载后多出「安装并重启」按钮，把安装包里与正在运行的程序同名的二进制原子替换到运行路径上（先 `filepath.EvalSymlinks` 解析掉 `~/.local/bin` 之类的符号链接，替换的是真实文件，旧程序留作 `<exe>.old` 供回退），完成后 toast 并重启应用；由 pacman 或系统包管理器安装的程序（如 `/opt` 下，root 所有）目录不可写，会拒绝并提示改用包管理器更新，Windows/macOS 仍在下载后提示手动安装。Arch 用户也可以直接用 Software-Repo 发布的 `baidunetgo-<版本>-1-x86_64.pkg.tar.zst`（`sudo pacman -U …`）随包管理器更新，说明见 `docs/UPDATES.md`。
+@@ -20,6 +22,7 @@
+ 
+ ### 改进
+ 
++- 大文件夹的列表与上传中的文件夹更省：每帧不再为全部文件建行位置表（只有文件进出、行高不同时才建）、不再每帧重新格式化每行的字节数 / 日期 / 类型（按 fs_id 缓存，读目录或跨天时更新）、行位置与行矩形等 map 改为跨帧复用、「选择栏」与「是否只选了一项」不再为计数而复制整个选择、右键菜单的闭包改为持有文件指针；上传中的临时行与目录列表的比对从「每个上传 × 全部文件」改成按名字集合一次比对。2000 个文件的列表一帧的分配从 105 KB 降到 23 KB（GC 次数约降为原来的四分之一），50 个上传同时涌入时一帧从 822 µs 降到 516 µs；传输页在 200 个任务时不再每帧重新切分任务列表、重新格式化每行详情、重新统计工具栏（按任务变更计数缓存进行中 / 已完成两份列表与计数，每帧分配从 145 KB 降到 14.5 KB），文件进出时行的位置表改用保留的 `[]float32`（一次 −83%、0 分配），快捷键处理也不再在每帧开头复制一遍整个选择。测量方法、前后对比与剩下的热点见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)。
+ - 框选后用左键单击列表或网格的空白处取消选择，与 Esc 及选择栏的「取消选择」一致；按住 ⌘ 单击空白保留选择（追加语义），单击行 / 瓦片仍照常改选，框选松开本身不会误清。
+ - 新增「拖动即移动」：在列表或网格中按住文件 / 文件夹拖动并放到另一个文件夹行、文件夹瓦片或面包屑上即可移动过去，拖动时跟随指针显示半透明卡片（多项显示「N 项」），可投放的目标会高亮；拖到空白处或窗口外取消，同名交给冲突对话框，拖进自身或其子目录会被拒绝。左键拖动项目不再多选。
+ - 文件夹页的路径栏新增一条工具栏，把新建文件夹、排序、视图切换、从剪贴板打开分享链接、刷新与上传放在路径与搜索之后；窗口变窄时除上传外都收成带提示的图标，路径不够时先折工具栏。列表底部不再重复新建文件夹与上传两个按钮，拖拽时整行提示投放位置、不拖拽时不占高度；网格最后一格改为整块「新建」磁贴，点击即新建文件夹；空文件夹保留「这里还空着」并只给一个专属的上传入口，避免与工具栏按钮同名；新建文件夹的飞入动画改从工具栏按钮出发。
+@@ -27,6 +30,7 @@
+ 
+ ### 修复
+ 
++- 修复上传的临时行排序进文件夹顶部时行滑动动画每帧重新启动、界面因此持续重绘的问题（改为记录滑动的目标位置来判断要不要继续，而不是用上一帧被自己改过的位置比）；
+ - 修复选择框（弹力框）拖出列表 / 网格边缘就停止、选择冻结的问题：框选进行时指针位置改从覆盖整个窗口的根元素读取，每帧先把指针钳制到列表可视区（列表 / 网格的底边与右边取视口和最后一行 / 列的并集）再算矩形，越界后框停在列表边界、选择是边界处最后框到的项目，继续越界不再变化，回到列表内又继续跟随；松开鼠标无论落在列表内、标题栏、侧栏还是窗口外都能正常结束（窗口外由列表 / 网格自己的按下状态兜底），不再留下卡住的框。
+ - 修复纯竖直或纯水平拖动框选不中任何行 / 瓦片的问题：用于选择判定的矩形在两个方向上都补到至少 1 DIP（绘制本来就把线补成 1px），从行边缘外侧竖直拖也能选中经过的行。
+ - 修复修复版启动脚本把 XDG 配置目录（`XDG_CONFIG_HOME`）指到独立 profile，连带 fontconfig、GTK、dconf 都换了目录，用户的 `fonts.conf` 不再生效、界面字体回落到 Droid Sans 的问题——这正是“fontconfig 里的字体无法应用”的真正原因：新增 `BAIDUNETGO_PROFILE`，`main.go` 用它只改本应用的数据/缓存目录（`mygo.App.SetPath` 的 PathUserData / PathCache，在窗口打开前设置），不再动任何 XDG 变量；`tools/install-patched-local.sh` 的启动脚本改用它，并沿用原来 `~/.config/baidunetgo-patched-profile/BaiduNetGo` 里的登录与设置，已登录用户不会掉登录态。
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 5f6a2a6..c17f7ec 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -21,6 +21,8 @@ go tool mygo build                    # package for this platform into build/
+ go tool mygo build -sign "BaiduNetGo Dev"   # same, signed with a fixed self-signed cert so the keychain's "Always Allow" survives rebuilds
+ CGO_ENABLED=0 GOOS=windows go build -o /dev/null .   # cross-compile check
+ go run ./tools/appicon                # redraw the app icon, resources/icon.png, which mygo build packages
++cd android && ./gradlew :app:assembleDebug   # the Android client's APK (needs JDK 21 + SDK 37; not part of go build)
++go run ./cmd/fakepand                 # the fake netdisk as a standalone process (prints url=…), for the Android tests
+ ```
+ 
+ **Releases.** Every push to `main` releases (`.github/workflows/release.yml`): tests, then `go run ./tools/release` picks the version (last tag + patch; `#minor`/`#major` in a commit, or a higher version set by hand in `mygo.json`) and writes its `CHANGELOG.md` section (the `## Unreleased` notes if any, else the commits grouped 新增/修复/改进), then the workflow pushes a `Release vX.Y.Z [skip ci]` commit and tag to main, builds Linux/Windows on Ubuntu and `darwin/universal` on macOS, uploads to the release and publishes it. So `git pull --rebase` before pushing. The repo is private, so MyGo's self-updater (`updates` in `mygo.json`, which needs a public repo) is not set up.
+@@ -60,6 +62,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Someone else's share links** (`OpenShare`/`SharedDir`/`SaveShared` in `internal/baidu/share.go`): `/share/verify` trades the password for a `randsk`, which every later call carries as `sekey` and in the `BDCLND` cookie. An old `BDCLND` for `.baidu.com`, imported with the cookies, is sent first and hides the new one, so `OpenShare` overwrites it. `/api/shorturlinfo` gives the share's dates, `/share/list` its entries (numbers as strings at the top, as numbers in folders), the share's page the sharer's name and photo, and `/share/transfer` saves chosen fs_ids. The app (`app/sharelink.go`) opens a share link from the clipboard only when the user asks for it, with the folder toolbar's link button, Cmd-Shift-V, or Cmd-V while no files are cut or copied; the view never reads the clipboard by itself, as its owner can make GTK's synchronous read wait and freeze the main thread. fakepan knows `fakepan.DemoShare` and the account's own shares.
+ 
++`fakepan` also emulates the real chunked upload calls (`/api/precreate`, `pcs/superfile2`, `/api/create` with a per-part `block_list`, and `pcs/file?method=locateupload`), which is what the Android client is tested against; the desktop client keeps its simplified `/upload?id&part` path. `cmd/fakepand` runs the same fake as a standalone process for tests written in other languages (it prints `url=…` and serves until SIGINT).
++
+ `baidu.OpenAt(creds, base)` points the client at a fake server. `c.fake()` swaps in fake-friendly behavior in the few library-bound paths (download URL, upload). Errno -6/-4/111 maps to `ErrNotLoggedIn`, which signs the user out.
+ 
+ **Download hosts only serve bounded ranges.** `bytes=a-b` works. No Range header, or an open-ended `bytes=a-`, returns 403 (small files sometimes slip through). Every content read must therefore be bounded: `remote` (chunked, `remote.Parallel` at once), `transfer`, `tune`. mpv, whose ffmpeg sends open-ended ranges, reads through `internal/stream`, a loopback HTTP server with a random token per file. It splits requests into bounded chunks fetched `Ahead` at a time and re-requests the link when it expires. fakepan's `/file` enforces the same rule.
+@@ -70,6 +74,8 @@ Dev-only environment variables (see `capture.go`, `app/app.go`, `app/session.go`
+ 
+ **Sign-in sources.** The saved session (`internal/auth`) comes first. If there is none, or it has expired, the app migrates the login of another client on this computer (`internal/migrate`): Baidu's own Linux client first (its Electron cookie store, read with a small pure-Go SQLite reader), then BaiduPCS-Go's active account (`internal/pcsimport`, reading `pcs_config.json`). It skips this when the user signed out on purpose (`settings.SkipImport`). The login screen also offers it as a link. Every sign-in is saved at once, and saved again when `Client.Credentials` changes (the uid found, cookies the netdisk rotated; `Client.OnChange`) and on quit.
+ 
++**Android client (`android/`).** A second product in the same repository: a Kotlin + Jetpack Compose Material 3 app built with Gradle (AGP 9.4.1, Kotlin 2.4.20, Compose BOM 2026.09.00, compileSdk 37, minSdk 26), entirely separate from `go build`. It shares no code with the desktop app but speaks the same netdisk protocol (the pan.baidu.com web endpoints plus `/api/precreate` → `pcs/superfile2` parts → `/api/create`), the same backup layout and the same `.gpg` format, so the two halves back up into one netdisk folder. `:core` (pure JVM, `com.pengstem.baidunetgo.core`) holds `net/BaiduApi` (client, chunked upload, QR sign-in), `crypto/Pgp` (BouncyCastle bcpg; BouncyCastle's v5 session-key quirk had to be turned off for gpg/Go compatibility) and `backup/` (the incremental engine over a `Netdisk` interface and a `BackupSource`, so MediaStore albums and SAF trees are just sources); `:app` (`com.pengstem.baidunetgo`) holds the Compose screens, MediaStore album scanning, the SAF folder picker, Keystore-encrypted storage, WorkManager periodic workers and the foreground backup service. `android/docs/CORE-API.md` is the contract between them. Tests: `./gradlew :core:test` runs the client against `cmd/fakepand` (the same `internal/fakepan`, started as a process and its `url=…` line read from stdout; `FAKEPAN_URL` reuses one) and OpenPGP against the real `gpg` in both directions, and `:app:testDebugUnitTest` holds codec/path tests plus Robolectric renders written to `android/screenshots/` (there is no emulator here: no `/dev/kvm`). Builds need `ANDROID_HOME`, `JAVA_HOME` (JDK 21) and a writable `GRADLE_USER_HOME`; `android/keystore/dev.jks` is a public dev-only keystore for `assembleDebug`. `docs/ANDROID.md` is the hand-over (build, CI notes, update-channel idea).
++
+ **One keyring key for every build.** `mygo.Secrets` names its service after the build (`<identifier>.dev` under `mygo dev`, the app name under `go run`, the identifier when packaged), so `OpenStore` pins the key to `com.pengstem.baidunetgo`. `auth.Store.Older` lists the old services: `Load` tries their keys and saves the session again under the pinned one.
+ 
+ **Fake netdisk (`internal/fakepan`).** An `httptest` server that emulates every web endpoint the client uses, over an in-memory tree with generated images, a PDF and a WAV. App UI tests (`app/*_test.go`, helper `signedIn` in `app/app_test.go`) drive real views with `ui.Tester` against it. When adding a new API call, add its endpoint to fakepan too.
+@@ -88,6 +94,8 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ 
+ **Transfers (`internal/transfer`).** `Manager` is a queue run by `Parallel`. Downloads fetch 4 MB blocks over `Threads` connections into `<file>.bngdl`, with a `.bngdl.json` sidecar of finished blocks for resume. Task state persists to `transfers.json` in the user data dir. `OnChange`/`OnFinish` are called outside the manager's lock and read tasks back through `Tasks()`. Don't call them while holding `m.mu`: that deadlocked once.
+ 
++**Automatic backups (`internal/backup`, `internal/pgp`, `app/backup.go`).** The settings page's 备份 section mirrors chosen local folders into a netdisk folder (`<dest>/<folder name>/<relative path>`), incrementally: `backup.Run` walks a folder, skips a file whose size and mtime are what `backup.State` records under its absolute local path, creates the remote folders it needs through the small `backup.Client` interface (`List`/`Mkdir`/`Upload`, adapted from `*baidu.Client` in `app/backup.go`), uploads up to `Parallel` files at once with the app's upload connection count, and reports progress from worker goroutines (the app coalesces it through `a.update`). Encrypted runs stream each file through `pgp.Encrypt` into a temp file in `os.TempDir()`, upload it as `<name>.gpg`, and remove it even on failure. The engine never deletes anything, collects per-file errors instead of aborting, and leaves a failed file out of the state so the next run retries it. State lives in `backup-state.json` under the user data dir (`backupStoreDir` points tests at a temp folder; nothing is written when signed in to the fake netdisk); the passphrase is not in `settings.json` but sealed with a keyring key in `backup-key.enc` (`backup-key.key` when there is no keyring) by `app/backup_key.go`, a second file/key pair so that signing out — which clears the session's — does not lose it. `app/backup.go` schedules runs (`time.AfterFunc` → `a.update`, first run a couple of minutes after launch, then every interval, one at a time, cancelled on sign-out/quit/settings change) and `app/backup_page.go` draws the section. `internal/pgp` encrypts with a passphrase only — AES-256, iterated+salted SHA-256 S2K, no compression, MDC — so `gpg -d file.gpg` opens the backup on any machine; the Android client writes the same format. `docs/BACKUP.md` is the user-facing description.
++
+ **Session storage (`internal/auth`).** Credentials are AES-GCM encrypted in `session.enc` under the user data dir. The key lives in `mygo.Secrets` (the system keyring), with a 0600 key-file fallback. macOS ties the keychain's "Always Allow" to the code signature, and an ad-hoc signature changes with every build, so each rebuild asks again unless it is signed with a fixed identity (`-sign`). A real identity turns on the hardened runtime, under which wazero's compiled code (PDFium) is killed: `entitlements.plist` grants `allow-unsigned-executable-memory` for it. Settings are plain JSON (`app/settings.go`).
+ 
+ ## MyGo UI gotchas found here
+@@ -101,6 +109,7 @@ Entering the page reads the cache again only when it is entered (`dedupEnter` no
+ - Virtualized `List` rows get no enter/exit transitions. Staggered entrances use `Keyframes` inside the row (`entering` in `browser.go`).
+ - The grid view is not `ui.GridView`: GridView builds each line as an element, so a tile that a resize moves to another line is built anew and jumps. `app/grid.go` positions tiles itself, all under one parent keyed by fsid (percent `Left`/`Width`, so the width never lags), and on a cell change `Jump`s the slot's offset to where it showed and `AnimateTo`s it back to 0. Element `Transition`s don't help here: MyGo skips layout transitions on frames where the window resized.
+ - Theme: the look is a native macOS app's, modeled on Pulse (egoist's MyGo app): the sidebar draws no background so the window's `VibrancySidebar` material shows (`main.go`: `TitleBarHiddenInset`, 52 px title bar), pages marked by white glyphs on colored tiles, the chosen one on a solid accent backdrop, a value at each row's end (`navValue`); the pane is white with a title over a subtitle (`pageTitle`), round gray tool buttons (`toolButton`), capsule segmented controls (`segmented`/`segmentedOf`), which fold into pop-up buttons (`choice`/`popUp`) when the title bar is narrower than `compactBar` (`a.compact`, from its last width; in a folder the tools fold instead whenever its whole path would not fit beside them open, `foldTools`, so the path never folds while they could give way, and the folder's title bar has no subtitle, the status bar counting its items), striped 28 px list rows (`stripe`), rounded gray `group` panels for settings and summaries, and the system typeface (no embedded fonts; `figure` sets tabular digits). Waits that fill a page or stand for a task use `plugins/loading` (a folder's `Ring`, the speed test's `Radar`; the boot screen shows no wait, only the bare window); small ones in buttons, rows and dialogs keep AppKit's `ui.Spinner`. `applyTheme` swaps in the app's light/dark `ui.Theme` each frame, its interface font coming from `internal/fontconfig` (see above). Extra colors are in `palette`. Motion is one curve and three lengths (`motionHover` 120 ms, `motionFade` 160 ms, `motionPanel` 180 ms), plus `motionLand` (420 ms after a 180 ms wait, for things flying into a folder), `popIn` and `rowEnter`, all in `app/theme.go`; no springs or bounce.
++- Measured frame costs for a 2 000-file folder, what was changed and what it bought, plus the remaining hot spots outside the files those changes touched: `docs/PERFORMANCE.md` (benchmarks in `app/bench_test.go`; `ui.Tester` frames are the measuring tool).
+ - Shaders (`ui/shader`, sources in `app/shaders/*.kage`, wiring in `app/effects.go`): each shader draw, effect layer or gradient with stops is a "general" GPU instance that the window does not batch, so dozens of them cost frames. Measure with `MYGO_FRAME_STATS=all` (it counts instances by class); draw many small things as plain fills, and keep a shader's per-pixel loop short (`specks.kage` searches only the cells whose specks can reach the pixel, from one hash each, and returns at once outside their reach). Shaders and `Element.Effect` run interpreted on the CPU in `ui.Tester`, so the app uses them only when `a.gpu` (`p.Accelerated()`), with plain fallbacks the tests see.
+ - `Painter.AnimationFrame` (and `After`) only paints the window again: the view is not built, so anything computed while building (an element's size, an effect's uniforms, state moved on in `View`) stands still in those frames. Read the time as you paint (`p.Now()` in a `Draw` callback, or in an effect's `PaintEffect`, as `specksFx` does), and call `c.Invalidate()` while something built must move (`a.moving()`). Stamp an animation's start in the first frame that shows it, not from the last frame built, which may be long past.
+ - Files come and go through specks (`app/arrivals.go`): a deleted file stays in its listing while it dissolves (`a.dying`, kept through reloads by `keepDying`), and an upload shows in its folder at once as a row with a negative FsID that gathers as its bytes go up (`a.gathers`, by the path of the entry it makes); rows with a negative FsID or dissolving are never chosen or opened.
+diff --git a/README.md b/README.md
+index 039ea22..860e146 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ 一个用纯 Go 写的百度网盘桌面客户端：界面由 [MyGo](https://github.com/egoist/mygo) 的原生 `ui` 包在 GPU 上绘制（没有 WebView、没有 cgo），网盘能力来自把 [BaiduPCS-Go](https://github.com/qjfoidnh/BaiduPCS-Go) 当作库使用。外观照 macOS 原生应用来做：侧边栏透出窗口材质、彩色图标块、条纹列表、圆角分组。
+ 
+-> **关于本版本**：这是基于上游 [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) 的本地补丁构建（社区修复版），由 DeepSeek 与 GLM 协作完成修复与增强——查重、文件快捷键、拖动移动与框选、撤销、窗口自适应、字体跟随等；非官方发布，与上游的关系是补丁而非分支产品。更新检查见 [docs/UPDATES.md](docs/UPDATES.md)。
++> **关于本版本**：这是基于上游 [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) 的本地补丁构建（社区修复版），由 DeepSeek 与 GLM 协作完成修复与增强——查重、文件快捷键、拖动移动与框选、撤销、窗口自适应、字体跟随等；非官方发布，与上游的关系是补丁而非分支产品。更新检查见 [docs/UPDATES.md](docs/UPDATES.md)。同一仓库还带一个 Android 客户端（`android/`，Material 3），功能聚焦在自动备份文件夹与相册、加密备份，见 [docs/ANDROID.md](docs/ANDROID.md)。
+ 
+ ![网格浏览](docs/screenshots/grid.png)
+ 
+@@ -26,6 +26,8 @@
+   - 结果会缓存（默认 7 天内有效）：文件没变动时再次进入立即显示上次结果，不必重扫；在应用里删除、移动 / 复制、重命名、新建文件夹、还原或清空回收站、上传完成、离线下载完成等改动会自动让缓存失效，进入页面时重扫，“重新扫描”按钮随时可以强制全盘重扫
+   - 结果行右键可以打开预览（同组里的图片在预览里用 ←/→ 翻页）、在文件夹中显示、复制路径
+ - **传输**：多连接分块下载、断点续传、过期链接自动刷新；上传支持秒传与分片；拖文件进窗口即上传
++- **自动备份文件夹**（设置「备份」）：把任意多个本机文件夹按 15 分钟 / 30 分钟 / 1 小时 / 6 小时 / 24 小时的间隔（或仅手动）镜像到网盘的一个目录（默认 `/备份`），只传新增和改动过的文件（按大小与修改时间判断），可随时「立即备份」或取消，进度与上次结果就在设置页里；网盘上按需要建目录，从不删除两边的文件
++  - **加密备份**：打开后每个文件在本地流式加密再上传，名字变成 `xxx.jpg.gpg`，口令只存在系统钥匙串里（取不到时用 0600 的加密文件），不写进设置、也不随备份上传；格式是标准 OpenPGP 对称加密（AES-256、iterated+salted SHA-256 S2K、不压缩、带完整性校验），在任何装了 GnuPG 的机器上用 `gpg -d` 就能解开，和 Android 端的备份互相通用，细节见 [docs/BACKUP.md](docs/BACKUP.md)
+ - **自动调优**：按实测依次选出下载线路、每个文件的连接数、块大小、同时传输的文件数和上传连接数，每种会员等级每周测一次；连接数也可以手动指定
+ - **跟系统配合**：只运行一个实例，Dock 图标显示传输数和进度，传输时不让电脑休眠，完成后发通知（点开定位到文件），断网或睡眠时传输排队，恢复后接着传；网盘请求和扫码登录跟随系统代理与 PAC
+ - **分享**：创建带提取码与有效期的链接、管理我的分享；工具栏的链接按钮、Cmd+Shift+V（没有文件剪贴板时 Cmd+V 也可以）在你操作时读取剪贴板，粘贴整段分享文字一键转存
+@@ -90,6 +92,16 @@ go tool mygo build                   # 打包当前平台到 build/
+ go tool mygo build -sign "BaiduNetGo Dev"   # macOS：用固定的自签名证书签名，钥匙串的“始终允许”不会每次重新询问
+ ```
+ 
++Android 客户端是独立的 Gradle 工程（需要 JDK 21 与 Android SDK platform 37），不参与 `go build`：
++
++```bash
++cd android
++./gradlew :app:assembleDebug    # 产出 app/build/outputs/apk/debug/app-debug.apk
++./gradlew :core:test            # 网盘客户端、OpenPGP、备份引擎的 JVM 测试
++```
++
++详见 [android/README.md](android/README.md) 与 [docs/ANDROID.md](docs/ANDROID.md)。
++
+ 依赖：Go 1.27+；Linux 需要 GTK 3；播放视频需要安装 mpv（或在设置中指定路径）。代码不使用 cgo，可以从任意平台交叉编译到 Windows / macOS / Linux。
+ 
+ 调试用的环境变量：
+@@ -152,6 +164,8 @@ tools/install-patched-local.sh
+ | `internal/auth` | 加密保存登录状态，密钥放在系统钥匙串 |
+ | `internal/migrate`、`internal/pcsimport` | 沿用百度网盘 Linux 客户端、BaiduPCS-Go 的登录 |
+ | `internal/dedup` | 查重：按大小与网盘 MD5 分组，并发遍历目录，从已有分组剔除已删除的文件 |
++| `internal/backup` | 自动备份引擎：遍历本地文件夹、按大小与修改时间增量上传、可选加密、并发与取消 |
++| `internal/pgp` | OpenPGP 对称加密，产出 `gpg -d` 能解开的 `.gpg` 文件 |
+ | `internal/remote` | 基于 HTTP Range 的内存读取，预览与边播 |
+ | `internal/stream` | 给 mpv 用的本地回环服务，把请求拆成有界的分块 |
+ | `internal/pdf` | PDFium（WebAssembly）渲染 |
+@@ -159,8 +173,11 @@ tools/install-patched-local.sh
+ | `internal/transfer` | 下载 / 上传队列 |
+ | `internal/tune` | 测速与传输参数调优 |
+ | `internal/pcsport` | 移植自 BaiduPCS-Go internal 的上传流程 |
+-| `internal/fakepan` | 测试与演示用的假网盘服务 |
++| `internal/fakepan` | 测试与演示用的假网盘服务（含真实的 precreate / superfile2 / create 分片上传接口） |
+ | `internal/selftest` | 真实账号自检 |
++| `cmd/fakepand` | 把假网盘跑成独立进程，供 Android 端的测试所使用 |
++| `android/` | Android 客户端：Kotlin + Compose Material 3，`:core` 放网盘客户端 / OpenPGP / 备份引擎，`:app` 放界面 |
++| `docs/BACKUP.md`、`docs/ANDROID.md`、`docs/PERFORMANCE.md` | 备份与加密格式、Android 构建、桌面性能测量 |
+ | `tools/release` | 发版：算版本号、写更新日志 |
+ | `tools/install-patched-local.sh` | 把本地构建装成与已安装版并存的独立启动项 |
+ | `tools/appicon` | 绘制应用图标 `resources/icon.png` |

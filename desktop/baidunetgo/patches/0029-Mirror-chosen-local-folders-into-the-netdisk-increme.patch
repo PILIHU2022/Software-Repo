@@ -1,0 +1,2149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 10:59:35 +0800
+Subject: [PATCH] Mirror chosen local folders into the netdisk incrementally,
+ uploading only files whose size or modification time changed and encrypting
+ each one on the way when asked.
+
+---
+ internal/backup/backup.go               |  706 ++++++++++++++
+ internal/backup/backup_test.go          | 1182 +++++++++++++++++++++++
+ internal/backup/pgp_bridge.go           |   12 +
+ internal/backup/pgp_integration_test.go |   89 ++
+ internal/backup/state.go                |  110 +++
+ 5 files changed, 2099 insertions(+)
+ create mode 100644 internal/backup/backup.go
+ create mode 100644 internal/backup/backup_test.go
+ create mode 100644 internal/backup/pgp_bridge.go
+ create mode 100644 internal/backup/pgp_integration_test.go
+ create mode 100644 internal/backup/state.go
+
+diff --git a/internal/backup/backup.go b/internal/backup/backup.go
+new file mode 100644
+index 0000000..92efa27
+--- /dev/null
++++ b/internal/backup/backup.go
+@@ -0,0 +1,706 @@
++// Package backup mirrors local folders into a netdisk destination. It uploads
++// only what changed since the last run, optionally encrypting every file on the
++// way, creates the netdisk folders as they are needed, uploads several files at
++// once, reports progress as it goes, and stops when its context is canceled.
++// It never deletes anything, locally or on the netdisk.
++package backup
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"io/fs"
++	"os"
++	"path"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"time"
++)
++
++// Defaults of a run.
++const (
++	// DefaultParallel is how many uploads run at once when Config.Parallel is
++	// zero or negative.
++	DefaultParallel = 2
++	// MaxParallel caps Config.Parallel.
++	MaxParallel = 4
++	// TempPrefix starts the name of the temporary files encrypted uploads are
++	// staged in, under os.TempDir(). Each one also has a random suffix, so two
++	// files in flight never share a name.
++	TempPrefix = "baidunetgo-backup-"
++)
++
++// defaultExcludes are names never backed up, at any depth: version control and
++// package data, caches, trash, and the lock and temporary files office
++// programs leave beside a document. A name matching one of these is skipped
++// even when Config.Exclude is set (which adds to them).
++var defaultExcludes = []string{
++	".git",
++	"node_modules",
++	".cache",
++	".Trash",
++	".DS_Store",
++	"Thumbs.db",
++}
++
++// DefaultExcludes returns the names skipped at any depth even when
++// Config.Exclude is empty, so that a settings page can show them.
++func DefaultExcludes() []string {
++	return append([]string(nil), defaultExcludes...)
++}
++
++// RemoteFile is a file or directory of the netdisk, as the engine sees it.
++type RemoteFile struct {
++	Name  string
++	Size  int64
++	IsDir bool
++}
++
++// Client is the netdisk side the engine needs. The app adapts *baidu.Client to
++// it (see the package's documentation).
++type Client interface {
++	// List returns the entries of the netdisk directory dir, a path like
++	// "/备份". It may be called for a directory that does not exist yet, to
++	// find out whether it does; an error then may be returned or an empty
++	// listing.
++	List(ctx context.Context, dir string) ([]RemoteFile, error)
++	// Mkdir creates the one directory dir, whose parent exists.
++	Mkdir(ctx context.Context, dir string) error
++	// Upload sends the local file local to the full netdisk path remote,
++	// overwriting what is there, and reports progress in bytes.
++	Upload(ctx context.Context, local, remote string, progress func(done, total int64)) error
++}
++
++// Folder is one local directory to back up.
++type Folder struct {
++	Local  string `json:"local"`            // absolute local directory
++	Remote string `json:"remote,omitempty"` // netdisk subfolder under Dest; empty = base name of Local
++}
++
++// Config is what a run backs up and how.
++type Config struct {
++	Dest    string   `json:"dest"`    // netdisk destination, e.g. "/备份"
++	Folders []Folder `json:"folders"` // the local folders to mirror
++	// Encrypt makes every file be encrypted before it is uploaded; the
++	// netdisk name then ends with ".gpg".
++	Encrypt bool `json:"encrypt"`
++	// Exclude adds names skipped anywhere, on top of the default ones (see
++	// defaultExcludes).
++	Exclude []string `json:"exclude,omitempty"`
++	// Parallel is how many uploads run at once: 0 means DefaultParallel, and
++	// values are clamped to 1..MaxParallel.
++	Parallel int `json:"parallel,omitempty"`
++	// EncryptStream streams the symmetric encryption of src into dst; nil
++	// means the internal/pgp package's Encrypt is used when it is wired in
++	// (see the pgp bridge file in this package), else the run fails with a
++	// clear error when Encrypt is set.
++	EncryptStream func(dst io.Writer, src io.Reader, passphrase string) error `json:"-"`
++}
++
++// FileError is one file or folder the run could not back up. Err is never nil.
++// A failed file is not added to the state, so the next run tries it again.
++type FileError struct {
++	Local  string `json:"local"`
++	Remote string `json:"remote,omitempty"`
++	Err    error  `json:"-"`
++}
++
++// Error says what failed where.
++func (e FileError) Error() string {
++	if e.Remote != "" {
++		return fmt.Sprintf("backup %s -> %s: %v", e.Local, e.Remote, e.Err)
++	}
++	return fmt.Sprintf("backup %s: %v", e.Local, e.Err)
++}
++
++// Unwrap is the error it wraps.
++func (e FileError) Unwrap() error { return e.Err }
++
++// Progress is one report of a run. It is called from worker goroutines as
++// well as from the walk, so the app must make it safe for concurrent use (a
++// mutex or a channel, and throttle it if it repaints).
++type Progress struct {
++	Folder string // absolute local root of the folder being backed up
++	File   string // the file's path relative to Folder, "/"-separated
++	Remote string // the file's full netdisk path
++	// Done and Total are the bytes of the current file: Total is its size, and
++	// Done the bytes of it the client has sent. Encrypted files are sent as
++	// their (slightly larger) encrypted copy, so their Done grows to the
++	// temporary file's size. A file's start is reported with Done 0, then its
++	// bytes as the client sends them, and its end with Done equal to Total.
++	Done  int64
++	Total int64
++	// Files is how many files the walk has found so far in the whole run;
++	// Uploaded, Skipped and Failed count the files finished so far.
++	Files     int
++	Uploaded  int
++	Skipped   int
++	Failed    int
++	Encrypted bool
++}
++
++// Result says what a run did.
++type Result struct {
++	Folders  int         // folders processed (configured entries reached)
++	Uploaded int         // files sent
++	Skipped  int         // files already backed up unchanged
++	Failed   int         // files that could not be backed up
++	Bytes    int64       // bytes of the uploaded files, as they are locally
++	Errors   []FileError // what failed, in the order it failed
++}
++
++// encryptFn is the signature of Config.EncryptStream.
++type encryptFn func(dst io.Writer, src io.Reader, passphrase string) error
++
++// pgpEncrypt is the internal/pgp fallback for a nil Config.EncryptStream. The
++// pgp bridge file of this package sets it; it stays nil when internal/pgp is
++// not part of the build.
++var pgpEncrypt encryptFn
++
++// Run mirrors cfg's folders into cfg.Dest, sending only the files that changed
++// since the last run recorded in st, which is updated as uploads succeed. When
++// Encrypt is set, each file is encrypted into a temporary file under
++// os.TempDir() and uploaded with a ".gpg" suffix, and the temporary file is
++// removed whether the upload worked or not.
++//
++// A failure of one file does not abort the run: it is collected in Result and
++// left out of the state, so the next run retries it. Cancellation by ctx stops
++// promptly, keeps what was done, and returns ctx.Err() (context.Canceled), with
++// the partial result.
++//
++// st is written from worker goroutines while Run is in flight: the caller must
++// not touch it until Run returns, then save it (State.Save).
++func Run(ctx context.Context, cl Client, cfg Config, st *State, passphrase string, report func(Progress)) (Result, error) {
++	if cl == nil {
++		return Result{}, errors.New("backup: no client")
++	}
++	dest, err := cleanDest(cfg.Dest)
++	if err != nil {
++		return Result{}, err
++	}
++	if st == nil {
++		st = NewState()
++	}
++	if st.Entries == nil {
++		st.Entries = map[string]Entry{}
++	}
++	enc := cfg.EncryptStream
++	if cfg.Encrypt && enc == nil {
++		enc = pgpEncrypt
++	}
++	if cfg.Encrypt && enc == nil {
++		return Result{}, errors.New("backup: encryption requested but no EncryptStream and internal/pgp is not wired in")
++	}
++	if cfg.Encrypt && passphrase == "" {
++		return Result{}, errors.New("backup: encryption needs a passphrase")
++	}
++	parallel := cfg.Parallel
++	if parallel <= 0 {
++		parallel = DefaultParallel
++	}
++	if parallel > MaxParallel {
++		parallel = MaxParallel
++	}
++
++	r := &runner{
++		cl:       cl,
++		cfg:      cfg,
++		dest:     dest,
++		st:       st,
++		pass:     passphrase,
++		enc:      enc,
++		report:   report,
++		parallel: parallel,
++		excludes: excludeSet(cfg.Exclude),
++		listings: map[string]map[string]bool{},
++		made:     map[string]bool{},
++		dirErr:   map[string]error{},
++	}
++	return r.run(ctx)
++}
++
++// cleanDest normalizes the netdisk destination: an absolute path with no
++// trailing slash.
++func cleanDest(dest string) (string, error) {
++	dest = strings.TrimSpace(dest)
++	if dest == "" {
++		return "", errors.New("backup: no destination")
++	}
++	if !strings.HasPrefix(dest, "/") {
++		dest = "/" + dest
++	}
++	dest = path.Clean(dest)
++	if dest == "/" {
++		return "/", nil
++	}
++	return strings.TrimSuffix(dest, "/"), nil
++}
++
++// excludeSet is the names skipped at any depth: the default ones plus extra.
++func excludeSet(extra []string) map[string]bool {
++	set := make(map[string]bool, len(defaultExcludes)+len(extra))
++	for _, name := range defaultExcludes {
++		set[name] = true
++	}
++	for _, name := range extra {
++		if name = strings.TrimSpace(name); name != "" {
++			set[name] = true
++		}
++	}
++	return set
++}
++
++// excluded says whether a name is skipped: one of the excludes, or a "~$"
++// temporary file of an office program.
++func (r *runner) excluded(name string) bool {
++	return r.excludes[name] || strings.HasPrefix(name, "~$")
++}
++
++// pending is one file to upload.
++type pending struct {
++	folder  string // absolute local root
++	local   string // absolute local path
++	rel     string // path relative to folder, "/"-separated
++	remote  string // full netdisk path, ".gpg" suffix included when encrypting
++	size    int64
++	modNano int64
++}
++
++// runner is one run's state.
++type runner struct {
++	cl       Client
++	cfg      Config
++	dest     string
++	st       *State
++	pass     string
++	enc      encryptFn
++	report   func(Progress)
++	parallel int
++	excludes map[string]bool
++
++	mu    sync.Mutex // guards st, res and the counters below
++	res   Result
++	files int // files the walk found so far, for Progress.Files
++
++	// The walk and the directory creation run in one goroutine.
++	listings map[string]map[string]bool // known entries of a listed parent
++	made     map[string]bool            // netdisk directories the run knows exist
++	dirErr   map[string]error           // directories whose creation failed
++}
++
++// run walks and uploads every configured folder.
++func (r *runner) run(ctx context.Context) (Result, error) {
++	for _, f := range r.cfg.Folders {
++		if ctx.Err() != nil {
++			break
++		}
++		local := strings.TrimSpace(f.Local)
++		if local == "" {
++			r.addError(FileError{Err: errors.New("backup: folder has no local path")})
++			continue
++		}
++		abs, err := filepath.Abs(local)
++		if err != nil {
++			r.addError(FileError{Local: local, Err: err})
++			continue
++		}
++		remote := strings.Trim(strings.TrimSpace(f.Remote), "/")
++		if remote == "" {
++			remote = filepath.Base(abs)
++		}
++		base := path.Join(r.dest, filepath.ToSlash(remote))
++		if remote == "" || base == r.dest {
++			r.addError(FileError{Local: abs, Err: errors.New("backup: folder has no remote name")})
++			continue
++		}
++		r.mu.Lock()
++		r.res.Folders++
++		r.mu.Unlock()
++		if err := r.folder(ctx, abs, base); err != nil {
++			// Only cancellation stops the run; file and folder failures were
++			// collected as they happened.
++			break
++		}
++	}
++	r.mu.Lock()
++	res := r.res
++	r.mu.Unlock()
++	if err := ctx.Err(); err != nil {
++		return res, err
++	}
++	return res, nil
++}
++
++// folder backs up one local directory into the netdisk directory base.
++func (r *runner) folder(ctx context.Context, local, base string) error {
++	files, err := r.walk(ctx, local, base)
++	if err != nil {
++		return err
++	}
++	if len(files) == 0 {
++		return nil
++	}
++	// Make the remote folders first, in a fixed order, and only for the
++	// directories that hold something to upload.
++	var todo []pending
++	for _, p := range files {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		dir := path.Dir(p.remote)
++		if err := r.ensureDir(ctx, dir); err != nil {
++			if ctx.Err() != nil {
++				return ctx.Err()
++			}
++			// One error for the directory; the files in it count as failed
++			// and are left out of the state, so the next run retries them.
++			if _, seen := r.dirErr[dir]; !seen {
++				r.dirErr[dir] = err
++				r.addError(FileError{Local: p.local, Remote: dir, Err: err})
++			}
++			r.failedFile(p)
++			continue
++		}
++		todo = append(todo, p)
++	}
++	if len(todo) == 0 {
++		return nil
++	}
++	return r.uploadAll(ctx, todo)
++}
++
++// walk collects the files under local, in sorted order, reporting the ones
++// already backed up unchanged and leaving those out.
++func (r *runner) walk(ctx context.Context, local, base string) ([]pending, error) {
++	var out []pending
++	err := filepath.WalkDir(local, func(p string, d fs.DirEntry, err error) error {
++		if ctxErr := ctx.Err(); ctxErr != nil {
++			return ctxErr
++		}
++		if err != nil {
++			// An unreadable directory or file: collect it and go on with the
++			// rest. The remote path is unknown here, so only the local one is
++			// reported.
++			r.addError(FileError{Local: p, Err: err})
++			return nil
++		}
++		if p == local {
++			return nil
++		}
++		if r.excluded(d.Name()) {
++			if d.IsDir() {
++				return filepath.SkipDir
++			}
++			return nil
++		}
++		if d.IsDir() {
++			return nil
++		}
++		rel, err := filepath.Rel(local, p)
++		if err != nil {
++			r.addError(FileError{Local: p, Err: err})
++			return nil
++		}
++		rel = filepath.ToSlash(rel)
++		remote := path.Join(base, rel)
++		if r.cfg.Encrypt {
++			remote += ".gpg"
++		}
++		if d.Type()&fs.ModeSymlink != 0 {
++			// Symbolic links are not followed: what they point at is not part
++			// of this tree, and their own size would never match the upload.
++			r.mu.Lock()
++			r.files++
++			r.res.Skipped++
++			r.mu.Unlock()
++			r.emit(Progress{Folder: local, File: rel, Remote: remote, Encrypted: r.cfg.Encrypt})
++			return nil
++		}
++		info, err := d.Info()
++		if err != nil {
++			r.addError(FileError{Local: p, Remote: remote, Err: err})
++			return nil
++		}
++		pd := pending{
++			folder:  local,
++			local:   p,
++			rel:     rel,
++			remote:  remote,
++			size:    info.Size(),
++			modNano: info.ModTime().UnixNano(),
++		}
++		r.mu.Lock()
++		r.files++
++		r.mu.Unlock()
++		if r.unchanged(pd) {
++			r.mu.Lock()
++			r.res.Skipped++
++			r.mu.Unlock()
++			r.emit(Progress{Folder: local, File: rel, Remote: remote, Done: pd.size, Total: pd.size, Encrypted: r.cfg.Encrypt})
++			return nil
++		}
++		out = append(out, pd)
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	sort.SliceStable(out, func(i, j int) bool { return out[i].rel < out[j].rel })
++	return out, nil
++}
++
++// unchanged says whether the state has this file backed up as it is now. A file
++// counts as unchanged when its size and modification time match the entry; an
++// entry without a remote path (one made by hand) still matches, but a remote
++// path that differs, as when encryption was turned on or off, does not: that
++// file goes to another netdisk name and is uploaded again.
++func (r *runner) unchanged(p pending) bool {
++	r.mu.Lock()
++	e, ok := r.st.Entries[p.local]
++	r.mu.Unlock()
++	if !ok || e.Size != p.size || e.ModNano != p.modNano {
++		return false
++	}
++	return e.Remote == "" || e.Remote == p.remote
++}
++
++// ensureDir makes the netdisk directory dir exist, creating each missing level
++// once. The result is cached for the run, failures included.
++func (r *runner) ensureDir(ctx context.Context, dir string) error {
++	if dir == "" || dir == "/" {
++		return nil
++	}
++	if err, ok := r.dirErr[dir]; ok {
++		return err
++	}
++	if r.made[dir] {
++		return nil
++	}
++	for _, level := range levels(r.dest, dir) {
++		parent, name := path.Dir(level), path.Base(level)
++		exists, err := r.has(ctx, parent, name)
++		if err != nil {
++			return err
++		}
++		if exists {
++			continue
++		}
++		if err := r.cl.Mkdir(ctx, level); err != nil {
++			return err
++		}
++		r.mark(parent, name)
++	}
++	r.made[dir] = true
++	return nil
++}
++
++// levels lists the netdisk directories from dest down to dir, in order, dest
++// included: what ensureDir walks.
++func levels(dest, dir string) []string {
++	if dir == "/" {
++		return nil
++	}
++	root := dest
++	if root == "/" {
++		root = ""
++	}
++	var out []string
++	cur := root
++	if root != "" {
++		out = append(out, root)
++	} else {
++		cur = "/"
++	}
++	rest := strings.TrimPrefix(dir, root)
++	rest = strings.TrimPrefix(rest, "/")
++	for _, part := range strings.Split(rest, "/") {
++		if part == "" {
++			continue
++		}
++		cur = path.Join(cur, part)
++		out = append(out, cur)
++	}
++	return out
++}
++
++// has says whether the netdisk directory parent has a child called name,
++// listing parent once per run.
++func (r *runner) has(ctx context.Context, parent, name string) (bool, error) {
++	names, ok := r.listings[parent]
++	if !ok {
++		files, err := r.cl.List(ctx, parent)
++		if err != nil {
++			return false, err
++		}
++		names = make(map[string]bool, len(files))
++		for _, f := range files {
++			names[f.Name] = true
++		}
++		r.listings[parent] = names
++	}
++	return names[name], nil
++}
++
++// mark records that the netdisk directory parent now has the child name.
++func (r *runner) mark(parent, name string) {
++	names, ok := r.listings[parent]
++	if !ok {
++		names = map[string]bool{}
++		r.listings[parent] = names
++	}
++	if name != "" {
++		names[name] = true
++	}
++}
++
++// uploadAll runs the uploads, up to parallel at once, feeding them in the order
++// of jobs so that the netdisk sees a deterministic order of file starts.
++func (r *runner) uploadAll(ctx context.Context, jobs []pending) error {
++	ch := make(chan pending)
++	var wg sync.WaitGroup
++	for i := 0; i < r.parallel; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for p := range ch {
++				if ctx.Err() != nil {
++					return
++				}
++				r.upload(ctx, p)
++			}
++		}()
++	}
++feed:
++	for _, p := range jobs {
++		// The start of a file is reported here, by the one goroutine that
++		// hands the files out, so that the reports come in sorted order
++		// however the workers happen to be scheduled.
++		r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Total: p.size, Encrypted: r.cfg.Encrypt})
++		select {
++		case <-ctx.Done():
++			break feed
++		case ch <- p:
++		}
++	}
++	close(ch)
++	wg.Wait()
++	return ctx.Err()
++}
++
++// upload sends one file, encrypting it first when the run encrypts.
++func (r *runner) upload(ctx context.Context, p pending) {
++	if ctx.Err() != nil {
++		return
++	}
++	local := p.local
++	var temp string
++	if r.cfg.Encrypt {
++		var err error
++		temp, err = r.encrypted(ctx, p)
++		if err != nil {
++			if ctx.Err() == nil {
++				r.fail(p, err)
++			}
++			return
++		}
++		defer os.Remove(temp) // whether the upload works or not
++		local = temp
++	}
++	err := r.cl.Upload(ctx, local, p.remote, func(done, total int64) {
++		r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Done: done, Total: total, Encrypted: r.cfg.Encrypt})
++	})
++	if err != nil {
++		if ctx.Err() != nil {
++			// Canceled: not a failure of this file.
++			return
++		}
++		r.fail(p, err)
++		return
++	}
++	r.mu.Lock()
++	r.st.Entries[p.local] = Entry{Size: p.size, ModNano: p.modNano, Remote: p.remote, At: time.Now()}
++	r.res.Uploaded++
++	r.res.Bytes += p.size
++	r.mu.Unlock()
++	r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Done: p.size, Total: p.size, Encrypted: r.cfg.Encrypt})
++}
++
++// encrypted writes p's file encrypted into a new temporary file in os.TempDir
++// and returns its path. The file is unique to this upload and 0600.
++func (r *runner) encrypted(ctx context.Context, p pending) (string, error) {
++	tmp, err := os.CreateTemp("", TempPrefix+"*.gpg")
++	if err != nil {
++		return "", err
++	}
++	name := tmp.Name()
++	src, err := os.Open(p.local)
++	if err != nil {
++		tmp.Close()
++		os.Remove(name)
++		return "", err
++	}
++	defer src.Close()
++	err = r.enc(tmp, checkedReader{ctx: ctx, r: src}, r.pass)
++	if cerr := tmp.Close(); err == nil {
++		err = cerr
++	}
++	if err != nil {
++		os.Remove(name)
++		return "", err
++	}
++	return name, nil
++}
++
++// checkedReader stops reading when the context is canceled, so that encrypting
++// a large file gives up promptly.
++type checkedReader struct {
++	ctx context.Context
++	r   io.Reader
++}
++
++func (c checkedReader) Read(p []byte) (int, error) {
++	if err := c.ctx.Err(); err != nil {
++		return 0, err
++	}
++	return c.r.Read(p)
++}
++
++// fail records a file that could not be uploaded.
++func (r *runner) fail(p pending, err error) {
++	r.addError(FileError{Local: p.local, Remote: p.remote, Err: err})
++	r.failedFile(p)
++}
++
++// failedFile counts a file as failed and reports the end of it, without
++// recording another error (for the files under a failed directory).
++func (r *runner) failedFile(p pending) {
++	r.mu.Lock()
++	r.res.Failed++
++	r.mu.Unlock()
++	r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Total: p.size, Encrypted: r.cfg.Encrypt})
++}
++
++// addError collects an error of the run.
++func (r *runner) addError(e FileError) {
++	if e.Err == nil {
++		e.Err = errors.New("backup: unknown error")
++	}
++	r.mu.Lock()
++	r.res.Errors = append(r.res.Errors, e)
++	r.mu.Unlock()
++}
++
++// emit reports a progress event with the counters as they are now. It is
++// called from worker goroutines; report must be safe for concurrent use.
++func (r *runner) emit(p Progress) {
++	if r.report == nil {
++		return
++	}
++	r.mu.Lock()
++	p.Files, p.Uploaded, p.Skipped, p.Failed = r.files, r.res.Uploaded, r.res.Skipped, r.res.Failed
++	r.mu.Unlock()
++	r.report(p)
++}
+diff --git a/internal/backup/backup_test.go b/internal/backup/backup_test.go
+new file mode 100644
+index 0000000..100bc0c
+--- /dev/null
++++ b/internal/backup/backup_test.go
+@@ -0,0 +1,1182 @@
++package backup
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++// fakeClient is an in-memory netdisk that records what the engine does.
++type fakeClient struct {
++	mu sync.Mutex
++	// tree holds every directory and file of the fake netdisk by full path;
++	// "/" is always a directory.
++	tree map[string]remoteNode
++
++	lists   []string
++	mkdirs  []string
++	uploads []uploadCall
++
++	failList   map[string]error
++	failMkdir  map[string]error
++	failUpload map[string]error
++
++	// onStart, when set, runs as each upload starts, with the context the
++	// engine passed.
++	onStart func(ctx context.Context, remote string)
++	// hold, when set, makes uploads wait for it to be closed (or the context
++	// to be canceled), so a test can let several run at once.
++	hold chan struct{}
++
++	inFlight    int
++	maxInFlight int
++}
++
++type remoteNode struct {
++	isDir bool
++	data  []byte
++}
++
++type uploadCall struct {
++	local  string
++	remote string
++	size   int64 // of the data uploaded, set once read
++	failed bool
++}
++
++func newFake() *fakeClient {
++	return &fakeClient{
++		tree:       map[string]remoteNode{"/": {isDir: true}},
++		failList:   map[string]error{},
++		failMkdir:  map[string]error{},
++		failUpload: map[string]error{},
++	}
++}
++
++// putDir makes the netdisk directory p (and its parents).
++func (f *fakeClient) putDir(p string) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.putDirLocked(p)
++}
++
++func (f *fakeClient) putDirLocked(p string) {
++	if p == "" || p == "/" {
++		return
++	}
++	parent := path.Dir(p)
++	if parent != "/" {
++		f.putDirLocked(parent)
++	}
++	if n, ok := f.tree[p]; ok && !n.isDir {
++		panic("fakeClient: " + p + " is a file")
++	}
++	f.tree[p] = remoteNode{isDir: true}
++}
++
++// putFile makes a netdisk file, for a destination that exists already.
++func (f *fakeClient) putFile(p, content string) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.putDirLocked(path.Dir(p))
++	f.tree[p] = remoteNode{data: []byte(content)}
++}
++
++// file returns the content of a netdisk file.
++func (f *fakeClient) file(p string) (string, bool) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	n, ok := f.tree[p]
++	return string(n.data), ok && !n.isDir
++}
++
++// isDir says whether a netdisk path is a directory.
++func (f *fakeClient) isDir(p string) bool {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	n, ok := f.tree[p]
++	return ok && n.isDir
++}
++
++// reset forgets the calls of earlier runs but keeps the tree.
++func (f *fakeClient) reset() {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.lists = nil
++	f.mkdirs = nil
++	f.uploads = nil
++	f.inFlight = 0
++	f.maxInFlight = 0
++}
++
++// calls returns copies of what the engine did so far.
++func (f *fakeClient) calls() (lists, mkdirs []string, uploads []uploadCall) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return append([]string(nil), f.lists...), append([]string(nil), f.mkdirs...), append([]uploadCall(nil), f.uploads...)
++}
++
++// concurrency returns the uploads in flight and the most that ever were.
++func (f *fakeClient) concurrency() (inFlight, maxInFlight int) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return f.inFlight, f.maxInFlight
++}
++
++// uploadedRemotes returns the netdisk paths the engine uploaded to, in the
++// order the uploads started.
++func (f *fakeClient) uploadedRemotes() []string {
++	_, _, uploads := f.calls()
++	out := make([]string, len(uploads))
++	for i, u := range uploads {
++		out[i] = u.remote
++	}
++	return out
++}
++
++func (f *fakeClient) List(ctx context.Context, dir string) ([]RemoteFile, error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.lists = append(f.lists, dir)
++	if err := f.failList[dir]; err != nil {
++		return nil, err
++	}
++	n, ok := f.tree[dir]
++	if !ok || !n.isDir {
++		return nil, fmt.Errorf("fake netdisk: %q is not a directory", dir)
++	}
++	var out []RemoteFile
++	for p, node := range f.tree {
++		if p != "/" && path.Dir(p) == dir {
++			out = append(out, RemoteFile{Name: path.Base(p), Size: int64(len(node.data)), IsDir: node.isDir})
++		}
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
++	return out, nil
++}
++
++func (f *fakeClient) Mkdir(ctx context.Context, dir string) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if err := f.failMkdir[dir]; err != nil {
++		return err
++	}
++	if dir == "" || dir == "/" {
++		return fmt.Errorf("fake netdisk: cannot mkdir %q", dir)
++	}
++	if n, ok := f.tree[dir]; ok {
++		if n.isDir {
++			return fmt.Errorf("fake netdisk: %q is there already", dir)
++		}
++		return fmt.Errorf("fake netdisk: %q is a file", dir)
++	}
++	parent := path.Dir(dir)
++	if n, ok := f.tree[parent]; !ok || !n.isDir {
++		return fmt.Errorf("fake netdisk: parent of %q is missing", dir)
++	}
++	f.tree[dir] = remoteNode{isDir: true}
++	f.mkdirs = append(f.mkdirs, dir)
++	return nil
++}
++
++func (f *fakeClient) Upload(ctx context.Context, local, remote string, progress func(done, total int64)) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	f.mu.Lock()
++	idx := len(f.uploads)
++	f.uploads = append(f.uploads, uploadCall{local: local, remote: remote})
++	f.inFlight++
++	if f.inFlight > f.maxInFlight {
++		f.maxInFlight = f.inFlight
++	}
++	hold, hook, fail := f.hold, f.onStart, f.failUpload[remote]
++	parentOK := f.tree[path.Dir(remote)].isDir
++	f.mu.Unlock()
++	defer func() {
++		f.mu.Lock()
++		f.inFlight--
++		f.mu.Unlock()
++	}()
++
++	if hook != nil {
++		hook(ctx, remote)
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if !parentOK {
++		return fmt.Errorf("fake netdisk: parent of %q is missing", remote)
++	}
++	if hold != nil {
++		select {
++		case <-hold:
++		case <-ctx.Done():
++			return ctx.Err()
++		}
++	}
++	data, err := os.ReadFile(local)
++	if err != nil {
++		return err
++	}
++	if progress != nil {
++		progress(int64(len(data)), int64(len(data)))
++	}
++	f.mu.Lock()
++	f.uploads[idx].size = int64(len(data))
++	if fail != nil {
++		f.uploads[idx].failed = true
++	}
++	f.mu.Unlock()
++	if fail != nil {
++		return fail
++	}
++	f.mu.Lock()
++	f.tree[remote] = remoteNode{data: data}
++	f.mu.Unlock()
++	return nil
++}
++
++// reportLog collects the progress reports of a run.
++type reportLog struct {
++	mu     sync.Mutex
++	events []Progress
++}
++
++func (l *reportLog) add(p Progress) {
++	l.mu.Lock()
++	l.events = append(l.events, p)
++	l.mu.Unlock()
++}
++
++func (l *reportLog) all() []Progress {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return append([]Progress(nil), l.events...)
++}
++
++// files returns the events of one file, in order.
++func (l *reportLog) files(file string) []Progress {
++	var out []Progress
++	for _, e := range l.all() {
++		if e.File == file {
++			out = append(out, e)
++		}
++	}
++	return out
++}
++
++// starts returns the events that start a file: Done 0 with a positive total.
++func (l *reportLog) starts() []Progress {
++	var out []Progress
++	for _, e := range l.all() {
++		if e.Done == 0 && e.Total > 0 {
++			out = append(out, e)
++		}
++	}
++	return out
++}
++
++// write makes a local file, and the directories above it.
++func write(t *testing.T, dir, name, content string) string {
++	t.Helper()
++	p := filepath.Join(dir, filepath.FromSlash(name))
++	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	return p
++}
++
++// rewrite changes a local file's content and sets its modification time
++// explicitly, so that a test knows whether it changed.
++func rewrite(t *testing.T, p, content string, mtime time.Time) {
++	t.Helper()
++	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chtimes(p, mtime, mtime); err != nil {
++		t.Fatal(err)
++	}
++}
++
++// waitFor waits for a condition, failing the test if it takes too long.
++func waitFor(t *testing.T, what string, cond func() bool) {
++	t.Helper()
++	deadline := time.Now().Add(5 * time.Second)
++	for time.Now().Before(deadline) {
++		if cond() {
++			return
++		}
++		time.Sleep(time.Millisecond)
++	}
++	t.Fatalf("timed out waiting for %s", what)
++}
++
++// tempLeftovers lists the engine's staging files left in os.TempDir().
++func tempLeftovers(t *testing.T) []string {
++	t.Helper()
++	entries, err := os.ReadDir(os.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	var out []string
++	for _, e := range entries {
++		if strings.HasPrefix(e.Name(), TempPrefix) {
++			out = append(out, filepath.Join(os.TempDir(), e.Name()))
++		}
++	}
++	return out
++}
++
++// TestFirstRun checks that a first run uploads the whole tree, makes the
++// netdisk folders, and reports progress for every file.
++func TestFirstRun(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "hello")
++	write(t, dir, "sub/b.txt", "world!")
++
++	cl := newFake()
++	log := &reportLog{}
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir}}}
++	res, err := Run(context.Background(), cl, cfg, NewState(), "", log.add)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Folders != 1 || res.Uploaded != 2 || res.Skipped != 0 || res.Failed != 0 {
++		t.Fatalf("result = %+v, want 1 folder, 2 uploaded", res)
++	}
++	if res.Bytes != int64(len("hello")+len("world!")) {
++		t.Errorf("Bytes = %d, want %d", res.Bytes, len("hello")+len("world!"))
++	}
++	if len(res.Errors) != 0 {
++		t.Errorf("errors = %v, want none", res.Errors)
++	}
++	folder := filepath.Base(dir) // the default remote name
++	for name, want := range map[string]string{
++		"a.txt":     "hello",
++		"sub/b.txt": "world!",
++	} {
++		remote := path.Join("/备份", folder, name)
++		if got, ok := cl.file(remote); !ok || got != want {
++			t.Errorf("%s = %q, %v; want %q", remote, got, ok, want)
++		}
++	}
++	_, mkdirs, _ := cl.calls()
++	want := []string{"/备份", path.Join("/备份", folder), path.Join("/备份", folder, "sub")}
++	if strings.Join(mkdirs, ",") != strings.Join(want, ",") {
++		t.Errorf("mkdirs = %v, want %v", mkdirs, want)
++	}
++
++	for _, name := range []string{"a.txt", "sub/b.txt"} {
++		events := log.files(name)
++		if len(events) < 2 {
++			t.Errorf("%s: %d progress events, want a start and an end", name, len(events))
++			continue
++		}
++		if events[0].Done != 0 || events[0].Total == 0 {
++			t.Errorf("%s: first event = %+v, want the start", name, events[0])
++		}
++		last := events[len(events)-1]
++		if last.Done != last.Total || last.Done == 0 {
++			t.Errorf("%s: last event = %+v, want the end", name, last)
++		}
++		if last.Folder != dir || last.Remote != path.Join("/备份", folder, name) {
++			t.Errorf("%s: event = %+v, want folder %q", name, last, dir)
++		}
++		if last.Encrypted {
++			t.Errorf("%s: event says encrypted, but the run does not encrypt", name)
++		}
++	}
++}
++
++// TestSecondRunSkips checks that an unchanged second run skips everything and
++// touches the netdisk not at all, with the state read back from its file.
++func TestSecondRunSkips(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "hello")
++	write(t, dir, "sub/b.txt", "world!")
++
++	cl := newFake()
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}}
++	ctx := context.Background()
++	st := NewState()
++	if _, err := Run(ctx, cl, cfg, st, "", nil); err != nil {
++		t.Fatalf("first Run: %v", err)
++	}
++	statePath := filepath.Join(t.TempDir(), "state.json")
++	if err := st.Save(statePath); err != nil {
++		t.Fatalf("Save: %v", err)
++	}
++	loaded := LoadState(statePath)
++	if len(loaded.Entries) != 2 {
++		t.Fatalf("state has %d entries, want 2", len(loaded.Entries))
++	}
++
++	cl.reset()
++	res, err := Run(ctx, cl, cfg, loaded, "", nil)
++	if err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if res.Uploaded != 0 || res.Skipped != 2 || res.Failed != 0 || res.Bytes != 0 {
++		t.Errorf("result = %+v, want 2 skipped, nothing else", res)
++	}
++	lists, mkdirs, uploads := cl.calls()
++	if len(lists)+len(mkdirs)+len(uploads) != 0 {
++		t.Errorf("second run touched the netdisk: lists %v, mkdirs %v, uploads %d", lists, mkdirs, len(uploads))
++	}
++	if got, ok := cl.file("/备份/照片/a.txt"); !ok || got != "hello" {
++		t.Errorf("a.txt = %q, %v; the first run's copy should still be there", got, ok)
++	}
++}
++
++// TestChangedFileReuploaded checks that a file changed with its size kept is
++// uploaded again, that a renamed file goes to a new, added remote path, and
++// that nothing old is deleted.
++func TestChangedFileReuploaded(t *testing.T) {
++	dir := t.TempDir()
++	a := write(t, dir, "a.txt", "hello")
++	write(t, dir, "b.txt", "keep me")
++	ctx := context.Background()
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}}
++
++	cl := newFake()
++	st := NewState()
++	if _, err := Run(ctx, cl, cfg, st, "", nil); err != nil {
++		t.Fatalf("first Run: %v", err)
++	}
++
++	rewrite(t, a, "HELLO", time.Now().Add(time.Hour)) // same size, other content
++	cl.reset()
++	res, err := Run(ctx, cl, cfg, st, "", nil)
++	if err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if res.Uploaded != 1 || res.Skipped != 1 {
++		t.Fatalf("result = %+v, want 1 uploaded, 1 skipped", res)
++	}
++	remotes := cl.uploadedRemotes()
++	if len(remotes) != 1 || remotes[0] != "/备份/照片/a.txt" {
++		t.Errorf("uploaded %v, want only a.txt", remotes)
++	}
++	if got, _ := cl.file("/备份/照片/a.txt"); got != "HELLO" {
++		t.Errorf("a.txt = %q, want HELLO", got)
++	}
++	if got, _ := cl.file("/备份/照片/b.txt"); got != "keep me" {
++		t.Errorf("b.txt = %q, want it untouched", got)
++	}
++
++	// A rename is a new local path, so a new remote path: the file is
++	// uploaded again, and the copy under the old name is left alone.
++	renamed := filepath.Join(dir, "renamed.txt")
++	if err := os.Rename(a, renamed); err != nil {
++		t.Fatal(err)
++	}
++	cl.reset()
++	res, err = Run(ctx, cl, cfg, st, "", nil)
++	if err != nil {
++		t.Fatalf("third Run: %v", err)
++	}
++	if res.Uploaded != 1 || res.Skipped != 1 {
++		t.Fatalf("result = %+v, want 1 uploaded, 1 skipped", res)
++	}
++	if remotes := cl.uploadedRemotes(); len(remotes) != 1 || remotes[0] != "/备份/照片/renamed.txt" {
++		t.Errorf("uploaded %v, want renamed.txt", remotes)
++	}
++	if got, ok := cl.file("/备份/照片/a.txt"); !ok || got != "HELLO" {
++		t.Errorf("the old remote file was deleted or changed: %q, %v", got, ok)
++	}
++	if got, _ := cl.file("/备份/照片/renamed.txt"); got != "HELLO" {
++		t.Errorf("renamed.txt = %q, want HELLO", got)
++	}
++}
++
++// TestNestedFolders checks that netdisk folders are made one level at a time,
++// only where they are missing, and only for directories that hold files.
++func TestNestedFolders(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "a")
++	write(t, dir, "sub/b.txt", "b")
++	write(t, dir, "sub/deep/c.txt", "c")
++	if err := os.MkdirAll(filepath.Join(dir, "empty", "deeper"), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	ctx := context.Background()
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}}
++
++	cl := newFake()
++	if _, err := Run(ctx, cl, cfg, NewState(), "", nil); err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	_, mkdirs, _ := cl.calls()
++	want := []string{"/备份", "/备份/照片", "/备份/照片/sub", "/备份/照片/sub/deep"}
++	if strings.Join(mkdirs, ",") != strings.Join(want, ",") {
++		t.Errorf("mkdirs = %v, want %v", mkdirs, want)
++	}
++	if cl.isDir("/备份/照片/empty") || cl.isDir("/备份/照片/empty/deeper") {
++		t.Error("an empty local directory was mirrored, but nothing in it is to be uploaded")
++	}
++
++	cl.reset()
++	if _, err := Run(ctx, cl, cfg, NewState(), "", nil); err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if _, mkdirs, _ := cl.calls(); len(mkdirs) != 0 {
++		t.Errorf("mkdirs on a tree that exists = %v, want none", mkdirs)
++	}
++
++	// A folder that is there already is not made again.
++	cl = newFake()
++	cl.putDir("/备份/照片")
++	dir2 := t.TempDir()
++	write(t, dir2, "a.txt", "a")
++	write(t, dir2, "sub/deep/c.txt", "c")
++	cfg2 := Config{Dest: "/备份", Folders: []Folder{{Local: dir2, Remote: "照片"}}}
++	if _, err := Run(ctx, cl, cfg2, NewState(), "", nil); err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	_, mkdirs, _ = cl.calls()
++	want = []string{"/备份/照片/sub", "/备份/照片/sub/deep"}
++	if strings.Join(mkdirs, ",") != strings.Join(want, ",") {
++		t.Errorf("mkdirs = %v, want %v", mkdirs, want)
++	}
++}
++
++// TestExclusions checks that the default and configured names are skipped at
++// any depth.
++func TestExclusions(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "keep.txt", "keep")
++	write(t, dir, ".git/config", "git")
++	write(t, dir, "sub/node_modules/x.js", "nm")
++	write(t, dir, ".cache/c", "cache")
++	write(t, dir, "sub/.Trash/t", "trash")
++	write(t, dir, "sub/.DS_Store", "ds")
++	write(t, dir, "Thumbs.db", "thumbs")
++	write(t, dir, "~$doc.docx", "lock")
++	write(t, dir, "secret.log", "secret")
++
++	cl := newFake()
++	cfg := Config{
++		Dest:    "/备份",
++		Folders: []Folder{{Local: dir, Remote: "照片"}},
++		Exclude: []string{"secret.log"},
++	}
++	res, err := Run(context.Background(), cl, cfg, NewState(), "", nil)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Uploaded != 1 || res.Skipped != 0 || res.Failed != 0 {
++		t.Errorf("result = %+v, want only keep.txt", res)
++	}
++	if remotes := cl.uploadedRemotes(); len(remotes) != 1 || remotes[0] != "/备份/照片/keep.txt" {
++		t.Errorf("uploaded %v, want only keep.txt", remotes)
++	}
++}
++
++// markerEncrypt is a fake EncryptStream: it writes a marker, then the source.
++func markerEncrypt(dst io.Writer, src io.Reader, passphrase string) error {
++	if _, err := io.WriteString(dst, "ENCRYPTED:"+passphrase+":"); err != nil {
++		return err
++	}
++	_, err := io.Copy(dst, src)
++	return err
++}
++
++// TestEncryption checks that encrypted uploads carry the encrypted bytes to a
++// ".gpg" name, and that the staging files are unique, in os.TempDir, and
++// removed afterwards.
++func TestEncryption(t *testing.T) {
++	before := tempLeftovers(t)
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "hello")
++	write(t, dir, "b.txt", "world!")
++
++	cl := newFake()
++	maxTemp := 0
++	var tempMu sync.Mutex
++	cl.onStart = func(ctx context.Context, remote string) {
++		leftovers := tempLeftovers(t)
++		tempMu.Lock()
++		if len(leftovers) > maxTemp {
++			maxTemp = len(leftovers)
++		}
++		tempMu.Unlock()
++	}
++	log := &reportLog{}
++	cfg := Config{
++		Dest:          "/备份",
++		Folders:       []Folder{{Local: dir, Remote: "照片"}},
++		Encrypt:       true,
++		EncryptStream: markerEncrypt,
++		Parallel:      2,
++	}
++	st := NewState()
++	res, err := Run(context.Background(), cl, cfg, st, "pw", log.add)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Uploaded != 2 || res.Failed != 0 {
++		t.Fatalf("result = %+v, want 2 uploaded", res)
++	}
++
++	_, _, uploads := cl.calls()
++	if len(uploads) != 2 {
++		t.Fatalf("%d uploads, want 2", len(uploads))
++	}
++	temps := map[string]bool{}
++	for _, u := range uploads {
++		if !strings.HasSuffix(u.remote, ".gpg") {
++			t.Errorf("%s does not end with .gpg", u.remote)
++		}
++		if filepath.Dir(u.local) != filepath.Clean(os.TempDir()) {
++			t.Errorf("staging file %q is not in %q", u.local, os.TempDir())
++		}
++		if temps[u.local] {
++			t.Errorf("staging file %q was used twice", u.local)
++		}
++		temps[u.local] = true
++		if _, err := os.Stat(u.local); !errors.Is(err, os.ErrNotExist) {
++			t.Errorf("staging file %q was not removed: %v", u.local, err)
++		}
++	}
++	want := map[string]string{
++		"/备份/照片/a.txt.gpg": "ENCRYPTED:pw:hello",
++		"/备份/照片/b.txt.gpg": "ENCRYPTED:pw:world!",
++	}
++	for remote, content := range want {
++		if got, ok := cl.file(remote); !ok || got != content {
++			t.Errorf("%s = %q, %v; want %q", remote, got, ok, content)
++		}
++	}
++	if maxTemp > cfg.Parallel {
++		t.Errorf("%d staging files existed at once, more than Parallel %d", maxTemp, cfg.Parallel)
++	}
++	for _, e := range log.all() {
++		if !e.Encrypted {
++			t.Errorf("progress %+v says not encrypted, but the run encrypts", e)
++		}
++	}
++	if len(tempLeftovers(t)) != len(before) {
++		t.Errorf("staging files were left behind: before %v, after %v", before, tempLeftovers(t))
++	}
++	// The state records the .gpg name, so the next run skips the files.
++	if got := st.Entries[filepath.Join(dir, "a.txt")].Remote; got != "/备份/照片/a.txt.gpg" {
++		t.Errorf("state remote = %q, want the .gpg name", got)
++	}
++	cl.reset()
++	res, err = Run(context.Background(), cl, cfg, st, "pw", nil)
++	if err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if res.Uploaded != 0 || res.Skipped != 2 {
++		t.Errorf("second result = %+v, want 2 skipped", res)
++	}
++}
++
++// TestEncryptionTempRemovedOnFailure checks that a failed encrypted upload
++// still removes its staging file, and that the file is retried next run.
++func TestEncryptionTempRemovedOnFailure(t *testing.T) {
++	before := tempLeftovers(t)
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "hello")
++	remote := "/备份/照片/a.txt.gpg"
++
++	cl := newFake()
++	cl.failUpload[remote] = errors.New("netdisk refused")
++	cfg := Config{
++		Dest:          "/备份",
++		Folders:       []Folder{{Local: dir, Remote: "照片"}},
++		Encrypt:       true,
++		EncryptStream: markerEncrypt,
++	}
++	st := NewState()
++	res, err := Run(context.Background(), cl, cfg, st, "pw", nil)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Failed != 1 || res.Uploaded != 0 || len(res.Errors) != 1 {
++		t.Fatalf("result = %+v, want one failure", res)
++	}
++	_, _, uploads := cl.calls()
++	if len(uploads) != 1 {
++		t.Fatalf("%d uploads, want 1", len(uploads))
++	}
++	if _, err := os.Stat(uploads[0].local); !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("staging file %q was not removed after the failure", uploads[0].local)
++	}
++	if len(tempLeftovers(t)) != len(before) {
++		t.Errorf("staging files were left behind: before %v, after %v", before, tempLeftovers(t))
++	}
++	if _, ok := st.Entries[filepath.Join(dir, "a.txt")]; ok {
++		t.Error("a failed file was recorded in the state, so the next run would skip it")
++	}
++
++	// The next run retries it.
++	cl.failUpload = map[string]error{}
++	cl.reset()
++	if _, err := Run(context.Background(), cl, cfg, st, "pw", nil); err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if got, ok := cl.file(remote); !ok || !strings.HasPrefix(got, "ENCRYPTED:pw:") {
++		t.Errorf("%s = %q, %v; want the retried file", remote, got, ok)
++	}
++}
++
++// TestCancel checks that canceling the context stops the run promptly and
++// returns context.Canceled, keeping the files done before.
++func TestCancel(t *testing.T) {
++	dir := t.TempDir()
++	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"} {
++		write(t, dir, name, "content of "+name)
++	}
++	cl := newFake()
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	cl.onStart = func(ctx context.Context, remote string) {
++		cancel()
++	}
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}, Parallel: 1}
++	start := time.Now()
++	res, err := Run(ctx, cl, cfg, NewState(), "", nil)
++	if !errors.Is(err, context.Canceled) {
++		t.Fatalf("err = %v, want context.Canceled", err)
++	}
++	if d := time.Since(start); d > 5*time.Second {
++		t.Errorf("cancellation took %v", d)
++	}
++	if res.Uploaded != 0 || res.Failed != 0 {
++		t.Errorf("result = %+v, want nothing uploaded and no failure", res)
++	}
++	if got := len(cl.uploadedRemotes()); got != 1 {
++		t.Errorf("%d uploads started after the cancel, want 1", got)
++	}
++}
++
++// TestUploadFailureContinues checks that one failed file neither stops the
++// others nor is recorded in the state, and that the next run retries it.
++func TestUploadFailureContinues(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "a")
++	write(t, dir, "b.txt", "b")
++	write(t, dir, "c.txt", "c")
++	remoteB := "/备份/照片/b.txt"
++
++	cl := newFake()
++	cl.failUpload[remoteB] = errors.New("netdisk refused")
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}}
++	st := NewState()
++	res, err := Run(context.Background(), cl, cfg, st, "", nil)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Uploaded != 2 || res.Failed != 1 || res.Skipped != 0 {
++		t.Fatalf("result = %+v, want 2 uploaded and 1 failed", res)
++	}
++	if len(res.Errors) != 1 || res.Errors[0].Local != filepath.Join(dir, "b.txt") || res.Errors[0].Remote != remoteB {
++		t.Errorf("errors = %+v, want one for b.txt", res.Errors)
++	}
++	if _, ok := st.Entries[filepath.Join(dir, "b.txt")]; ok {
++		t.Error("the failed file was recorded in the state")
++	}
++	for _, name := range []string{"a.txt", "c.txt"} {
++		if _, ok := cl.file("/备份/照片/" + name); !ok {
++			t.Errorf("%s was not uploaded", name)
++		}
++	}
++
++	cl.failUpload = map[string]error{}
++	cl.reset()
++	res, err = Run(context.Background(), cl, cfg, st, "", nil)
++	if err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if res.Uploaded != 1 || res.Skipped != 2 || res.Failed != 0 {
++		t.Errorf("second result = %+v, want 1 uploaded and 2 skipped", res)
++	}
++	if remotes := cl.uploadedRemotes(); len(remotes) != 1 || remotes[0] != remoteB {
++		t.Errorf("second run uploaded %v, want only b.txt", remotes)
++	}
++	if got, ok := cl.file(remoteB); !ok || got != "b" {
++		t.Errorf("b.txt = %q, %v; want it uploaded on the retry", got, ok)
++	}
++}
++
++// TestMkdirFailureContinues checks that a folder that cannot be made is
++// collected once and counts its files as failed, without stopping the rest.
++func TestMkdirFailureContinues(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "a")
++	write(t, dir, "sub/b.txt", "b")
++	write(t, dir, "sub/c.txt", "c")
++	badDir := "/备份/照片/sub"
++
++	cl := newFake()
++	cl.failMkdir[badDir] = errors.New("netdisk refused")
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}}
++	st := NewState()
++	res, err := Run(context.Background(), cl, cfg, st, "", nil)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Uploaded != 1 || res.Failed != 2 {
++		t.Fatalf("result = %+v, want 1 uploaded and 2 failed", res)
++	}
++	if len(res.Errors) != 1 || res.Errors[0].Remote != badDir {
++		t.Errorf("errors = %+v, want one for %s", res.Errors, badDir)
++	}
++	if _, ok := cl.file("/备份/照片/a.txt"); !ok {
++		t.Error("a.txt was not uploaded")
++	}
++
++	cl.failMkdir = map[string]error{}
++	cl.reset()
++	res, err = Run(context.Background(), cl, cfg, st, "", nil)
++	if err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if res.Uploaded != 2 || res.Failed != 0 {
++		t.Errorf("second result = %+v, want the two files under sub uploaded", res)
++	}
++}
++
++// TestDeterministicOrder checks that the files are handed out in path order,
++// whatever the parallel setting is.
++func TestDeterministicOrder(t *testing.T) {
++	dir := t.TempDir()
++	names := []string{"b.txt", "a.txt", "d/c.txt", "d/a.txt", "z.txt", "e/f/g.txt"}
++	for _, name := range names {
++		write(t, dir, name, name)
++	}
++	want := []string{
++		"/备份/照片/a.txt",
++		"/备份/照片/b.txt",
++		"/备份/照片/d/a.txt",
++		"/备份/照片/d/c.txt",
++		"/备份/照片/e/f/g.txt",
++		"/备份/照片/z.txt",
++	}
++	var orders [][]string
++	for _, parallel := range []int{1, 3, 4} {
++		cl := newFake()
++		log := &reportLog{}
++		cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}, Parallel: parallel}
++		if _, err := Run(context.Background(), cl, cfg, NewState(), "", log.add); err != nil {
++			t.Fatalf("Run: %v", err)
++		}
++		var order []string
++		for _, e := range log.starts() {
++			order = append(order, e.Remote)
++		}
++		if strings.Join(order, ",") != strings.Join(want, ",") {
++			t.Errorf("parallel %d: upload start order = %v, want %v", parallel, order, want)
++		}
++		uploaded := cl.uploadedRemotes()
++		sort.Strings(uploaded)
++		sorted := append([]string(nil), want...)
++		sort.Strings(sorted)
++		if strings.Join(uploaded, ",") != strings.Join(sorted, ",") {
++			t.Errorf("parallel %d: uploaded %v, want %v", parallel, uploaded, sorted)
++		}
++		orders = append(orders, order)
++	}
++	for i := 1; i < len(orders); i++ {
++		if strings.Join(orders[i], ",") != strings.Join(orders[0], ",") {
++			t.Errorf("order depends on Parallel: %v vs %v", orders[0], orders[i])
++		}
++	}
++}
++
++// TestParallelLimit checks that at most Parallel uploads run at once, that a
++// zero Parallel means DefaultParallel, and that a huge one is capped.
++func TestParallelLimit(t *testing.T) {
++	cases := []struct {
++		parallel int
++		want     int
++	}{
++		{parallel: 1, want: 1},
++		{parallel: 3, want: 3},
++		{parallel: 0, want: DefaultParallel},
++		{parallel: 99, want: MaxParallel},
++	}
++	for _, tc := range cases {
++		t.Run(fmt.Sprintf("parallel=%d", tc.parallel), func(t *testing.T) {
++			dir := t.TempDir()
++			for i := 0; i < 6; i++ {
++				write(t, dir, fmt.Sprintf("f%d.txt", i), "content")
++			}
++			cl := newFake()
++			cl.hold = make(chan struct{})
++			cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}, Parallel: tc.parallel}
++			done := make(chan error, 1)
++			go func() {
++				_, err := Run(context.Background(), cl, cfg, NewState(), "", nil)
++				done <- err
++			}()
++			waitFor(t, fmt.Sprintf("%d uploads in flight", tc.want), func() bool {
++				_, max := cl.concurrency()
++				return max >= tc.want
++			})
++			time.Sleep(30 * time.Millisecond) // let a worker too many start, if the cap were wrong
++			close(cl.hold)
++			if err := <-done; err != nil {
++				t.Fatalf("Run: %v", err)
++			}
++			_, max := cl.concurrency()
++			if max != tc.want {
++				t.Errorf("%d uploads ran at once, want %d", max, tc.want)
++			}
++			if got := len(cl.uploadedRemotes()); got != 6 {
++				t.Errorf("%d files uploaded, want 6", got)
++			}
++		})
++	}
++}
++
++// TestStateRoundTrip checks the state file: where it goes, its mode, and what
++// loading it back gives, including the files it tolerates being wrong.
++func TestStateRoundTrip(t *testing.T) {
++	dir := t.TempDir()
++	when := time.Now().Round(0)
++
++	st := NewState()
++	if st.Version != StateVersion || st.Entries == nil {
++		t.Fatalf("new state = %+v", st)
++	}
++	p := filepath.Join(dir, "profile", "backup-state.json") // the directory is made
++	st.Entries["/home/me/照片/a.jpg"] = Entry{Size: 42, ModNano: 1234, Remote: "/备份/照片/a.jpg", At: when}
++	if err := st.Save(p); err != nil {
++		t.Fatalf("Save: %v", err)
++	}
++	info, err := os.Stat(p)
++	if err != nil {
++		t.Fatalf("Stat: %v", err)
++	}
++	if perm := info.Mode().Perm(); perm != 0o600 {
++		t.Errorf("mode = %o, want 600", perm)
++	}
++	loaded := LoadState(p)
++	if loaded.Version != StateVersion || len(loaded.Entries) != 1 {
++		t.Fatalf("loaded = %+v", loaded)
++	}
++	got, ok := loaded.Entries["/home/me/照片/a.jpg"]
++	if !ok || got.Size != 42 || got.ModNano != 1234 || got.Remote != "/备份/照片/a.jpg" || !got.At.Equal(when) {
++		t.Errorf("entry = %+v, %v", got, ok)
++	}
++
++	// Saving again replaces the file, keeping one entry.
++	st.Entries["/home/me/照片/b.jpg"] = Entry{Size: 1}
++	if err := st.Save(p); err != nil {
++		t.Fatalf("second Save: %v", err)
++	}
++	if got := len(LoadState(p).Entries); got != 2 {
++		t.Errorf("%d entries after the second save, want 2", got)
++	}
++	if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(p), ".backup-state-*")); len(leftovers) != 0 {
++		t.Errorf("temporary state files were left behind: %v", leftovers)
++	}
++
++	if got := LoadState(filepath.Join(dir, "nothing-here.json")); got.Version != StateVersion || len(got.Entries) != 0 {
++		t.Errorf("missing file loaded as %+v, want an empty state", got)
++	}
++	corrupt := filepath.Join(dir, "corrupt.json")
++	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if got := LoadState(corrupt); got.Version != StateVersion || len(got.Entries) != 0 {
++		t.Errorf("corrupt file loaded as %+v, want an empty state", got)
++	}
++	old := filepath.Join(dir, "old.json")
++	if err := os.WriteFile(old, []byte(`{"version":0,"entries":{"/a":{"size":1}}}`), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if got := LoadState(old); len(got.Entries) != 0 {
++		t.Errorf("state of another version loaded as %+v, want an empty state", got)
++	}
++
++	var nilState *State
++	if err := nilState.Save(filepath.Join(dir, "x.json")); err == nil {
++		t.Error("saving a nil state succeeded, want an error")
++	}
++	if err := st.Save(""); err == nil {
++		t.Error("saving to an empty path succeeded, want an error")
++	}
++}
++
++// TestRunErrors checks the errors a run refuses to start with.
++func TestRunErrors(t *testing.T) {
++	ctx := context.Background()
++	cl := newFake()
++	if _, err := Run(ctx, nil, Config{Dest: "/备份"}, NewState(), "", nil); err == nil {
++		t.Error("a run without a client succeeded")
++	}
++	if _, err := Run(ctx, cl, Config{Dest: "  "}, NewState(), "", nil); err == nil {
++		t.Error("a run without a destination succeeded")
++	}
++	// A passphrase is needed to encrypt, and nothing is uploaded without one.
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "a")
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}, Encrypt: true}
++	var calls int
++	cfg.EncryptStream = func(dst io.Writer, src io.Reader, passphrase string) error {
++		calls++
++		_, err := io.Copy(dst, src)
++		return err
++	}
++	if _, err := Run(ctx, cl, cfg, NewState(), "", nil); err == nil {
++		t.Error("encryption without a passphrase succeeded")
++	}
++	if calls != 0 {
++		t.Errorf("%d encryption calls without a passphrase, want none", calls)
++	}
++}
++
++// TestEmptyAndMissingFolders checks that a folder with nothing in it makes no
++// netdisk folder and uploads nothing, and that a missing one is an error of
++// its own without aborting the other folders.
++func TestEmptyAndMissingFolders(t *testing.T) {
++	empty := t.TempDir()
++	good := t.TempDir()
++	write(t, good, "a.txt", "a")
++	missing := filepath.Join(t.TempDir(), "gone")
++
++	cl := newFake()
++	cfg := Config{Dest: "备份", Folders: []Folder{
++		{Local: empty, Remote: "空"},
++		{Local: missing, Remote: "丢失"},
++		{Local: good, Remote: "照片"},
++	}}
++	res, err := Run(context.Background(), cl, cfg, NewState(), "", nil)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Folders != 3 || res.Uploaded != 1 || res.Skipped != 0 {
++		t.Errorf("result = %+v, want 3 folders and 1 uploaded", res)
++	}
++	if len(res.Errors) != 1 || res.Errors[0].Local != missing {
++		t.Errorf("errors = %+v, want one for the missing folder", res.Errors)
++	}
++	if cl.isDir("/备份/空") {
++		t.Error("an empty folder was mirrored to the netdisk")
++	}
++	if got, ok := cl.file("/备份/照片/a.txt"); !ok || got != "a" {
++		t.Errorf("a.txt = %q, %v; the destination without a leading slash should work", got, ok)
++	}
++}
++
++// TestNoDeletes checks that the engine never deletes anything, locally or on
++// the netdisk, even when local files go away.
++func TestNoDeletes(t *testing.T) {
++	dir := t.TempDir()
++	a := write(t, dir, "a.txt", "a")
++	write(t, dir, "b.txt", "b")
++	ctx := context.Background()
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}}
++	cl := newFake()
++	st := NewState()
++	if _, err := Run(ctx, cl, cfg, st, "", nil); err != nil {
++		t.Fatalf("first Run: %v", err)
++	}
++	// Remove a local file and a whole directory, then run again.
++	if err := os.Remove(a); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Remove(filepath.Join(dir, "b.txt")); err != nil {
++		t.Fatal(err)
++	}
++	cl.reset()
++	res, err := Run(ctx, cl, cfg, st, "", nil)
++	if err != nil {
++		t.Fatalf("second Run: %v", err)
++	}
++	if res.Uploaded != 0 || res.Skipped != 0 || len(res.Errors) != 0 {
++		t.Errorf("result = %+v, want nothing to do", res)
++	}
++	for _, name := range []string{"a.txt", "b.txt"} {
++		if _, ok := cl.file("/备份/照片/" + name); !ok {
++			t.Errorf("%s was deleted from the netdisk, but nothing may be deleted", name)
++		}
++	}
++}
++
++// TestBytesCountSealedFile checks that the bytes counted are the local file's,
++// not the encrypted copy's.
++func TestBytesCountSealedFile(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "hello")
++	cl := newFake()
++	cfg := Config{
++		Dest:          "/备份",
++		Folders:       []Folder{{Local: dir, Remote: "照片"}},
++		Encrypt:       true,
++		EncryptStream: markerEncrypt,
++	}
++	res, err := Run(context.Background(), cl, cfg, NewState(), "pw", nil)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Bytes != int64(len("hello")) {
++		t.Errorf("Bytes = %d, want the local size %d", res.Bytes, len("hello"))
++	}
++}
++
++// TestFileErrorText checks that a FileError says what failed where.
++func TestFileErrorText(t *testing.T) {
++	e := FileError{Local: "/l/a.txt", Remote: "/r/a.txt", Err: errors.New("boom")}
++	if got := e.Error(); !strings.Contains(got, "/l/a.txt") || !strings.Contains(got, "/r/a.txt") || !strings.Contains(got, "boom") {
++		t.Errorf("Error() = %q, want the paths and the cause", got)
++	}
++	if !errors.Is(e, e.Err) {
++		t.Error("a FileError does not unwrap to its cause")
++	}
++	if got := (FileError{Local: "/l/a.txt", Err: errors.New("boom")}).Error(); !strings.Contains(got, "/l/a.txt") {
++		t.Errorf("Error() without a remote = %q", got)
++	}
++}
++
++// TestNilEntriesState checks that a state made by hand, with no entries map,
++// works: it is a full run, and the entries it records fill the map.
++func TestNilEntriesState(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "a")
++	cl := newFake()
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}}
++	st := &State{Version: StateVersion}
++	if _, err := Run(context.Background(), cl, cfg, st, "", nil); err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if len(st.Entries) != 1 {
++		t.Errorf("%d entries recorded, want 1", len(st.Entries))
++	}
++}
++
++// TestDefaultExcludes checks that the defaults the settings page shows are the
++// names the run skips.
++func TestDefaultExcludes(t *testing.T) {
++	got := DefaultExcludes()
++	want := []string{".git", "node_modules", ".cache", ".Trash", ".DS_Store", "Thumbs.db"}
++	if strings.Join(got, ",") != strings.Join(want, ",") {
++		t.Errorf("DefaultExcludes() = %v, want %v", got, want)
++	}
++	got[0] = "changed"
++	if DefaultExcludes()[0] != ".git" {
++		t.Error("DefaultExcludes() returns a slice the caller can change under it")
++	}
++}
+diff --git a/internal/backup/pgp_bridge.go b/internal/backup/pgp_bridge.go
+new file mode 100644
+index 0000000..37d0200
+--- /dev/null
++++ b/internal/backup/pgp_bridge.go
+@@ -0,0 +1,12 @@
++package backup
++
++import (
++	"github.com/pengstem/baidunetgo/internal/pgp"
++)
++
++// init wires the internal/pgp package in, so that a run that encrypts with no
++// Config.EncryptStream of its own still encrypts: the engine then calls
++// pgp.Encrypt, whose ".gpg" suffix is the one Run appends to the netdisk name.
++func init() {
++	pgpEncrypt = pgp.Encrypt
++}
+diff --git a/internal/backup/pgp_integration_test.go b/internal/backup/pgp_integration_test.go
+new file mode 100644
+index 0000000..d2e8f1c
+--- /dev/null
++++ b/internal/backup/pgp_integration_test.go
+@@ -0,0 +1,89 @@
++package backup
++
++import (
++	"bytes"
++	"context"
++	"path"
++	"strings"
++	"testing"
++
++	"github.com/pengstem/baidunetgo/internal/pgp"
++)
++
++// TestEncryptWithRealPGP checks the encryption the app actually uses: a run
++// with Encrypt set and no EncryptStream of its own encrypts through
++// internal/pgp (the bridge), and what lands on the netdisk decrypts with
++// pgp.Decrypt back to the original bytes.
++func TestEncryptWithRealPGP(t *testing.T) {
++	const passphrase = "correct horse battery staple"
++	dir := t.TempDir()
++	files := map[string]string{
++		"photo.txt":     strings.Repeat("backup me, please. ", 500) + "\n中文和字节 12345\n",
++		"sub/notes.txt": "another file, small one",
++		"empty.txt":     "",
++	}
++	for name, content := range files {
++		write(t, dir, name, content)
++	}
++
++	cl := newFake()
++	before := tempLeftovers(t)
++	cfg := Config{
++		Dest:    "/备份",
++		Folders: []Folder{{Local: dir, Remote: "照片"}},
++		Encrypt: true,
++		// EncryptStream left nil: the pgp bridge must stand in.
++		Parallel: 2,
++	}
++	res, err := Run(context.Background(), cl, cfg, NewState(), passphrase, nil)
++	if err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if res.Uploaded != len(files) || res.Failed != 0 || len(res.Errors) != 0 {
++		t.Fatalf("result = %+v, want %d uploaded", res, len(files))
++	}
++	if len(tempLeftovers(t)) != len(before) {
++		t.Errorf("staging files were left behind: before %v, after %v", before, tempLeftovers(t))
++	}
++
++	remotes := map[string]string{}
++	for _, u := range mustUploads(t, cl) {
++		remotes[u.remote] = u.local
++	}
++	for name, want := range files {
++		remote := path.Join("/备份/照片", name+pgp.Suffix)
++		if !strings.HasSuffix(remote, ".gpg") {
++			t.Fatalf("pgp.Suffix is %q, but the engine appends .gpg", pgp.Suffix)
++		}
++		if _, ok := remotes[remote]; !ok {
++			t.Errorf("%s was not uploaded to %s", name, remote)
++			continue
++		}
++		data, ok := cl.file(remote)
++		if !ok || len(data) == 0 {
++			t.Errorf("%s is not on the netdisk", remote)
++			continue
++		}
++		var out bytes.Buffer
++		if err := pgp.Decrypt(&out, bytes.NewReader([]byte(data)), passphrase); err != nil {
++			t.Errorf("pgp.Decrypt(%s): %v", remote, err)
++			continue
++		}
++		if out.String() != want {
++			t.Errorf("%s decrypts to %d bytes, want %d", remote, out.Len(), len(want))
++		}
++		if err := pgp.Decrypt(&bytes.Buffer{}, bytes.NewReader([]byte(data)), "wrong passphrase"); err == nil {
++			t.Errorf("%s decrypts with the wrong passphrase", remote)
++		}
++	}
++}
++
++// mustUploads returns the uploads a fake client recorded.
++func mustUploads(t *testing.T, cl *fakeClient) []uploadCall {
++	t.Helper()
++	_, _, uploads := cl.calls()
++	if len(uploads) == 0 {
++		t.Fatal("no uploads were made")
++	}
++	return uploads
++}
+diff --git a/internal/backup/state.go b/internal/backup/state.go
+new file mode 100644
+index 0000000..fd2d20f
+--- /dev/null
++++ b/internal/backup/state.go
+@@ -0,0 +1,110 @@
++package backup
++
++import (
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++	"time"
++)
++
++// StateVersion is the version of the state file this package writes. A state
++// of another version is discarded by LoadState, which costs one full run and
++// never loses data.
++const StateVersion = 1
++
++// Entry is what the last successful upload of a file left behind, so that the
++// next run can tell whether the file changed.
++type Entry struct {
++	Size    int64     `json:"size"`
++	ModNano int64     `json:"mod_nano"` // modification time, UnixNano
++	Remote  string    `json:"remote"`   // netdisk path uploaded to, .gpg suffix included
++	At      time.Time `json:"at"`       // when it was uploaded
++}
++
++// State is the record of a run, keyed by absolute local path. It is a cache,
++// not a source of truth: losing it only makes the next run upload everything
++// again, and never deletes anything.
++type State struct {
++	Version int              `json:"version"`
++	Entries map[string]Entry `json:"entries"`
++}
++
++// NewState returns an empty state.
++func NewState() *State {
++	return &State{Version: StateVersion, Entries: map[string]Entry{}}
++}
++
++// LoadState reads a state file. A missing, unreadable, corrupt or
++// version-mismatched file is not an error: the returned state is empty and the
++// next run is a full one.
++func LoadState(path string) *State {
++	if path == "" {
++		return NewState()
++	}
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return NewState()
++	}
++	var loaded State
++	if err := json.Unmarshal(data, &loaded); err != nil || loaded.Version != StateVersion {
++		return NewState()
++	}
++	s := NewState()
++	if loaded.Entries != nil {
++		// Copy, so that a caller holding the decoded struct cannot share the map.
++		s.Entries = loaded.Entries
++	}
++	return s
++}
++
++// Save writes the state to path atomically (a temporary file in the same
++// directory, then a rename) with mode 0600, making the directory if needed.
++// The caller's State is not modified beyond a version fixup.
++func (s *State) Save(path string) error {
++	if s == nil {
++		return errors.New("backup: save: nil state")
++	}
++	if path == "" {
++		return errors.New("backup: save: empty state path")
++	}
++	s.Version = StateVersion
++	if s.Entries == nil {
++		s.Entries = map[string]Entry{}
++	}
++	data, err := json.MarshalIndent(s, "", "  ")
++	if err != nil {
++		return err
++	}
++	data = append(data, '\n')
++
++	dir := filepath.Dir(path)
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return err
++	}
++	tmp, err := os.CreateTemp(dir, ".backup-state-*.tmp")
++	if err != nil {
++		return err
++	}
++	tmpName := tmp.Name()
++	// Remove the temporary file on every path that did not rename it into
++	// place; after a successful rename this removes nothing.
++	defer os.Remove(tmpName)
++
++	if _, err := tmp.Write(data); err != nil {
++		tmp.Close()
++		return err
++	}
++	if err := tmp.Chmod(0o600); err != nil {
++		tmp.Close()
++		return err
++	}
++	if err := tmp.Sync(); err != nil {
++		tmp.Close()
++		return err
++	}
++	if err := tmp.Close(); err != nil {
++		return err
++	}
++	return os.Rename(tmpName, path)
++}

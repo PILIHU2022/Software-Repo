@@ -1,0 +1,35 @@
+Categories:
+  - Internet
+# Upstream declares no license file (GitHub reports none). GPL-3.0-only
+# matches this repository's license; revisit if pengstem adds a LICENSE.
+License: GPL-3.0-only
+AuthorName: pengstem
+Name: 百度网盘 Go
+Summary: Community patchwork build of the Baidu Netdisk client, with automatic encrypted backup.
+Description: |
+  The BaiduNetGo Android client of the community patchwork build of pengstem's
+  Baidu Netdisk (百度网盘 Go) — a Material 3 Expressive app that pairs with the
+  pure-Go desktop client published on the same repository.
+
+  Features:
+
+  - Sign in by scanning a QR code (or paste Cookie / BDUSS+STOKEN).
+  - Browse the netdisk with list/grid views, sorting, search and file details.
+  - Folder backup: pick local folders (SAF) and mirror them into a netdisk
+    folder incrementally on a schedule (manual / 15 min / 1 h / 6 h / 24 h) in
+    the background with WorkManager, or immediately with live progress.
+  - Album backup: pick MediaStore albums and back their photos and videos up.
+  - Encrypted backup: OpenPGP symmetric encryption turns every uploaded file
+    into a .gpg that `gpg -d` opens on any computer — the same format the
+    desktop client writes, so files from both devices restore alike.
+  - Transfers with progress, speed and cancel.
+  - Account and quota info, upload concurrency, Wi-Fi-only mode and themes.
+
+  Built from upstream plus the patch queue in this repository; the desktop
+  half is released separately (it is not an F-Droid package).
+SourceCode: https://github.com/pengstem/baidunetgo
+IssueTracker: https://github.com/pengstem/baidunetgo/issues
+RepoType: git
+Repo: https://github.com/pengstem/baidunetgo.git
+UpdateCheckMode: None
+AutoUpdateMode: None

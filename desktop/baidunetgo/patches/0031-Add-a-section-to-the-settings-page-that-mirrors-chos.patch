@@ -1,0 +1,1901 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 11:32:41 +0800
+Subject: [PATCH] =?UTF-8?q?Add=20a=20=E5=A4=87=E4=BB=BD=20section=20to=20t?=
+ =?UTF-8?q?he=20settings=20page=20that=20mirrors=20chosen=20folders=20into?=
+ =?UTF-8?q?=20the=20netdisk=20on=20a=20schedule,=20encrypting=20every=20fi?=
+ =?UTF-8?q?le=20into=20a=20.gpg=20a=20passphrase=20opens=20with=20gpg,=20s?=
+ =?UTF-8?q?ince=20backing=20a=20folder=20up=20could=20only=20be=20done=20b?=
+ =?UTF-8?q?y=20hand=20until=20now=20#minor?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ app/app.go           |   4 +
+ app/backup.go        | 683 +++++++++++++++++++++++++++++++++++++++++++
+ app/backup_key.go    | 192 ++++++++++++
+ app/backup_page.go   | 296 +++++++++++++++++++
+ app/backup_test.go   | 443 ++++++++++++++++++++++++++++
+ app/session.go       |   8 +
+ app/settings.go      |  86 ++++++
+ app/settings_page.go |   2 +
+ docs/BACKUP.md       |  53 ++++
+ 9 files changed, 1767 insertions(+)
+ create mode 100644 app/backup.go
+ create mode 100644 app/backup_key.go
+ create mode 100644 app/backup_page.go
+ create mode 100644 app/backup_test.go
+ create mode 100644 docs/BACKUP.md
+
+diff --git a/app/app.go b/app/app.go
+index abedb38..2497c12 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -69,6 +69,7 @@ type App struct {
+ 	found        searchState
+ 	xfer         *transfer.Manager
+ 	updates      updateState // the settings page's 更新 section
++	backup       backupState // the settings page's 备份 section and its runs (backup.go)
+ 	stream       *stream.Server
+ 	tuning       bool   // measuring download speeds
+ 	tuneErr      string // why the last measurement failed
+@@ -215,6 +216,9 @@ func (a *App) Shutdown() {
+ 	if a.xfer != nil {
+ 		a.xfer.Close()
+ 	}
++	// A backup under way is canceled: its state is a cache, and the next
++	// launch backs up whatever it did not send.
++	a.stopBackup()
+ }
+ 
+ // update runs fn on the UI thread and redraws, from any goroutine. Without
+diff --git a/app/backup.go b/app/backup.go
+new file mode 100644
+index 0000000..02e7973
+--- /dev/null
++++ b/app/backup.go
+@@ -0,0 +1,683 @@
++package app
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"log"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/egoist/mygo"
++
++	"github.com/pengstem/baidunetgo/internal/backup"
++	"github.com/pengstem/baidunetgo/internal/baidu"
++)
++
++// The 备份 section of the settings page mirrors local folders into the
++// netdisk with internal/backup. Its state lives here; the page that draws and
++// edits it is backup_page.go, and the passphrase's sealed file is
++// backup_key.go.
++
++const (
++	// backupStateName is the file, in the user data dir, that records what
++	// was backed up and what the last run did.
++	backupStateName = "backup-state.json"
++	// backupTempPrefix starts the name of the temporary file the state is
++	// written through, before it is renamed into place.
++	backupTempPrefix = ".backup-state-"
++)
++
++// backupFirstDelay is how long after signing in the first automatic run
++// waits, so that a launch is not slowed down by it. A shorter interval
++// wins; tests shorten it.
++var backupFirstDelay = 2 * time.Minute
++
++// backupPickFolders asks for the local folders to back up; a variable so
++// tests can stand in for the native chooser. It runs on a goroutine.
++var backupPickFolders = func(a *App) ([]string, error) {
++	opts := mygo.OpenDialogOptions{
++		Parent:            a.win,
++		Title:             "选择要备份的文件夹",
++		Directory:         true,
++		CreateDirectories: false,
++		Multiple:          true,
++	}
++	return mygo.Dialog.Open(opts)
++}
++
++// backupClient adapts the signed-in netdisk client to the backup engine's
++// Client: the engine lists and creates netdisk folders and uploads local
++// files, overwriting what is there, which a re-run relies on.
++type backupClient struct {
++	c        *baidu.Client
++	parallel int
++}
++
++// List returns the entries of a netdisk directory.
++func (b backupClient) List(ctx context.Context, dir string) ([]backup.RemoteFile, error) {
++	files, err := b.c.List(ctx, dir, baidu.Order{By: "name"})
++	if err != nil {
++		return nil, err
++	}
++	out := make([]backup.RemoteFile, 0, len(files))
++	for _, f := range files {
++		out = append(out, backup.RemoteFile{Name: f.Name, Size: f.Size, IsDir: f.IsDir})
++	}
++	return out, nil
++}
++
++// Mkdir makes one netdisk directory, whose parent exists.
++func (b backupClient) Mkdir(ctx context.Context, dir string) error {
++	return b.c.Mkdir(ctx, dir)
++}
++
++// Upload sends a local file to a netdisk path, overwriting what is there.
++func (b backupClient) Upload(ctx context.Context, local, remote string, progress func(done, total int64)) error {
++	return b.c.Upload(ctx, local, remote, b.parallel, progress, nil, nil)
++}
++
++// backupState is the 备份 section's state and the run under way.
++type backupState struct {
++	running  bool               // a run goes on now
++	cancel   context.CancelFunc // stops that run
++	progress backup.Progress    // the latest report of it
++	timer    *time.Timer        // the next automatic run, nil for none
++	next     time.Time          // when that timer fires, zero for none
++	loaded   bool               // backup-state.json was read
++	st       *backup.State      // what was backed up, as the engine keeps it
++
++	// What the last completed run did, as the page shows it and the state
++	// file keeps it.
++	lastRun  time.Time
++	uploaded int
++	skipped  int
++	failed   int
++	errs     []string // per-file errors of the last run
++	lastErr  string   // why the whole last run failed, when it did
++
++	// folderFiles and folderAt are how many files the state knows of each
++	// local folder, and when that folder was last backed up, by cleaned
++	// absolute local path.
++	folderFiles map[string]int
++	folderAt    map[string]time.Time
++
++	// The passphrase of encrypted backups: what it is, whether one is set,
++	// and whether the sealed file was read yet.
++	pass     string
++	passSet  bool
++	passRead bool
++
++	// pwdOpen, pwd, pwd2 and pwdErr are the 设置密码… dialog.
++	pwdOpen bool
++	pwd     string
++	pwd2    string
++	pwdErr  string
++
++	// destOpen and destPicker are the 备份到 dialog: the netdisk folder
++	// chooser, reused from the move and copy dialogs.
++	destOpen   bool
++	destPicker picker
++
++	// detailsOpen is the 查看详情 dialog of the last run's errors.
++	detailsOpen bool
++}
++
++// backupStateFile is what backup-state.json holds: the engine's record of
++// the files uploaded, and what the page says about the last run. The
++// engine's fields are embedded, so the file stays a backup.State with a few
++// more keys beside it.
++type backupStateFile struct {
++	backup.State
++	LastRun   time.Time                 `json:"last_run,omitempty"`
++	Uploaded  int                       `json:"uploaded,omitempty"`
++	Skipped   int                       `json:"skipped,omitempty"`
++	Failed    int                       `json:"failed,omitempty"`
++	LastError string                    `json:"last_error,omitempty"`
++	Errors    []string                  `json:"errors,omitempty"`
++	Folders   map[string]backupFolderAt `json:"folders,omitempty"`
++}
++
++// backupFolderAt is what the state file keeps of one local folder: how many
++// of its files are backed up, and when it was last backed up.
++type backupFolderAt struct {
++	Files int       `json:"files"`
++	At    time.Time `json:"at"`
++}
++
++// backupStoreDir is where backups keep their state and their passphrase;
++// tests point it at a temporary folder, which is the only thing written from
++// the fake netdisk, so that neither them nor it touch the user's data
++// directory.
++var backupStoreDir string
++
++// backupDir is where backups keep what outlasts the app, "" for nowhere.
++func (a *App) backupDir() string {
++	if backupStoreDir != "" {
++		return backupStoreDir
++	}
++	if a.fake {
++		return "" // the pretend netdisk keeps nothing on disk
++	}
++	dir, err := mygo.App.Path(mygo.PathUserData)
++	if err != nil {
++		return ""
++	}
++	return dir
++}
++
++// backupStatePath is where the state file goes, "" for nowhere.
++func (a *App) backupStatePath() string {
++	if dir := a.backupDir(); dir != "" {
++		return filepath.Join(dir, backupStateName)
++	}
++	return ""
++}
++
++// backupFileLoaded reads backup-state.json once, on the UI thread, so the
++// page can show what the last run did and a run can skip what is unchanged.
++func (a *App) backupFileLoaded() {
++	b := &a.backup
++	if b.loaded {
++		return
++	}
++	b.loaded = true
++	p := a.backupStatePath()
++	if p == "" {
++		b.st = backup.NewState()
++		b.folderFiles, b.folderAt = map[string]int{}, map[string]time.Time{}
++		return
++	}
++	if f, ok := readBackupStateFile(p); ok {
++		a.applyBackupStateFile(f)
++		return
++	}
++	b.st = backup.NewState()
++	b.folderFiles, b.folderAt = map[string]int{}, map[string]time.Time{}
++}
++
++// applyBackupStateFile puts what the state file holds into the page's state.
++func (a *App) applyBackupStateFile(f backupStateFile) {
++	b := &a.backup
++	f.Version = backup.StateVersion
++	if f.Entries == nil {
++		f.Entries = map[string]backup.Entry{}
++	}
++	b.st = &f.State
++	b.lastRun = f.LastRun
++	b.uploaded, b.skipped, b.failed = f.Uploaded, f.Skipped, f.Failed
++	b.lastErr = f.LastError
++	b.errs = f.Errors
++	b.folderFiles = map[string]int{}
++	b.folderAt = map[string]time.Time{}
++	for local, rec := range f.Folders {
++		b.folderFiles[local] = rec.Files
++		b.folderAt[local] = rec.At
++	}
++}
++
++// readBackupStateFile reads a state file; a missing, unreadable or corrupt
++// one is no state at all, and the next run is a full one.
++func readBackupStateFile(p string) (backupStateFile, bool) {
++	data, err := os.ReadFile(p)
++	if err != nil {
++		return backupStateFile{}, false
++	}
++	var f backupStateFile
++	if err := json.Unmarshal(data, &f); err != nil || f.Version != backup.StateVersion {
++		return backupStateFile{}, false
++	}
++	return f, true
++}
++
++// saveBackupState writes what outlasts the app, on a goroutine: a copy of the
++// engine's state, taken now so that a following run cannot change the map
++// while it is marshaled, and the page's summary of the last run.
++func (a *App) saveBackupState() {
++	p := a.backupStatePath()
++	if p == "" {
++		return
++	}
++	b := &a.backup
++	st := backup.NewState()
++	if b.st != nil {
++		st.Entries = make(map[string]backup.Entry, len(b.st.Entries))
++		for local, e := range b.st.Entries {
++			st.Entries[local] = e
++		}
++	}
++	f := backupStateFile{
++		State:     *st,
++		LastRun:   b.lastRun,
++		Uploaded:  b.uploaded,
++		Skipped:   b.skipped,
++		Failed:    b.failed,
++		LastError: b.lastErr,
++		Errors:    b.errs,
++		Folders:   map[string]backupFolderAt{},
++	}
++	for local := range b.folderAt {
++		f.Folders[local] = backupFolderAt{Files: b.folderFiles[local], At: b.folderAt[local]}
++	}
++	go func() {
++		if err := writeBackupStateFile(p, f); err != nil {
++			log.Printf("backup: state: %v", err)
++		}
++	}()
++}
++
++// writeBackupStateFile writes the state atomically: a temporary file beside
++// it, then a rename, 0600.
++func writeBackupStateFile(p string, f backupStateFile) error {
++	f.Version = backup.StateVersion
++	if f.Entries == nil {
++		f.Entries = map[string]backup.Entry{}
++	}
++	data, err := json.MarshalIndent(f, "", "  ")
++	if err != nil {
++		return err
++	}
++	data = append(data, '\n')
++	dir := filepath.Dir(p)
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return err
++	}
++	tmp, err := os.CreateTemp(dir, backupTempPrefix+"*.tmp")
++	if err != nil {
++		return err
++	}
++	name := tmp.Name()
++	defer os.Remove(name) // nothing to remove after a successful rename
++	if _, err := tmp.Write(data); err != nil {
++		tmp.Close()
++		return err
++	}
++	if err := tmp.Chmod(0o600); err != nil {
++		tmp.Close()
++		return err
++	}
++	if err := tmp.Sync(); err != nil {
++		tmp.Close()
++		return err
++	}
++	if err := tmp.Close(); err != nil {
++		return err
++	}
++	return os.Rename(name, p)
++}
++
++// cleanLocal is a local path as the state and the page key it: absolute and
++// cleaned, so that the same folder added twice is one entry.
++func cleanLocal(p string) string {
++	if abs, err := filepath.Abs(strings.TrimSpace(p)); err == nil {
++		return abs
++	}
++	return filepath.Clean(p)
++}
++
++// backupConfig returns what a run backs up now, and why it cannot start.
++func (a *App) backupConfig() (backup.Config, string) {
++	cfg := backup.Config{
++		Dest:     a.settings.backupDest(),
++		Folders:  append([]backup.Folder(nil), a.settings.Backup.Folders...),
++		Encrypt:  a.settings.Backup.Encrypt,
++		Parallel: min(a.settings.upload(), backup.MaxParallel),
++	}
++	if len(cfg.Folders) == 0 {
++		return cfg, "还没有添加要备份的文件夹"
++	}
++	if cfg.Encrypt && a.backup.pass == "" {
++		return cfg, "加密备份需要先设置密码"
++	}
++	return cfg, ""
++}
++
++// startBackup mirrors the configured folders into the netdisk on a
++// goroutine. manual marks the 立即备份 button's press, which says at once
++// when it cannot run, and asks for a passphrase rather than failing quietly.
++// It reports whether the run started.
++func (a *App) startBackup(manual bool) bool {
++	if a.backup.running {
++		return false // never two at once
++	}
++	s := a.sess
++	if s == nil {
++		if manual {
++			a.toast("未登录，无法备份", "error")
++		}
++		return false
++	}
++	a.backupFileLoaded()
++	a.backupPassLoaded()
++	cfg, why := a.backupConfig()
++	if why != "" {
++		if manual {
++			if cfg.Encrypt && a.backup.pass == "" {
++				a.openBackupPassword()
++			} else {
++				a.toast(why, "error")
++			}
++		}
++		return false
++	}
++	if a.backup.st == nil {
++		a.backup.st = backup.NewState()
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	// No automatic run is due while this one goes on: the next is arranged
++	// when it finishes.
++	a.stopBackupTimer()
++	a.backup.running, a.backup.cancel = true, cancel
++	a.backup.progress = backup.Progress{}
++
++	cl := backupClient{c: s.client, parallel: a.settings.upload()}
++	pass, st := a.backup.pass, a.backup.st
++	report := a.backupReporter()
++
++	go func() {
++		res, err := backup.Run(ctx, cl, cfg, st, pass, report)
++		// The engine no longer touches st or res: hand them to the UI
++		// thread, which records what the run did.
++		a.update(func() { a.finishedBackup(s, cfg, res, err) })
++	}()
++	return true
++}
++
++// backupReporter is the run's progress report, which is called from the
++// engine's worker goroutines: the latest report is kept and written to the
++// page at most once per frame, so that progress costs no more than a frame.
++func (a *App) backupReporter() func(backup.Progress) {
++	var (
++		mu       sync.Mutex
++		latest   backup.Progress
++		have     bool
++		schedule bool
++	)
++	return func(p backup.Progress) {
++		mu.Lock()
++		latest, have = p, true
++		if schedule {
++			mu.Unlock()
++			return
++		}
++		schedule = true
++		mu.Unlock()
++		a.update(func() {
++			mu.Lock()
++			p, ok := latest, have
++			latest, have, schedule = backup.Progress{}, false, false
++			mu.Unlock()
++			if ok {
++				a.backup.progress = p
++			}
++		})
++	}
++}
++
++// finishedBackup records what a run did, on the UI thread: the page's summary,
++// the state file, and the next automatic run.
++func (a *App) finishedBackup(s *session, cfg backup.Config, res backup.Result, err error) {
++	b := &a.backup
++	b.running, b.cancel = false, nil
++	b.progress = backup.Progress{}
++	canceled := errors.Is(err, context.Canceled)
++	if !canceled {
++		now := time.Now()
++		b.lastRun = now
++		b.uploaded, b.skipped, b.failed = res.Uploaded, res.Skipped, res.Failed
++		b.errs = backupErrorStrings(res.Errors)
++		b.lastErr = ""
++		if err != nil {
++			b.lastErr = err.Error()
++		}
++		if b.folderFiles == nil {
++			b.folderFiles, b.folderAt = map[string]int{}, map[string]time.Time{}
++		}
++		for _, f := range cfg.Folders {
++			local := cleanLocal(f.Local)
++			b.folderFiles[local] = countBackupFiles(b.st, local)
++			b.folderAt[local] = now
++		}
++		a.saveBackupState()
++	} else {
++		// A canceled run keeps what it uploaded, so the next run skips it.
++		a.saveBackupState()
++	}
++	a.restartBackupTimer()
++	if a.sess != s {
++		return // signed out while it ran: the page is gone
++	}
++	switch {
++	case canceled:
++		a.toast("已取消备份", "")
++	case err != nil:
++		a.toast("备份失败："+err.Error(), "error")
++	default:
++		msg := "备份完成：上传 " + itoa(res.Uploaded) + " 个文件，跳过 " + itoa(res.Skipped) + " 个"
++		if res.Failed > 0 {
++			msg += "，失败 " + itoa(res.Failed) + " 个"
++		}
++		if cfg.Encrypt {
++			msg += "，已加密"
++		}
++		a.toast(msg, "success")
++	}
++}
++
++// backupErrorStrings turns what failed in a run into what the page and the
++// state file keep, one line each.
++func backupErrorStrings(errs []backup.FileError) []string {
++	if len(errs) == 0 {
++		return nil
++	}
++	out := make([]string, len(errs))
++	for i, e := range errs {
++		out[i] = e.Error()
++	}
++	return out
++}
++
++// countBackupFiles counts the state's entries under a local folder: the
++// files known to be backed up from it.
++func countBackupFiles(st *backup.State, local string) int {
++	if st == nil {
++		return 0
++	}
++	prefix := local + string(filepath.Separator)
++	n := 0
++	for p := range st.Entries {
++		if strings.HasPrefix(p, prefix) {
++			n++
++		}
++	}
++	return n
++}
++
++// cancelBackup stops the run under way; the engine returns and its goroutine
++// reports the cancellation.
++func (a *App) cancelBackup() {
++	if a.backup.cancel != nil {
++		a.backup.cancel()
++	}
++}
++
++// applyBackupSettings saves the backup settings and lets the scheduler
++// follow them; a run under way is stopped, as what it backs up or how may
++// have changed.
++func (a *App) applyBackupSettings() {
++	if err := a.settings.save(); err != nil {
++		a.toast("无法保存设置："+err.Error(), "error")
++	}
++	if a.backup.running {
++		a.cancelBackup()
++	}
++	a.restartBackupTimer()
++}
++
++// addBackupFolders asks for local folders on a goroutine, as the native
++// chooser opens a window of its own, and adds the ones chosen.
++func (a *App) addBackupFolders() {
++	go func() {
++		dirs, err := backupPickFolders(a)
++		if err != nil || len(dirs) == 0 {
++			return
++		}
++		a.update(func() { a.addBackupFoldersTo(dirs) })
++	}()
++}
++
++// addBackupFoldersTo adds chosen local folders to the settings, skipping the
++// ones that are there already.
++func (a *App) addBackupFoldersTo(dirs []string) {
++	s := &a.settings
++	for _, d := range dirs {
++		local := cleanLocal(d)
++		if local == "" {
++			continue
++		}
++		exists := false
++		for _, f := range s.Backup.Folders {
++			if cleanLocal(f.Local) == local {
++				exists = true
++				break
++			}
++		}
++		if exists {
++			continue
++		}
++		s.Backup.Folders = append(s.Backup.Folders, backup.Folder{Local: local})
++	}
++	a.applyBackupSettings()
++}
++
++// removeBackupFolder takes the folder at i out of the settings.
++func (a *App) removeBackupFolder(i int) {
++	s := &a.settings
++	if i < 0 || i >= len(s.Backup.Folders) {
++		return
++	}
++	s.Backup.Folders = append(s.Backup.Folders[:i], s.Backup.Folders[i+1:]...)
++	a.applyBackupSettings()
++}
++
++// restartBackupTimer arranges the next automatic run, from the settings and
++// the last run; a timer already set is replaced. It runs on the UI thread.
++func (a *App) restartBackupTimer() {
++	a.stopBackupTimer()
++	if a.sess == nil || !a.settings.Backup.Auto || a.backup.running {
++		return
++	}
++	iv := a.settings.backupInterval()
++	if iv <= 0 || len(a.settings.Backup.Folders) == 0 {
++		return
++	}
++	a.backupFileLoaded()
++	d := iv
++	switch {
++	case a.backup.lastRun.IsZero():
++		// The first run waits a moment, so a launch is not slowed down by
++		// a backup of everything.
++		d = min(iv, backupFirstDelay)
++	case a.backup.lastRun.Add(iv).After(time.Now()):
++		d = time.Until(a.backup.lastRun.Add(iv))
++	default:
++		d = time.Second
++	}
++	a.backup.next = time.Now().Add(d)
++	a.backup.timer = time.AfterFunc(d, func() {
++		a.update(func() { a.backupTimerFired() })
++	})
++}
++
++// stopBackupTimer forgets the automatic run due, if any.
++func (a *App) stopBackupTimer() {
++	if a.backup.timer != nil {
++		a.backup.timer.Stop()
++		a.backup.timer = nil
++	}
++	a.backup.next = time.Time{}
++}
++
++// stopBackup stops the automatic runs and the one under way, as signing out
++// and quitting do.
++func (a *App) stopBackup() {
++	a.stopBackupTimer()
++	if a.backup.cancel != nil {
++		a.backup.cancel()
++	}
++}
++
++// backupTimerFired starts the automatic run that came due, when it is still
++// wanted. A run that cannot start now (a folder was removed, a passphrase is
++// missing) leaves the next one arranged, so the schedule does not die.
++func (a *App) backupTimerFired() {
++	a.backup.timer, a.backup.next = nil, time.Time{}
++	if a.sess == nil || !a.settings.Backup.Auto || a.settings.backupInterval() <= 0 {
++		return
++	}
++	if !a.startBackup(false) {
++		a.restartBackupTimer()
++	}
++}
++
++// backupStatus is the line the 备份 section shows of the run under way or the
++// last one.
++func (a *App) backupStatus() string {
++	b := &a.backup
++	if b.running {
++		p := b.progress
++		if p.Files == 0 {
++			return "正在扫描文件…"
++		}
++		name := p.File
++		if base := filepath.Base(p.Folder); base != "" {
++			name = base + "/" + p.File
++		}
++		pct := 0
++		if p.Total > 0 && p.Done > 0 {
++			pct = int(float64(p.Done) * 100 / float64(p.Total))
++			pct = min(pct, 100)
++		}
++		done := p.Uploaded + p.Skipped + p.Failed
++		return "正在备份 " + name + "（" + itoa(pct) + "%）· " + itoa(done) + "/" + itoa(p.Files) + " 个文件"
++	}
++	if b.lastErr != "" {
++		return b.lastErr
++	}
++	if b.lastRun.IsZero() {
++		return "尚未备份"
++	}
++	detail := "上次备份 " + backupClock(b.lastRun) + " · 上传 " + itoa(b.uploaded) + " 个 · 跳过 " + itoa(b.skipped) + " 个"
++	if b.failed > 0 {
++		detail += " · 失败 " + itoa(b.failed) + " 个"
++	}
++	if len(b.errs) > 0 {
++		detail += " · 有错误"
++	}
++	return detail
++}
++
++// backupFolderStatus is the line of one configured folder: what the state
++// knows of it and when it was last backed up.
++func (a *App) backupFolderStatus(local string) string {
++	b := &a.backup
++	key := cleanLocal(local)
++	n, at := b.folderFiles[key], b.folderAt[key]
++	if at.IsZero() {
++		return "尚未备份"
++	}
++	return itoa(n) + " 个文件 · 上次 " + backupClock(at)
++}
++
++// backupClock writes a moment as the section's times: the hour today, the
++// date before.
++func backupClock(t time.Time) string {
++	now := time.Now()
++	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
++		return t.Format("15:04")
++	}
++	return t.Format("1月2日 15:04")
++}
+diff --git a/app/backup_key.go b/app/backup_key.go
+new file mode 100644
+index 0000000..4713da5
+--- /dev/null
++++ b/app/backup_key.go
+@@ -0,0 +1,192 @@
++package app
++
++import (
++	"crypto/aes"
++	"crypto/cipher"
++	"crypto/rand"
++	"encoding/json"
++	"errors"
++	"io/fs"
++	"os"
++	"path/filepath"
++
++	"github.com/egoist/mygo"
++
++	"github.com/pengstem/baidunetgo/internal/auth"
++)
++
++// The backup passphrase is kept as internal/auth keeps the session: an
++// AES-GCM sealed JSON in the user data directory, under a key of its own in
++// the system's credential store, with a 0600 key file where there is no
++// store. It is a second file and a second key name, so that signing out —
++// which clears the session's file and key — cannot lose the passphrase that
++// decrypts the files already on the netdisk.
++const (
++	// backupKeyFile is the sealed passphrase, in the backup directory.
++	backupKeyFile = "backup-key.enc"
++	// backupKeyFallback is the key, where the credential store has none.
++	backupKeyFallback = "backup-key.key"
++	// backupKeyName is the entry the key is kept under in the store; the
++	// session keeps its own under "session-key".
++	backupKeyName = "backup-key"
++)
++
++// errNoBackupPass is what readBackupPass returns when no passphrase is saved.
++var errNoBackupPass = errors.New("backup: no saved passphrase")
++
++// backupSecret is what the sealed file holds.
++type backupSecret struct {
++	Passphrase string `json:"passphrase"`
++}
++
++// backupKeyring returns the credential store the passphrase's key lives in,
++// nil when there is none to use (tests keep theirs in a file).
++func (a *App) backupKeyring() auth.Keyring {
++	if backupStoreDir != "" {
++		return nil // a test's temporary folder keeps the key in a file
++	}
++	return mygo.Secrets.Service(keyService)
++}
++
++// backupPassLoaded makes sure the saved passphrase was read, once. It reads
++// it on a goroutine, as the credential store may ask the system for it.
++func (a *App) backupPassLoaded() {
++	b := &a.backup
++	if b.passRead {
++		return
++	}
++	b.passRead = true
++	dir := a.backupDir()
++	if dir == "" {
++		return
++	}
++	kr := a.backupKeyring()
++	go func() {
++		pass, err := readBackupPass(dir, kr)
++		if err != nil || pass == "" {
++			return
++		}
++		a.update(func() {
++			a.backup.pass, a.backup.passSet = pass, true
++		})
++	}()
++}
++
++// readBackupPass decrypts the saved passphrase, errNoBackupPass when none is
++// saved.
++func readBackupPass(dir string, kr auth.Keyring) (string, error) {
++	data, err := os.ReadFile(filepath.Join(dir, backupKeyFile))
++	if errors.Is(err, fs.ErrNotExist) {
++		return "", errNoBackupPass
++	}
++	if err != nil {
++		return "", err
++	}
++	key, err := backupKey(dir, kr, false)
++	if err != nil {
++		return "", err
++	}
++	plain, err := openBackupSecret(key, data)
++	if err != nil {
++		return "", err
++	}
++	var s backupSecret
++	if err := json.Unmarshal(plain, &s); err != nil {
++		return "", err
++	}
++	return s.Passphrase, nil
++}
++
++// writeBackupPass seals pass into the backup directory, 0600, replacing what
++// was there.
++func writeBackupPass(dir string, kr auth.Keyring, pass string) error {
++	key, err := backupKey(dir, kr, true)
++	if err != nil {
++		return err
++	}
++	plain, err := json.Marshal(backupSecret{Passphrase: pass})
++	if err != nil {
++		return err
++	}
++	sealed, err := sealBackupSecret(key, plain)
++	if err != nil {
++		return err
++	}
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return err
++	}
++	p := filepath.Join(dir, backupKeyFile)
++	tmp := p + ".tmp"
++	if err := os.WriteFile(tmp, sealed, 0o600); err != nil {
++		return err
++	}
++	return os.Rename(tmp, p)
++}
++
++// backupKey returns the key the passphrase is sealed with, making one when
++// create is set and there is none. The credential store is used when it
++// works, else a file beside the sealed passphrase.
++func backupKey(dir string, kr auth.Keyring, create bool) ([]byte, error) {
++	if kr != nil {
++		k, err := kr.Get(backupKeyName)
++		if err == nil && len(k) == 32 {
++			return k, nil
++		}
++		if create {
++			k := make([]byte, 32)
++			rand.Read(k)
++			if kr.Set(backupKeyName, k) == nil {
++				os.Remove(filepath.Join(dir, backupKeyFallback))
++				return k, nil
++			}
++		}
++	}
++	p := filepath.Join(dir, backupKeyFallback)
++	k, err := os.ReadFile(p)
++	if err == nil && len(k) == 32 {
++		return k, nil
++	}
++	if !create {
++		return nil, errNoBackupPass
++	}
++	k = make([]byte, 32)
++	rand.Read(k)
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return nil, err
++	}
++	return k, os.WriteFile(p, k, 0o600)
++}
++
++// sealBackupSecret encrypts plain with key, bound to the file it goes in so
++// that a sealed file of another purpose cannot be read as this one.
++func sealBackupSecret(key, plain []byte) ([]byte, error) {
++	block, err := aes.NewCipher(key)
++	if err != nil {
++		return nil, err
++	}
++	gcm, err := cipher.NewGCM(block)
++	if err != nil {
++		return nil, err
++	}
++	nonce := make([]byte, gcm.NonceSize())
++	if _, err := rand.Read(nonce); err != nil {
++		return nil, err
++	}
++	return gcm.Seal(nonce, nonce, plain, []byte(backupKeyFile)), nil
++}
++
++// openBackupSecret decrypts what sealBackupSecret sealed.
++func openBackupSecret(key, sealed []byte) ([]byte, error) {
++	block, err := aes.NewCipher(key)
++	if err != nil {
++		return nil, err
++	}
++	gcm, err := cipher.NewGCM(block)
++	if err != nil {
++		return nil, err
++	}
++	if len(sealed) < gcm.NonceSize() {
++		return nil, errors.New("backup: sealed passphrase is too short")
++	}
++	return gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], []byte(backupKeyFile))
++}
+diff --git a/app/backup_page.go b/app/backup_page.go
+new file mode 100644
+index 0000000..24a4cb3
+--- /dev/null
++++ b/app/backup_page.go
+@@ -0,0 +1,296 @@
++package app
++
++import (
++	"path/filepath"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/backup"
++)
++
++// The 备份 section of the settings page: the automatic folder backup's
++// switch, destination, interval, folder list, encryption and the manual run.
++// The state it edits and the run behind it are in backup.go.
++
++// backupSection is the settings page's 备份 group.
++func (a *App) backupSection(c *ui.Context, t *ui.Theme, p *palette) {
++	// The state file and the sealed passphrase are read once, here or when a
++	// run starts; both are small files.
++	a.backupFileLoaded()
++	a.backupPassLoaded()
++	s := &a.settings
++	b := &a.backup
++	section(c, t, p, "备份", func() {
++		a.backupSwitchRow(c, t, p, s, b)
++		settingRow(c, t, p, "备份到", "", s.backupDest(), func() {
++			if pill(c, t, p, "folder", "选择…", false).Clicked() {
++				a.openBackupDest()
++			}
++		})
++		settingRow(c, t, p, "间隔", "", s.backupIntervalDetail(), func() {
++			labels := backupIntervalLabels
++			chosen := s.backupIntervalIndex()
++			was := chosen
++			popUp(c, t, p, &chosen, labels, nil).Label("备份间隔")
++			if chosen == was {
++				return
++			}
++			s.Backup.Interval = backupIntervals[chosen]
++			a.applyBackupSettings()
++		})
++		a.backupFolderRows(c, t, p, s, b)
++		a.backupEncryptRow(c, t, p, s, b)
++		a.backupPasswordRow(c, t, p, s, b)
++		a.backupRunRow(c, t, p, s, b)
++	})
++}
++
++// backupSwitchRow is the 自动备份 switch: it turns the automatic runs on and
++// off, starts them at once when they come on, and asks for a passphrase when
++// encryption is on but none is set.
++func (a *App) backupSwitchRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	auto := s.Backup.Auto
++	settingRow(c, t, p, "自动备份", "", s.autoBackupDetail(), func() {
++		if !ui.Switch(c, &auto).Label("自动备份").Changed() {
++			return
++		}
++		s.Backup.Auto = auto
++		a.applyBackupSettings()
++		if auto && s.Backup.Encrypt && !b.passSet {
++			a.openBackupPassword()
++		}
++	})
++}
++
++// backupFolderRows lists the local folders to back up: each one's name, path
++// and what the state knows of it, with a way to remove it, then the button
++// that adds more through the native directory chooser.
++func (a *App) backupFolderRows(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	// A copy of the list: the rows must not leave while they are walked, so
++	// a removal waits for the frame to be built.
++	folders := append([]backup.Folder(nil), s.Backup.Folders...)
++	remove := -1
++	for i := range folders {
++		i := i
++		f := folders[i]
++		name := filepath.Base(cleanLocal(f.Local))
++		if name == "" || name == "." || name == string(filepath.Separator) {
++			name = f.Local
++		}
++		ui.Row(c).MinHeight(52).Padding(8, 0).Gap(10).AlignItems(ui.Center).Children(func() {
++			ui.Icon(c, icon("folder")).FontSize(16).TextColor(p.Folder)
++			ui.Column(c).Grow(1).Shrink(1).Gap(2).Children(func() {
++				ui.Text(c, name).SingleLine().Shrink(1)
++				ui.Text(c, tildePath(f.Local)).FontSize(11).TextColor(t.TextMuted).SingleLine()
++			})
++			ui.Text(c, a.backupFolderStatus(f.Local)).FontSize(11).TextColor(t.TextMuted).SingleLine()
++			if pill(c, t, p, "trash-2", "移除", false).Clicked() {
++				remove = i
++			}
++		})
++	}
++	if remove >= 0 {
++		a.removeBackupFolder(remove)
++	}
++	if len(s.Backup.Folders) == 0 {
++		ui.Row(c).MinHeight(40).Padding(8, 0).Children(func() {
++			ui.Text(c, "还没有添加文件夹，添加后才会备份其中的文件。").
++				FontSize(11).TextColor(t.TextMuted)
++		})
++	}
++	ui.Row(c).MinHeight(44).Padding(8, 0).Children(func() {
++		if pill(c, t, p, "folder-plus", "添加文件夹…", false).Clicked() {
++			a.addBackupFolders()
++		}
++	})
++}
++
++// backupEncryptRow is the 加密备份 switch, with the hint that encrypted files
++// end in .gpg. Turning it on without a passphrase opens the dialog for one.
++func (a *App) backupEncryptRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	enc := s.Backup.Encrypt
++	detail := "关闭，文件原样上传"
++	if enc {
++		detail = "开启，每个文件加密后上传，名以 .gpg 结尾，可用 gpg -d 解密"
++	}
++	settingRow(c, t, p, "加密备份", "", detail, func() {
++		if !ui.Switch(c, &enc).Label("加密备份").Changed() {
++			return
++		}
++		s.Backup.Encrypt = enc
++		a.applyBackupSettings()
++		if enc && !b.passSet {
++			a.openBackupPassword()
++		}
++	})
++}
++
++// backupPasswordRow shows whether the backup passphrase is set, and opens the
++// dialog that sets it.
++func (a *App) backupPasswordRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	detail := "未设置"
++	if b.passSet {
++		detail = "已设置"
++	}
++	if s.Backup.Encrypt && !b.passSet {
++		detail += "，加密备份开始前会先要求设置"
++	}
++	settingRow(c, t, p, "密码", "", detail, func() {
++		if pill(c, t, p, "pencil", "设置密码…", false).Clicked() {
++			a.openBackupPassword()
++		}
++	})
++}
++
++// backupRunRow is the 立即备份 button, which turns into 取消 while a run goes
++// on, with what the run is doing or what the last one did beside it, and the
++// way to the last run's errors.
++func (a *App) backupRunRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
++	settingRow(c, t, p, "备份状态", "", a.backupStatus(), func() {
++		switch {
++		case b.running:
++			if pill(c, t, p, "square", "取消", false).Clicked() {
++				a.cancelBackup()
++			}
++		default:
++			if pill(c, t, p, "upload", "立即备份", true).Clicked() {
++				a.startBackup(true)
++			}
++			if len(b.errs) > 0 {
++				if pill(c, t, p, "info", "查看详情", false).Clicked() {
++					b.detailsOpen = true
++				}
++			}
++		}
++	})
++}
++
++// backupDialogs are the section's own dialogs: the netdisk folder chooser of
++// 备份到, the passphrase of 设置密码… and the last run's errors.
++func (a *App) backupDialogs(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	if b.destOpen {
++		ui.Modal(c, &b.destOpen, func() {
++			dialogTitle(c, t, "备份到", "网盘上保存备份的文件夹，不存在时会自动创建")
++			a.folderChooser(c, t, p, &b.destPicker, 260, nil)
++			ui.Text(c, "当前："+b.destPicker.dir).FontSize(11).TextColor(t.TextMuted).SingleLine()
++			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
++				if pill(c, t, p, "", "取消", false).Clicked() {
++					b.destOpen = false
++				}
++				if pill(c, t, p, "folder", "选择此文件夹", true).AutoFocus().Clicked() {
++					b.destOpen = false
++					a.settings.Backup.Dest = b.destPicker.dir
++					a.applyBackupSettings()
++				}
++			})
++		})
++	}
++	if b.pwdOpen {
++		a.backupPasswordDialog(c, t, p)
++	}
++	if b.detailsOpen {
++		ui.Modal(c, &b.detailsOpen, func() {
++			dialogTitle(c, t, "备份详情", "上次运行有 "+itoa(len(b.errs))+" 个文件或文件夹没能备份，下次运行会再试")
++			ui.Scroll(c).Height(240).Children(func() {
++				ui.Column(c).Gap(8).Padding(4, 0).Children(func() {
++					for _, msg := range b.errs {
++						ui.Text(c, msg).FontSize(11).TextColor(t.TextMuted)
++					}
++				})
++			})
++			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
++				if pill(c, t, p, "", "关闭", true).AutoFocus().Clicked() {
++					b.detailsOpen = false
++				}
++			})
++		})
++	}
++}
++
++// backupPasswordDialog asks for the backup passphrase twice, masked, at least
++// eight characters, and says where the files end up and how to read them.
++func (a *App) backupPasswordDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	b := &a.backup
++	ui.Modal(c, &b.pwdOpen, func() {
++		dialogTitle(c, t, "设置备份密码", "密码 + 确认密码 fields，至少 8 个字符，显示为掩码")
++		ui.Column(c).Width(340).Gap(4).Children(func() {
++			ui.Text(c, "密码").FontSize(11).TextColor(t.TextMuted)
++			ui.TextInputBase(c.Key("backup-pwd"), &b.pwd).Label("备份密码").
++				Password().Grow(1).AutoFocus()
++			ui.Text(c, "确认密码").FontSize(11).TextColor(t.TextMuted).Margin(6, 0, 0)
++			in := ui.TextInputBase(c.Key("backup-pwd2"), &b.pwd2).Label("确认密码").
++				Password().Grow(1)
++			if b.pwdErr != "" {
++				ui.Text(c, b.pwdErr).FontSize(11).TextColor(t.Danger).Transition(rowEnter)
++			}
++			ui.Text(c, "加密后的文件以 .gpg 结尾，在电脑上可以用 gpg -d 附上密码解密。密码只保存在这台电脑上，不写进设置文件。").
++				FontSize(11).TextColor(t.TextMuted).Margin(6, 0, 0)
++			if in.Submitted() {
++				a.saveBackupPassphrase()
++			}
++		})
++		ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++			if pill(c, t, p, "", "取消", false).Clicked() {
++				b.pwdOpen, b.pwdErr, b.pwd, b.pwd2 = false, "", "", ""
++			}
++			if pill(c, t, p, "", "保存", true).Clicked() {
++				a.saveBackupPassphrase()
++			}
++		})
++	})
++}
++
++// openBackupPassword opens the 设置密码… dialog, empty.
++func (a *App) openBackupPassword() {
++	b := &a.backup
++	b.pwd, b.pwd2, b.pwdErr = "", "", ""
++	b.pwdOpen = true
++}
++
++// openBackupDest opens the 备份到 dialog on the destination chosen now.
++func (a *App) openBackupDest() {
++	b := &a.backup
++	b.destPicker = picker{dir: a.settings.backupDest()}
++	b.destOpen = true
++}
++
++// saveBackupPassphrase keeps the 设置密码… dialog's passphrase: at least eight
++// characters, typed twice alike, sealed into backup-key.enc and never into
++// settings.json.
++func (a *App) saveBackupPassphrase() {
++	b := &a.backup
++	if n := len([]rune(b.pwd)); n < 8 {
++		b.pwdErr = "密码至少 8 个字符"
++		return
++	}
++	if b.pwd != b.pwd2 {
++		b.pwdErr = "两次输入的密码不一致"
++		return
++	}
++	dir := a.backupDir()
++	if dir == "" {
++		b.pwdErr = "无法保存密码：找不到应用的数据目录"
++		return
++	}
++	kr := a.backupKeyring()
++	pass := b.pwd
++	b.pwdErr, b.pwdOpen, b.pwd, b.pwd2 = "", false, "", ""
++	// The passphrase is in memory at once, so this session's encrypted runs
++	// work; the sealed file is written on a goroutine.
++	b.pass, b.passSet = pass, true
++	a.toast("已设置备份密码", "success")
++	go func() {
++		if err := writeBackupPass(dir, kr, pass); err != nil {
++			a.update(func() {
++				a.toast("无法保存备份密码："+err.Error(), "error")
++			})
++		}
++	}()
++}
++
++// runBackupNow is the 立即备份 button's action in code, for tests: the same
++// path the button takes.
++func (a *App) runBackupNow() {
++	a.startBackup(true)
++}
+diff --git a/app/backup_test.go b/app/backup_test.go
+new file mode 100644
+index 0000000..9771ab9
+--- /dev/null
++++ b/app/backup_test.go
+@@ -0,0 +1,443 @@
++package app
++
++import (
++	"bytes"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo"
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/backup"
++	"github.com/pengstem/baidunetgo/internal/pgp"
++)
++
++// backupTestDirs keeps the settings and the backup state in temporary
++// folders, so that the tests never read or write the user's data directory.
++func backupTestDirs(t *testing.T) (settingsDir, stateDir string) {
++	t.Helper()
++	settingsDir = t.TempDir()
++	mygo.App.SetPath(mygo.PathUserData, settingsDir)
++	t.Cleanup(func() { mygo.App.SetPath(mygo.PathUserData, "") })
++	stateDir = t.TempDir()
++	old := backupStoreDir
++	backupStoreDir = stateDir
++	t.Cleanup(func() { backupStoreDir = old })
++	return settingsDir, stateDir
++}
++
++// backupLocalTree writes a small tree of files for a run to back up.
++func backupLocalTree(t *testing.T) (dir string, files map[string]string) {
++	t.Helper()
++	dir = t.TempDir()
++	files = map[string]string{
++		"a.txt":          "第一个文件",
++		"sub/b.txt":      "第二个文件",
++		"sub/deep/c.txt": "第三个文件",
++	}
++	for name, content := range files {
++		p := filepath.Join(dir, filepath.FromSlash(name))
++		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
++			t.Fatal(err)
++		}
++	}
++	return dir, files
++}
++
++// waitBackupDone builds frames until the run under way finished, and returns
++// failing when it never did.
++func waitBackupDone(t *testing.T, tt *ui.Tester, a *App) {
++	t.Helper()
++	waitUntil(t, tt, "the backup run", func() bool {
++		return !a.backup.running && !a.backup.lastRun.IsZero()
++	})
++}
++
++// TestBackupSettings checks that the 备份 section renders its rows and that
++// its switches persist to settings.json.
++func TestBackupSettings(t *testing.T) {
++	settingsDir, _ := backupTestDirs(t)
++	a, tt, _ := signedIn(t)
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	scrollToShow(t, tt, "备份到")
++	for _, want := range []string{"自动备份", "备份到", "间隔", "加密备份", "密码", "立即备份"} {
++		if !tt.HasText(want) {
++			t.Errorf("%q missing; texts %q", want, tt.Texts())
++		}
++	}
++	if got, want := a.settings.backupDest(), "/备份"; got != want {
++		t.Errorf("default destination %q, want %q", got, want)
++	}
++	save(t, tt, "settings-backup")
++	tt.SetDark(true)
++	tt.Advance(300 * time.Millisecond)
++	save(t, tt, "settings-backup-dark")
++	tt.SetDark(false)
++
++	// The automatic backup switch is at the end of its row.
++	scrollToShow(t, tt, "自动备份")
++	sw, ok := tt.AccessByRole(ui.RoleSwitch, "自动备份")
++	if !ok {
++		t.Fatalf("no 自动备份 switch; texts %q", tt.Texts())
++	}
++	b := sw.Bounds
++	tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++	tt.Advance(300 * time.Millisecond)
++	if !a.settings.Backup.Auto {
++		t.Fatal("turning 自动备份 on did not take")
++	}
++	data, err := os.ReadFile(filepath.Join(settingsDir, "settings.json"))
++	if err != nil {
++		t.Fatalf("settings.json: %v", err)
++	}
++	if !strings.Contains(string(data), `"auto": true`) {
++		t.Errorf("settings.json does not keep the switch: %s", data)
++	}
++	// And off again, the interval 仅手动 leaving no automatic run.
++	sw, ok = tt.AccessByRole(ui.RoleSwitch, "自动备份")
++	if !ok {
++		t.Fatal("the switch vanished")
++	}
++	b = sw.Bounds
++	tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++	tt.Advance(300 * time.Millisecond)
++	if a.settings.Backup.Auto {
++		t.Error("turning 自动备份 off did not take")
++	}
++	if a.backup.timer != nil {
++		t.Error("a timer was arranged with 仅手动 and the switch off")
++	}
++}
++
++// TestBackupEncryptAsksForPassword checks that turning 加密备份 on without a
++// passphrase opens the dialog for one, that a short or mistyped passphrase is
++// refused, and that a good one is sealed in a file of its own — never in
++// settings.json.
++func TestBackupEncryptAsksForPassword(t *testing.T) {
++	settingsDir, stateDir := backupTestDirs(t)
++	a, tt, _ := signedIn(t)
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	scrollToShow(t, tt, "加密备份")
++	sw, ok := tt.AccessByRole(ui.RoleSwitch, "加密备份")
++	if !ok {
++		t.Fatalf("no 加密备份 switch; texts %q", tt.Texts())
++	}
++	b := sw.Bounds
++	tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++	tt.Advance(300 * time.Millisecond)
++	if !a.settings.Backup.Encrypt {
++		t.Fatal("turning 加密备份 on did not take")
++	}
++	if !a.backup.pwdOpen {
++		t.Fatal("turning encryption on with no passphrase did not ask for one")
++	}
++	save(t, tt, "settings-backup-password")
++
++	// A short passphrase is refused.
++	a.backup.pwd, a.backup.pwd2 = "1234567", "1234567"
++	a.saveBackupPassphrase()
++	if a.backup.pwdErr == "" || !a.backup.pwdOpen || a.backup.passSet {
++		t.Fatalf("a 7-character passphrase was accepted: err %q open %v set %v",
++			a.backup.pwdErr, a.backup.pwdOpen, a.backup.passSet)
++	}
++	// Two different ones are refused.
++	a.backup.pwd, a.backup.pwd2 = "correct horse", "correct house"
++	a.saveBackupPassphrase()
++	if a.backup.pwdErr == "" || a.backup.passSet {
++		t.Fatalf("a mistyped passphrase was accepted: err %q", a.backup.pwdErr)
++	}
++	// A good one is taken and sealed.
++	a.backup.pwd, a.backup.pwd2 = "correct horse", "correct horse"
++	a.saveBackupPassphrase()
++	if !a.backup.passSet || a.backup.pass != "correct horse" || a.backup.pwdOpen {
++		t.Fatalf("passphrase after saving: set %v pass %q open %v",
++			a.backup.passSet, a.backup.pass, a.backup.pwdOpen)
++	}
++	sealed := filepath.Join(stateDir, "backup-key.enc")
++	waitUntil(t, tt, "the sealed passphrase", func() bool {
++		_, err := os.Stat(sealed)
++		return err == nil
++	})
++	// It reads back, and neither file holds it in plain text.
++	if pass, err := readBackupPass(stateDir, nil); err != nil || pass != "correct horse" {
++		t.Errorf("readBackupPass = %q, %v", pass, err)
++	}
++	data, err := os.ReadFile(sealed)
++	if err == nil && bytes.Contains(data, []byte("correct horse")) {
++		t.Error("the sealed passphrase is in plain text")
++	}
++	a.applyBackupSettings() // writes settings.json
++	data, err = os.ReadFile(filepath.Join(settingsDir, "settings.json"))
++	if err == nil && bytes.Contains(data, []byte("correct horse")) {
++		t.Error("settings.json holds the passphrase")
++	}
++	if !strings.Contains(string(data), `"encrypt": true`) {
++		t.Errorf("settings.json does not keep 加密备份: %s", data)
++	}
++	// The 密码 row says it is set.
++	tt.Advance(300 * time.Millisecond)
++	scrollToShow(t, tt, "密码")
++	if !tt.HasText("已设置") {
++		t.Errorf("the 密码 row does not say 已设置; texts %q", tt.Texts())
++	}
++}
++
++// TestBackupRun backs a tree up to the fake netdisk: the files arrive with
++// their content, the state file is written, and a second run uploads nothing.
++func TestBackupRun(t *testing.T) {
++	_, stateDir := backupTestDirs(t)
++	a, tt, srv := signedIn(t)
++	local, files := backupLocalTree(t)
++	a.settings.Backup = backupSettings{
++		Dest:    "/备份",
++		Folders: []backup.Folder{{Local: local}},
++	}
++	a.applyBackupSettings()
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++
++	a.runBackupNow()
++	waitBackupDone(t, tt, a)
++	if a.backup.lastErr != "" {
++		t.Fatalf("the run failed: %s", a.backup.lastErr)
++	}
++	if a.backup.uploaded != len(files) || a.backup.skipped != 0 || a.backup.failed != 0 {
++		t.Fatalf("run did %d uploaded, %d skipped, %d failed, want %d uploaded",
++			a.backup.uploaded, a.backup.skipped, a.backup.failed, len(files))
++	}
++	base := "/备份/" + filepath.Base(local)
++	for name, content := range files {
++		p := base + "/" + name
++		if !srv.Exists(p) {
++			t.Errorf("%s is not on the fake netdisk", p)
++			continue
++		}
++		if got := string(srv.Data(p)); got != content {
++			t.Errorf("%s holds %q, want %q", p, got, content)
++		}
++	}
++
++	// The state file records the run.
++	statePath := filepath.Join(stateDir, backupStateName)
++	waitUntil(t, tt, "the state file", func() bool {
++		_, err := os.Stat(statePath)
++		return err == nil
++	})
++	data, err := os.ReadFile(statePath)
++	if err != nil {
++		t.Fatalf("state file: %v", err)
++	}
++	var f backupStateFile
++	if err := json.Unmarshal(data, &f); err != nil {
++		t.Fatalf("state file: %v", err)
++	}
++	if f.Version != backup.StateVersion || len(f.Entries) != len(files) || f.Uploaded != len(files) {
++		t.Errorf("state file = version %d, %d entries, %d uploaded, want version %d, %d entries",
++			f.Version, len(f.Entries), f.Uploaded, backup.StateVersion, len(files))
++	}
++
++	// The page shows what the last run did.
++	scrollToShow(t, tt, "备份状态")
++	if !tt.HasText("上次备份") {
++		t.Errorf("no 上次备份 summary; texts %q", tt.Texts())
++	}
++	if !tt.HasText("上传 " + itoa(len(files)) + " 个") {
++		t.Errorf("the summary does not count %d uploads; texts %q", len(files), tt.Texts())
++	}
++
++	// A second run finds everything unchanged.
++	a.runBackupNow()
++	waitUntil(t, tt, "the second run", func() bool {
++		return !a.backup.running && a.backup.uploaded == 0 && a.backup.skipped == len(files)
++	})
++	if !tt.HasText("跳过 " + itoa(len(files)) + " 个") {
++		t.Errorf("the second run's summary does not count %d skipped; texts %q", len(files), tt.Texts())
++	}
++}
++
++// TestBackupEncryptedRun encrypts every file into a ".gpg" name and checks
++// that pgp.Decrypt gives the original content back.
++func TestBackupEncryptedRun(t *testing.T) {
++	backupTestDirs(t)
++	a, tt, srv := signedIn(t)
++	local, files := backupLocalTree(t)
++	a.backup.pass, a.backup.passSet, a.backup.passRead = "correct horse", true, true
++	a.settings.Backup = backupSettings{
++		Dest:    "/备份",
++		Folders: []backup.Folder{{Local: local}},
++		Encrypt: true,
++	}
++	a.applyBackupSettings()
++	a.runBackupNow()
++	waitBackupDone(t, tt, a)
++	if a.backup.uploaded != len(files) {
++		t.Fatalf("%d uploaded, want %d; error %q", a.backup.uploaded, len(files), a.backup.lastErr)
++	}
++	base := "/备份/" + filepath.Base(local)
++	for name, content := range files {
++		remote := base + "/" + name + pgp.Suffix
++		if !srv.Exists(remote) {
++			t.Errorf("%s is not on the fake netdisk", remote)
++			continue
++		}
++		var out bytes.Buffer
++		if err := pgp.Decrypt(&out, bytes.NewReader(srv.Data(remote)), "correct horse"); err != nil {
++			t.Errorf("pgp.Decrypt(%s): %v", remote, err)
++			continue
++		}
++		if out.String() != content {
++			t.Errorf("%s decrypts to %q, want %q", remote, out.String(), content)
++		}
++	}
++}
++
++// TestBackupMissingFolderKeepsGoing checks that one folder that is not there
++// is reported without aborting the run, and that the page offers the details.
++func TestBackupMissingFolderKeepsGoing(t *testing.T) {
++	backupTestDirs(t)
++	a, tt, _ := signedIn(t)
++	local, files := backupLocalTree(t)
++	missing := filepath.Join(t.TempDir(), "已经删除")
++	a.settings.Backup = backupSettings{
++		Dest:    "/备份",
++		Folders: []backup.Folder{{Local: local}, {Local: missing}},
++	}
++	a.applyBackupSettings()
++	a.runBackupNow()
++	waitBackupDone(t, tt, a)
++	if a.backup.uploaded != len(files) {
++		t.Errorf("%d uploaded after a missing folder, want %d (the run aborted)",
++			a.backup.uploaded, len(files))
++	}
++	if len(a.backup.errs) == 0 {
++		t.Error("the missing folder was not reported")
++	}
++	if a.backup.lastErr != "" {
++		t.Errorf("a missing folder failed the whole run: %q", a.backup.lastErr)
++	}
++
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	scrollToShow(t, tt, "查看详情")
++	if err := tt.Click("查看详情"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(300 * time.Millisecond)
++	if !a.backup.detailsOpen {
++		t.Fatal("the details dialog did not open")
++	}
++	if !tt.HasText("备份详情") {
++		t.Errorf("the details dialog shows no title; texts %q", tt.Texts())
++	}
++	save(t, tt, "settings-backup-details")
++}
++
++// TestBackupFoldersAddRemove adds folders through the chooser's stand-in and
++// removes one, checking that each change reaches settings.json.
++func TestBackupFoldersAddRemove(t *testing.T) {
++	settingsDir, _ := backupTestDirs(t)
++	dir1, dir2 := t.TempDir(), t.TempDir()
++	old := backupPickFolders
++	backupPickFolders = func(*App) ([]string, error) {
++		return []string{dir1, dir1, dir2}, nil // the same folder twice is one entry
++	}
++	t.Cleanup(func() { backupPickFolders = old })
++
++	a, tt, _ := signedIn(t)
++	a.addBackupFolders()
++	waitUntil(t, tt, "the folders added", func() bool {
++		return len(a.settings.Backup.Folders) == 2
++	})
++	if got := a.settings.Backup.Folders[0].Local; got != dir1 {
++		t.Errorf("first folder %q, want %q", got, dir1)
++	}
++	if got := a.settings.Backup.Folders[1].Local; got != dir2 {
++		t.Errorf("second folder %q, want %q", got, dir2)
++	}
++	var s settings
++	data, err := os.ReadFile(filepath.Join(settingsDir, "settings.json"))
++	if err != nil {
++		t.Fatalf("settings.json: %v", err)
++	}
++	if err := json.Unmarshal(data, &s); err != nil {
++		t.Fatalf("settings.json: %v", err)
++	}
++	if len(s.Backup.Folders) != 2 {
++		t.Errorf("settings.json keeps %d folders, want 2: %s", len(s.Backup.Folders), data)
++	}
++
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	scrollToShow(t, tt, "移除")
++	if err := tt.Click("移除"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(200 * time.Millisecond)
++	if len(a.settings.Backup.Folders) != 1 || a.settings.Backup.Folders[0].Local != dir2 {
++		t.Errorf("after removing the first folder: %+v", a.settings.Backup.Folders)
++	}
++}
++
++// TestBackupSchedule checks the automatic run's timing, that a new interval
++// reschedules it, that it starts by itself, and that signing out stops it.
++func TestBackupSchedule(t *testing.T) {
++	backupTestDirs(t)
++	oldFirst := backupFirstDelay
++	backupFirstDelay = 20 * time.Millisecond
++	t.Cleanup(func() { backupFirstDelay = oldFirst })
++
++	a, tt, _ := signedIn(t)
++	t.Cleanup(a.stopBackup)
++	local, files := backupLocalTree(t)
++	a.settings.Backup = backupSettings{
++		Auto:     true,
++		Dest:     "/备份",
++		Interval: 15,
++		Folders:  []backup.Folder{{Local: local}},
++	}
++	a.applyBackupSettings()
++	if a.backup.timer == nil || a.backup.next.IsZero() {
++		t.Fatal("no automatic run was arranged")
++	}
++	// The first run waits backupFirstDelay, shorter than the interval.
++	if d := time.Until(a.backup.next); d > 5*time.Second || d < 0 {
++		t.Errorf("the first run is due in %v, want at most %v", d, 5*time.Second)
++	}
++	// It runs by itself and uploads the tree.
++	waitBackupDone(t, tt, a)
++	if a.backup.uploaded != len(files) {
++		t.Errorf("%d uploaded by the automatic run, want %d", a.backup.uploaded, len(files))
++	}
++	if a.backup.timer == nil {
++		t.Error("the next automatic run was not arranged after one finished")
++	}
++
++	// Another interval moves the next run: a past due last run fires in a
++	// second, a day's interval waits a day.
++	a.backup.lastRun = time.Now().Add(-2 * time.Hour)
++	a.settings.Backup.Interval = 60
++	a.applyBackupSettings()
++	if d := time.Until(a.backup.next); d > 2*time.Second {
++		t.Errorf("with a past due run the next is in %v, want about a second", d)
++	}
++	a.settings.Backup.Interval = 1440
++	a.applyBackupSettings()
++	if d := time.Until(a.backup.next); d < 20*time.Hour {
++		t.Errorf("with a day's interval the next run is in %v", d)
++	}
++
++	// Signing out stops the automatic runs.
++	a.signOut()
++	if a.backup.timer != nil || !a.backup.next.IsZero() {
++		t.Errorf("signing out left timer %v next %v", a.backup.timer, a.backup.next)
++	}
++}
+diff --git a/app/session.go b/app/session.go
+index 14f08af..913d906 100644
+--- a/app/session.go
++++ b/app/session.go
+@@ -256,11 +256,19 @@ func (a *App) onSignedIn() {
+ 	}
+ 	a.useSettings()
+ 	a.maybeTune()
++	// The 备份 settings' state and passphrase, read once, and the automatic
++	// runs if they are on and have an interval.
++	a.backupFileLoaded()
++	a.backupPassLoaded()
++	a.restartBackupTimer()
+ }
+ 
+ // onSignedOut stops the work of the session.
+ func (a *App) onSignedOut() {
+ 	a.login.stopQR()
++	// A backup belongs to no account, but it uploads into this one's
++	// netdisk: stop it, and the automatic runs, until another signs in.
++	a.stopBackup()
+ 	a.stopThumbs()
+ 	if a.stream != nil {
+ 		a.stream.Close()
+diff --git a/app/settings.go b/app/settings.go
+index 365a003..250b4f8 100644
+--- a/app/settings.go
++++ b/app/settings.go
+@@ -4,9 +4,13 @@ import (
+ 	"encoding/json"
+ 	"os"
+ 	"path/filepath"
++	"slices"
++	"strings"
++	"time"
+ 
+ 	"github.com/egoist/mygo"
+ 
++	"github.com/pengstem/baidunetgo/internal/backup"
+ 	"github.com/pengstem/baidunetgo/internal/tune"
+ 	"github.com/pengstem/baidunetgo/internal/updates"
+ )
+@@ -51,6 +55,88 @@ type settings struct {
+ 	// 外观 section of the settings offers; empty keeps the theme's own,
+ 	// the system blue.
+ 	AccentColor string `json:"accent_color,omitempty"`
++	// Backup is the 备份 section's automatic folder backup (backup.go).
++	Backup backupSettings `json:"backup,omitempty"`
++}
++
++// backupSettings is the automatic backup's settings, as the 备份 section of
++// the settings page keeps them. The passphrase is not here: it lives in the
++// user data dir's backup-key.enc, sealed with a key of its own.
++type backupSettings struct {
++	Auto     bool            `json:"auto,omitempty"`     // run by itself on the interval
++	Dest     string          `json:"dest,omitempty"`     // netdisk destination, defaultBackupDest when empty
++	Interval int             `json:"interval,omitempty"` // minutes between automatic runs, 0 only by hand
++	Encrypt  bool            `json:"encrypt,omitempty"`  // encrypt every file, ".gpg" on the netdisk
++	Folders  []backup.Folder `json:"folders,omitempty"`  // the local folders to mirror
++}
++
++// defaultBackupDest is the netdisk folder backups go to when none was
++// chosen: the engine creates it, and each folder's own subfolder, as needed.
++const defaultBackupDest = "/备份"
++
++// backupIntervals are the 间隔 choices, in minutes; 0 means only by hand.
++var backupIntervals = []int{0, 15, 30, 60, 360, 1440}
++
++// backupIntervalLabels names them, as the settings page shows them.
++var backupIntervalLabels = []string{"仅手动", "15 分钟", "30 分钟", "1 小时", "6 小时", "24 小时"}
++
++// backupDest returns the netdisk destination, an absolute path.
++func (s settings) backupDest() string {
++	d := strings.TrimSpace(s.Backup.Dest)
++	if d == "" {
++		return defaultBackupDest
++	}
++	if !strings.HasPrefix(d, "/") {
++		d = "/" + d
++	}
++	return d
++}
++
++// backupInterval returns how long between automatic runs: 0 means only by
++// hand.
++func (s settings) backupInterval() time.Duration {
++	if s.Backup.Interval <= 0 {
++		return 0
++	}
++	return time.Duration(s.Backup.Interval) * time.Minute
++}
++
++// backupIntervalIndex is where the chosen interval is among the presets, 0
++// for 仅手动.
++func (s settings) backupIntervalIndex() int {
++	if i := slices.Index(backupIntervals, s.Backup.Interval); i >= 0 {
++		return i
++	}
++	return 0
++}
++
++// backupIntervalLabel names the chosen interval.
++func (s settings) backupIntervalLabel() string {
++	return backupIntervalLabels[s.backupIntervalIndex()]
++}
++
++// backupIntervalDetail says when the automatic backup runs under the
++// current switch and interval.
++func (s settings) backupIntervalDetail() string {
++	if s.Backup.Interval <= 0 {
++		return "只在你按下「立即备份」时运行"
++	}
++	if !s.Backup.Auto {
++		return "开启自动备份后每 " + s.backupIntervalLabel() + "运行一次"
++	}
++	return "每 " + s.backupIntervalLabel() + "自动备份一次"
++}
++
++// autoBackupDetail says what the 自动备份 switch is doing.
++func (s settings) autoBackupDetail() string {
++	switch {
++	case !s.Backup.Auto:
++		return "已关闭，只能手动备份"
++	case s.Backup.Interval <= 0:
++		return "已开启，但间隔为仅手动，仍需按下「立即备份」"
++	default:
++		return "已开启，每 " + s.backupIntervalLabel() + "自动备份一次"
++	}
+ }
+ 
+ // followSystemFont reports whether the interface follows fontconfig's
+diff --git a/app/settings_page.go b/app/settings_page.go
+index 6588f47..ad39b72 100644
+--- a/app/settings_page.go
++++ b/app/settings_page.go
+@@ -495,6 +495,7 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 					}
+ 				})
+ 			})
++			a.backupSection(c, t, p)
+ 			a.updatesSection(c, t, p)
+ 			section(c, t, p, "关于", func() {
+ 				settingRow(c, t, p, "BaiduNetGo", "", "百度网盘的原生桌面客户端", func() {
+@@ -517,6 +518,7 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	})
+ 	a.updateDialog(c, t, p)
+ 	a.accentDialog(c, t, p)
++	a.backupDialogs(c, t, p)
+ }
+ 
+ // section is a group of settings under its title: a rounded gray panel,
+diff --git a/docs/BACKUP.md b/docs/BACKUP.md
+new file mode 100644
+index 0000000..a440598
+--- /dev/null
++++ b/docs/BACKUP.md
+@@ -0,0 +1,53 @@
++# 自动备份文件夹与加密备份
++
++「备份」把本机的文件夹自动同步到网盘的某个目录，只传新增和改动过的文件；打开加密后，上传的每个文件都是 OpenPGP 加密的 `.gpg`，用 `gpg` 就能在本机、另一台电脑或手机上解开。桌面版和 Android 版共用同一套目录约定、跳过规则与加密格式，两边的备份可以落在同一个网盘目录里。
++
++## 目录布局
++
++- 桌面：设置 →「备份」→「文件夹」里添加任意多个本机文件夹；每个文件夹镜像到 `<备份到>/<文件夹名>/<相对路径>`，`备份到` 默认 `/备份`。
++- Android：同一个「备份」页用系统的目录选择器（SAF）添加文件夹，布局与桌面一致，`备份到` 默认 `/备份`。
++- 相册（仅 Android）：「相册备份」把选中相册里的照片与视频传到 `<备份到>/相册/<相册名>/<文件名>`。
++
++网盘上目录按需要自动创建；两种备份都不会删除网盘上已有的文件，也不会删除本机的文件——本机删掉的文件只是不再上传。
++
++## 增量
++
++每个文件的键是「备份源 + 相对路径」，值记下大小与修改时间（精确到纳秒，Android 用毫秒）。下次运行时大小与修改时间都没变就跳过，不读文件、也不碰网盘；变了才重新上传并覆盖网盘上的同名文件。备份状态存在本机的用户数据目录里：
++
++- 桌面：`backup-state.json`（`version`、`entries`、`last_run`、`uploaded`/`skipped`/`failed`、`last_error`、`errors`、`folders`）。
++- Android：`filesDir/folder-backup.json`、`filesDir/album-backup.json`。
++
++两个文件都按原子写入（先写临时文件再改名）、权限 `0600`，内容坏掉或被旧版本写过时当作从未备份过，重跑一遍即可，不会报错也不会误删。
++
++## 跳过规则
++
++以下名字在任何深度都不备份：`.git`、`node_modules`、`.cache`、`.Trash`、`.DS_Store`、`Thumbs.db`，以及以 `~$` 开头的 Office 锁文件；桌面还可以在配置里追加（`exclude`，只增不减）。Android 的 SAF 目录还会限制单次扫描的文件数，避免一次遍历太久。
++
++## 加密
++
++打开「加密备份」（Android 为「加密相册」/「加密备份」）并设置口令后：
++
++- 每个文件在本地临时目录里流式加密，上传后立刻删掉临时文件；同时最多 `parallel`（1–4）个临时文件存在。
++- 网盘上的名字是原名加 `.gpg`，例如 `IMG_0001.jpg.gpg`；扩展名保留在前，方便事后辨认。
++- 格式是标准的 OpenPGP 对称加密（只有口令、没有公钥）：AES-256、iterated+salted SHA-256 S2K、不压缩、带完整性保护（MDC）。因此下面的命令在任何装了 GnuPG 的机器上都能解开，桌面版和 Android 版产出的文件可以互相解：
++
++```bash
++gpg --decrypt IMG_0001.jpg.gpg > IMG_0001.jpg          # 会提示输入口令
++```
++
++批量解密（口令写在环境变量里，避免进 shell 历史）：
++
++```bash
++export PW='你的备份口令'
++cd ~/下载/备份/相册/相机
++for f in *.gpg; do gpg --batch --yes --pinentry-mode loopback --passphrase "$PW" --decrypt "$f" > "${f%.gpg}"; done
++```
++
++口令本身只保存在本机的凭据存储里（桌面：`mygo.Secrets` 钥匙串，取不到时退回 `backup-key.key`（0600）加密的 `backup-key.enc`；Android：Android Keystore 里的 AES/GCM 密钥加密后存 `filesDir`），**不会**写进 `settings.json`，也不会随备份上传。加密与不加密的切换不会删除网盘上旧格式的文件：关掉加密后同名的明文文件会另存为不带 `.gpg` 的名字，旧的加密副本仍在。
++
++## 何时运行
++
++- 桌面：`自动备份` 打开且设了间隔后，启动约两分钟后跑第一次，此后按间隔（15 分钟 / 30 分钟 / 1 小时 / 6 小时 / 24 小时，或仅手动）触发；同一时间只跑一个，注销、退出或改动设置会停掉当前的运行。「立即备份」可随时手动跑，运行中变为「取消」。
++- Android：`WorkManager` 周期任务（最小 15 分钟）在后台跑，用户手动触发的运行放在前台服务里，带进度通知与取消按钮；打开「仅 WiFi」后只在非计费网络下跑。
++
++失败不会中断整次备份：出错的文件记进结果、留在状态文件之外，下次重跑时再试；「查看详情」（Android：错误详情）列出出错的文件与原因。
+\ No newline at end of file

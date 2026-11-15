@@ -1,0 +1,1310 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 11:32:47 +0800
+Subject: [PATCH] =?UTF-8?q?Cut=20the=20work=20every=20frame=20does=20in=20?=
+ =?UTF-8?q?the=20browser=20and=20on=20the=20transfers=20page=20=E2=80=94?=
+ =?UTF-8?q?=20no=20map=20of=20every=20row=20unless=20rows=20move,=20no=20r?=
+ =?UTF-8?q?e-formatting=20each=20visible=20row,=20no=20re-splitting=20the?=
+ =?UTF-8?q?=20task=20list=20=E2=80=94=20and=20stop=20a=20row=20glide=20fro?=
+ =?UTF-8?q?m=20restarting=20itself=20each=20frame,=20measuring=20each=20ch?=
+ =?UTF-8?q?ange=20in=20docs/PERFORMANCE.md=20because=20a=202=20000-file=20?=
+ =?UTF-8?q?folder=20and=20a=20page=20of=20uploads=20were=20paying=20for=20?=
+ =?UTF-8?q?all=20of=20it=20on=20every=20frame.?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ app/arrivals.go     |  40 ++++--
+ app/bench_test.go   | 302 ++++++++++++++++++++++++++++++++++++++++++++
+ app/browser.go      | 137 ++++++++++++++------
+ app/files.go        |  92 +++++++++++++-
+ app/landing.go      |  34 +++--
+ app/ops.go          |   9 +-
+ app/transfers.go    | 149 ++++++++++++++--------
+ docs/PERFORMANCE.md | 213 +++++++++++++++++++++++++++++++
+ 8 files changed, 857 insertions(+), 119 deletions(-)
+ create mode 100644 app/bench_test.go
+ create mode 100644 docs/PERFORMANCE.md
+
+diff --git a/app/arrivals.go b/app/arrivals.go
+index 24247a8..3cf98af 100644
+--- a/app/arrivals.go
++++ b/app/arrivals.go
+@@ -98,6 +98,8 @@ func (a *App) passTime(now time.Time) {
+ 		delete(a.dying, id)
+ 		if l := a.listings[d.dir]; l != nil {
+ 			l.files = slices.DeleteFunc(l.files, func(f baidu.File) bool { return f.FsID == id })
++			l.names = nil // a name left: the uploads' are checked again
++			delete(l.texts, id)
+ 		}
+ 	}
+ 	dt := float32(min(max(now.Sub(a.passed).Seconds(), 0), 0.25))
+@@ -129,18 +131,23 @@ func (a *App) arrivals(l *listing, now time.Time) {
+ 		a.followUploads(l, now)
+ 	}
+ 	// The rows of uploads the listing lacks, which change as they end or
+-	// the listing gets them.
++	// the listing gets them. It is asked of a set of the names the
++	// listing holds, made once for the change of the files: asking the
++	// files themselves costs a walk of the folder for every upload in it,
++	// on every frame.
+ 	var want []string
+-	for p := range a.gathers {
+-		if path.Dir(p) != l.dir {
+-			continue
+-		}
+-		name := path.Base(p)
+-		if !slices.ContainsFunc(l.files, func(f baidu.File) bool { return f.FsID >= 0 && f.Name == name }) {
+-			want = append(want, name)
++	if len(a.gathers) > 0 {
++		names := l.listingNames()
++		for p := range a.gathers {
++			if path.Dir(p) != l.dir {
++				continue
++			}
++			if name := path.Base(p); !names[name] {
++				want = append(want, name)
++			}
+ 		}
++		slices.Sort(want)
+ 	}
+-	slices.Sort(want)
+ 	if slices.Equal(want, l.ghosts) {
+ 		return
+ 	}
+@@ -154,6 +161,21 @@ func (a *App) arrivals(l *listing, now time.Time) {
+ 	l.sorted = baidu.Order{}
+ }
+ 
++// listingNames returns the names l lists, in a set kept until its files
++// change: a read, or a file leaving as it dissolves.
++func (l *listing) listingNames() map[string]bool {
++	if l.names == nil {
++		names := make(map[string]bool, len(l.files))
++		for _, f := range l.files {
++			if f.FsID >= 0 {
++				names[f.Name] = true
++			}
++		}
++		l.names = names
++	}
++	return l.names
++}
++
+ // followUploads brings the uploads into l's folder into a.gathers, by
+ // the entry of the folder each makes.
+ func (a *App) followUploads(l *listing, now time.Time) {
+diff --git a/app/bench_test.go b/app/bench_test.go
+new file mode 100644
+index 0000000..6d35cdb
+--- /dev/null
++++ b/app/bench_test.go
+@@ -0,0 +1,302 @@
++package app
++
++import (
++	"fmt"
++	"path"
++	"runtime"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo/ui"
++
++	"github.com/pengstem/baidunetgo/internal/baidu"
++	"github.com/pengstem/baidunetgo/internal/fakepan"
++	"github.com/pengstem/baidunetgo/internal/transfer"
++)
++
++// The benchmarks build frames with ui.Tester, as the UI tests do, so that
++// the cost of a frame's view build can be measured without a window. The
++// tester runs shaders and text layout on the CPU, so absolute numbers are
++// not a desktop's, but the same window, font and effects are built before
++// and after a change, which is what a comparison needs.
++//
++// Run them with:
++//
++//	go test ./app -run '^$' -bench 'Benchmark' -benchmem -count=3
++//
++// and add -cpuprofile/-memprofile to find a hot spot.
++
++// signedInB is signedIn for benchmarks.
++func signedInB(b *testing.B) (*App, *ui.Tester, *fakepan.Server) {
++	b.Helper()
++	srv := fakepan.New()
++	b.Cleanup(srv.Close)
++	a := New()
++	a.fake = true
++	go a.signInWith(baidu.OpenAt(baidu.Credentials{BDUSS: "fake", UID: 1}, srv.URL), false)
++	tt := ui.NewTester(a.View, 1200, 800)
++	tt.SetLocale("zh-Hans")
++	waitForB(b, tt, "照片")
++	return a, tt, srv
++}
++
++// waitForB is waitFor for benchmarks.
++func waitForB(b *testing.B, tt *ui.Tester, text string) {
++	b.Helper()
++	deadline := time.Now().Add(5 * time.Second)
++	for !tt.HasText(text) {
++		if time.Now().After(deadline) {
++			b.Fatalf("%q never showed; texts %q", text, tt.Texts())
++		}
++		time.Sleep(10 * time.Millisecond)
++		tt.Advance(50 * time.Millisecond)
++	}
++}
++
++// benchFolder fills dir in the fake netdisk with n files, none with a
++// thumbnail, so that a frame does not fetch images, and opens it.
++func benchFolder(b testing.TB, a *App, tt *ui.Tester, srv *fakepan.Server, dir string, n int) *listing {
++	b.Helper()
++	for i := range n {
++		srv.Add(fakepan.Node{
++			Path:  fmt.Sprintf("%s/文件 %04d.dat", dir, i),
++			Size:  int64(1<<20) * int64(i+1),
++			Mtime: time.Now().Add(-time.Duration(i) * time.Hour).Unix(),
++		})
++	}
++	a.router.Push(filesRoute(dir))
++	deadline := time.Now().Add(10 * time.Second)
++	for {
++		l := a.listings[dir]
++		if l != nil && l.loaded && len(l.files) == n {
++			// No entrance animation, no read again while the benchmark
++			// runs: the frames measured are of a folder that has settled.
++			l.shown = time.Now().Add(-time.Hour)
++			l.read = time.Now()
++			return l
++		}
++		if time.Now().After(deadline) {
++			b.Fatalf("%s never loaded (%d files)", dir, len(l.files))
++		}
++		time.Sleep(5 * time.Millisecond)
++		tt.Advance(20 * time.Millisecond)
++	}
++}
++
++// benchFrames runs the frames of tt for b.N iterations, reporting frames
++// built per tester frame so that a change that quietly builds several
++// frames per call cannot pass as a speedup.
++func benchFrames(b *testing.B, a *App, tt *ui.Tester) {
++	b.Helper()
++	// Settle the one-shot animations (transitions, entrances, glides) the
++	// page started: at the tester's frozen time they would otherwise ask
++	// for frame after frame, and one tt.Frame would build many.
++	tt.Advance(time.Second)
++	built := a.frame
++	tt.Frame()
++	if one := a.frame - built; one != 1 {
++		b.Fatalf("a settled frame builds %d views, want 1", one)
++	}
++	built = a.frame
++	var gc0, gc1 runtime.MemStats
++	runtime.ReadMemStats(&gc0)
++	b.ReportAllocs()
++	b.ResetTimer()
++	for i := 0; i < b.N; i++ {
++		tt.Frame()
++	}
++	b.StopTimer()
++	runtime.ReadMemStats(&gc1)
++	b.ReportMetric(float64(a.frame-built)/float64(b.N), "builds/frame")
++	// Garbage a frame makes brings the collector in, and that is where
++	// much of a frame's cost goes: this says how often.
++	b.ReportMetric(float64(gc1.NumGC-gc0.NumGC)/float64(b.N), "gc/op")
++}
++
++// BenchmarkFilesList2000 builds the list view of a folder of 2 000 files.
++func BenchmarkFilesList2000(b *testing.B) {
++	a, tt, srv := signedInB(b)
++	benchFolder(b, a, tt, srv, "/大目录", 2000)
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkFilesGrid2000 builds the grid view of a folder of 2 000 files.
++func BenchmarkFilesGrid2000(b *testing.B) {
++	a, tt, srv := signedInB(b)
++	a.gridView = true
++	benchFolder(b, a, tt, srv, "/大目录", 2000)
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkFilesListIdle builds the list view of the small root folder, as
++// a control for the work that a frame does whatever the folder holds.
++func BenchmarkFilesListIdle(b *testing.B) {
++	a, tt, _ := signedInB(b)
++	l := a.listings["/"]
++	l.read = time.Now()
++	l.shown = time.Now().Add(-time.Hour)
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkFilesListSelected builds the list view with 100 of the 2 000
++// files chosen, whose rows all draw the selection fill and the status bar
++// counts them.
++func BenchmarkFilesListSelected(b *testing.B) {
++	a, tt, srv := signedInB(b)
++	l := benchFolder(b, a, tt, srv, "/大目录", 2000)
++	for i := range 100 {
++		l.sel.Add(l.files[i].FsID)
++	}
++	l.selected = 0
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkFilesListUploads builds the list view of a folder of 2 000
++// files while 50 uploads gather into it: every frame tells which of them
++// the listing still lacks, to show them as rows. The uploads are into
++// files the folder already lists, so that no row of theirs comes or goes
++// and every frame measured is the settled one; what they cost a frame is
++// telling them apart from the files.
++func BenchmarkFilesListUploads(b *testing.B) {
++	a, tt, srv := signedInB(b)
++	l := benchFolder(b, a, tt, srv, "/大目录", 2000)
++	const uploading = 50
++	tasks := make([]transfer.Task, 0, uploading)
++	a.gathers = map[string]*gather{}
++	for i := range uploading {
++		// The last files of the folder: the walk to find each of them is
++		// what telling the uploads apart costs.
++		f := l.files[len(l.files)-1-i]
++		tasks = append(tasks, transfer.Task{
++			ID: int64(i + 1), Kind: transfer.Upload, Name: f.Name,
++			Remote: f.Path, Size: 1 << 20, Done: 1 << 20,
++			State: transfer.Running, Speed: 1 << 20,
++		})
++		a.gathers[f.Path] = &gather{size: 1 << 20, target: 1, shown: 1, done: true, ended: tt.Now()}
++	}
++	a.transfers.tasks = tasks
++	l.uploadsSeen = [2]int{a.transfers.gen, l.loads}
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkFilesListGathering builds the list view of a folder of 2 000
++// files with five uploads whose rows the listing does not have yet: their
++// ghost rows sort to the top, and the rows under them glide down to make
++// room. A frame may only be measured once they have arrived: before
++// glideRow's fix the glide restarted for ever, so this benchmark failed
++// instead of measuring.
++func BenchmarkFilesListGathering(b *testing.B) {
++	a, tt, srv := signedInB(b)
++	l := benchFolder(b, a, tt, srv, "/大目录", 2000)
++	const gathering = 5
++	a.gathers = map[string]*gather{}
++	for i := range gathering {
++		name := fmt.Sprintf("AAA 上传 %02d.dat", i)
++		a.gathers[path.Join("/大目录", name)] = &gather{size: 1 << 20, target: 1, shown: 1, done: true, ended: tt.Now()}
++	}
++	l.uploadsSeen = [2]int{a.transfers.gen, l.loads}
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkRowTops measures computing where the rows of 2 000 files start
++// while rows come or go: it builds a map of every file a frame, and now
++// fills a slice the listing keeps.
++func BenchmarkRowTops(b *testing.B) {
++	a, tt, srv := signedInB(b)
++	l := benchFolder(b, a, tt, srv, "/大目录", 2000)
++	now := tt.Now()
++	b.ReportAllocs()
++	b.ResetTimer()
++	for i := 0; i < b.N; i++ {
++		a.rowTops(l, now)
++	}
++}
++
++// TestGlideSettles checks that rows shifted by five uploads' rows arriving
++// glide to their places and stop: the view must stop asking for frames,
++// and a settled frame must build one view. A glide used to restart every
++// frame whose step came to more than half a row — five rows at once, say —
++// so it never arrived and the frame was built for ever (see
++// docs/PERFORMANCE.md).
++func TestGlideSettles(t *testing.T) {
++	a, tt, srv := signedIn(t)
++	l := benchFolder(t, a, tt, srv, "/大目录", 200)
++	a.gathers = map[string]*gather{}
++	for i := range 5 {
++		name := fmt.Sprintf("AAA 上传 %02d.dat", i)
++		a.gathers[path.Join("/大目录", name)] = &gather{size: 1 << 20, target: 1, shown: 1, done: true, ended: tt.Now()}
++	}
++	l.uploadsSeen = [2]int{a.transfers.gen, l.loads}
++	tt.Advance(time.Second)
++	if n := len(l.ghosts); n != 5 {
++		t.Fatalf("%d ghost rows, want 5", n)
++	}
++	if tt.FramePending() {
++		t.Fatalf("the view still asks for frames after the rows glided: %d glides left", len(l.glides))
++	}
++	built := a.frame
++	tt.Frame()
++	if got := a.frame - built; got != 1 {
++		t.Fatalf("a settled frame built %d views, want 1", got)
++	}
++}
++
++// benchTransferTasks makes a transfers page's tasks: n of them, some
++// running, some queued, some done.
++func benchTransferTasks(n int) []transfer.Task {
++	tasks := make([]transfer.Task, 0, n)
++	for i := range n {
++		t := transfer.Task{
++			ID:      int64(n - i),
++			Kind:    transfer.Download,
++			Name:    fmt.Sprintf("剧集 S01E%02d.mkv", i),
++			Remote:  fmt.Sprintf("/剧集/剧集 S01E%02d.mkv", i),
++			Local:   fmt.Sprintf("/downloads/剧集 S01E%02d.mkv", i),
++			Size:    int64(1<<30) * int64(i+1),
++			Done:    int64(1<<29) * int64(i+1),
++			State:   transfer.Running,
++			Created: time.Now().Add(-time.Duration(i) * time.Minute),
++			Speed:   8 << 20,
++		}
++		switch i % 3 {
++		case 1:
++			t.State = transfer.Queued
++		case 2:
++			t.State = transfer.Done
++			t.Done = t.Size
++			t.Finished = time.Now().Add(-time.Duration(i) * time.Minute)
++		}
++		tasks = append(tasks, t)
++	}
++	return tasks
++}
++
++// BenchmarkTransfersActive builds the transfers page while 200 tasks go.
++func BenchmarkTransfersActive(b *testing.B) {
++	a, tt, _ := signedInB(b)
++	a.transfers.tasks = benchTransferTasks(200)
++	a.router.Push("/transfers")
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkTransfersDone builds the transfers page's finished tab with 200
++// finished tasks.
++func BenchmarkTransfersDone(b *testing.B) {
++	a, tt, _ := signedInB(b)
++	tasks := benchTransferTasks(200)
++	for i := range tasks {
++		tasks[i].State = transfer.Done
++		tasks[i].Done = tasks[i].Size
++	}
++	a.transfers.tasks = tasks
++	a.transfers.tab = 1
++	a.router.Push("/transfers")
++	benchFrames(b, a, tt)
++}
++
++// BenchmarkSettings builds the settings page.
++func BenchmarkSettings(b *testing.B) {
++	a, tt, _ := signedInB(b)
++	a.router.Push("/settings")
++	benchFrames(b, a, tt)
++}
+diff --git a/app/browser.go b/app/browser.go
+index 1d4c3f6..ed4de9b 100644
+--- a/app/browser.go
++++ b/app/browser.go
+@@ -34,7 +34,16 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 		l.sorted = a.order
+ 	}
+ 	a.settleMaker(l)
+-	a.placeDraft(l)
++	// placeDraft names a folder at the top of the list while one is being
++	// named, and takes it out once it is made or given up; with neither it
++	// has nothing to do. Asking the folder for it costs a walk of every
++	// file, so it is not asked on a folder that has no draft.
++	if a.creating != nil || l.hasDraft {
++		a.placeDraft(l)
++		// placeDraft puts the draft first: the status bar counts it out
++		// without walking the folder.
++		l.hasDraft = len(l.files) > 0 && l.files[0].FsID == draftID
++	}
+ 	a.followFlights(l, c.Now())
+ 	a.chooseLanded(l, c.Now())
+ 	// Files coming and going are not chosen.
+@@ -119,14 +128,20 @@ func (a *App) filesPage(c *ui.Context, t *ui.Theme, p *palette, dir string) {
+ 		if l.loaded {
+ 			a.statusBar(c, t, p, l)
+ 		}
+-		a.selectionBar(c, t, p, l, page.Bounds().W)
++		if l.sel.Len() > 0 {
++			a.selectionBar(c, t, p, l, page.Bounds().W)
++		}
+ 		a.flightCards(c, t, p, l, page.Bounds())
+ 	})
+ 	pageBox = page.Bounds()
+ 	a.marquee(c, t, p, l, page)
+ 	l.sole = 0
+-	if files := l.chosen(); len(files) == 1 {
+-		l.sole = files[0].FsID
++	// A click on the name is slow only while one file is chosen alone: the
++	// choice counts that without walking the folder to make it.
++	if l.sel.Len() == 1 {
++		if files := l.chosen(); len(files) == 1 {
++			l.sole = files[0].FsID
++		}
+ 	}
+ }
+ 
+@@ -141,6 +156,21 @@ func entering(e ui.Element, l *listing, i int, now time.Time, stagger time.Durat
+ 		ui.KeyframeOptions{Delay: time.Duration(min(i, entranceMax)) * stagger})
+ }
+ 
++// rowsVary reports whether the list's rows are not all rowHeight tall this
++// frame: a file dissolving closes up, and the row of a failed upload too,
++// so that the rows after them move and rowTops has their tops.
++func (a *App) rowsVary() bool {
++	if len(a.dying) > 0 {
++		return true
++	}
++	for _, g := range a.gathers {
++		if g.failed {
++			return true
++		}
++	}
++	return false
++}
++
+ // loadingHint shows a folder loading: nothing at first, as most load at
+ // once, then a spinner fading in.
+ func loadingHint(c *ui.Context, t *ui.Theme) {
+@@ -151,22 +181,28 @@ func loadingHint(c *ui.Context, t *ui.Theme) {
+ }
+ 
+ func (a *App) bindListState(l *listing) {
+-	files := l.files
+ 	// The row after the files is the maker, a header so that it is never
+-	// chosen.
+-	l.list.Key = func(i int) any {
+-		if i == len(files) {
+-			return makerID
++	// chosen. The callbacks read the files as the list asks them and are
++	// made once with the listing: making them afresh would allocate three
++	// closures on every frame.
++	if l.keyFn == nil {
++		l.keyFn = func(i int) any {
++			if i == len(l.files) {
++				return makerID
++			}
++			return l.files[i].FsID
+ 		}
+-		return files[i].FsID
+-	}
+-	l.list.Label = func(i int) string {
+-		if i == len(files) {
+-			return ""
++		l.labelFn = func(i int) string {
++			if i == len(l.files) {
++				return ""
++			}
++			return l.files[i].Name
+ 		}
+-		return files[i].Name
++		l.headerFn = func(i int) bool { return i == len(l.files) }
+ 	}
+-	l.list.Header = func(i int) bool { return i == len(files) }
++	l.list.Key = l.keyFn
++	l.list.Label = l.labelFn
++	l.list.Header = l.headerFn
+ 	l.list.Selected = &l.selected
+ 	l.list.Selection = &l.sel
+ 	// MyGo's DragSelect is off: a drag over a row means moving the files,
+@@ -177,9 +213,28 @@ func (a *App) bindListState(l *listing) {
+ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
+ 	a.bindListState(l)
+ 	now := c.Now()
+-	tops := a.rowTops(l, now)
+-	l.rowsBuilt = map[int64]float32{}
+-	l.rowRects = map[int64]ui.Rect{}
++	// Rows are all rowHeight tall unless one is coming or going, closing up
++	// or making room for another: then rowTops has each row's top. Without
++	// one, a row's top is its index's, and building the map would walk
++	// every file of the folder and allocate on every frame.
++	var tops []float32
++	if a.rowsVary() {
++		tops = a.rowTops(l, now)
++	}
++	// This frame's row maps are the frame before's, cleared: rowsShown is
++	// read as they are built, so they cannot share one map.
++	l.rowsBuilt = l.rowsSpare
++	if l.rowsBuilt == nil {
++		l.rowsBuilt = map[int64]float32{}
++	} else {
++		clear(l.rowsBuilt)
++	}
++	l.rowsSpare = nil
++	if l.rowRects == nil {
++		l.rowRects = map[int64]ui.Rect{}
++	} else {
++		clear(l.rowRects)
++	}
+ 	l.contentBottom, l.contentRight = 0, 0
+ 	if l.glides == nil {
+ 		l.glides = map[int64]rowGlide{}
+@@ -219,7 +274,11 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 		muted := t.TextMuted
+ 		passing, gone := a.passing(r, f, t, now)
+ 		draft := f.FsID == draftID
+-		glideRow(c, r, l, f.FsID, tops[f.FsID], now)
++		top := float32(row.Index) * rowHeight
++		if tops != nil {
++			top = tops[row.Index]
++		}
++		glideRow(c, r, l, f.FsID, top, now)
+ 		a.awaited(r, l, f, now)
+ 		if draft {
+ 			l.draftAt = r.Bounds()
+@@ -264,11 +323,10 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 					}
+ 				})
+ 			}
+-			size := "—"
+-			if !f.IsDir {
+-				size = humanSize(f.Size)
+-			}
+-			when := stampTime(f.Mtime, now)
++			// Size, kind and date are formatted once a file, not once a
++			// frame; an upload gathering in its row says how far it is.
++			tx := a.textFor(l, f, now)
++			when := tx.when
+ 			if draft {
+ 				when = ""
+ 			}
+@@ -276,10 +334,10 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 				when = uploadLabel(g)
+ 			}
+ 			if cols.kind {
+-				ui.Text(c, kindLabel(f)).Width(colType).TextColor(muted).SingleLine()
++				ui.Text(c, tx.kind).Width(colType).TextColor(muted).SingleLine()
+ 			}
+ 			if cols.size {
+-				figure(c, size).Width(colSize).TextAlign(ui.End).TextColor(muted)
++				figure(c, tx.size).Width(colSize).TextAlign(ui.End).TextColor(muted)
+ 			}
+ 			if cols.time {
+ 				figure(c, when).Width(colTime).TextAlign(ui.End).TextColor(muted)
+@@ -296,7 +354,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 			a.fileMenu(r, l, row.Index)
+ 		}
+ 	})
+-	l.rowsShown = l.rowsBuilt
++	l.rowsSpare, l.rowsShown = l.rowsShown, l.rowsBuilt
+ 	l.dragArea = list.Bounds() // the rubber band clips to the rows' viewport
+ 	l.pressInView = list.PressedInside()
+ 	if l.refocus {
+@@ -870,7 +928,7 @@ func (a *App) statusBar(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 	ui.Row(c).Height(28).Shrink(0).PaddingX(20).Gap(14).AlignItems(ui.Center).BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).
+ 		FontSize(11).TextColor(t.TextMuted).Children(func() {
+ 		n := len(l.files)
+-		if l.index(draftID) >= 0 {
++		if l.hasDraft {
+ 			n--
+ 		}
+ 		label := itoa(n) + " 项"
+@@ -951,7 +1009,7 @@ func (a *App) fileGrid(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
+ 					}
+ 					ui.Column(c).Gap(6).AlignItems(ui.Center).Children(func() {
+ 						ui.Icon(c, icon(k.look(p).icon)).FontSize(44).TextColor(p.Faint)
+-						ui.Text(c, typeLabel(f)).FontSize(10).FontWeight(600).TextColor(t.TextMuted)
++						ui.Text(c, a.typeFor(l, f, now)).FontSize(10).FontWeight(600).TextColor(t.TextMuted)
+ 					})
+ 				})
+ 			}
+@@ -1120,19 +1178,22 @@ func kindLabel(f *baidu.File) string {
+ // fileMenu gives a file's row its context menu, acting on the files
+ // chosen when the row is one of them, else on the row's.
+ func (a *App) fileMenu(e ui.Element, l *listing, i int) {
+-	f := l.files[i]
++	// The menu's closure reads the file by pointer: capturing the file
++	// itself copies it onto the heap every frame, one copy for every row
++	// or tile in view.
++	f := &l.files[i]
+ 	e.ContextMenu(func(m *ui.Menu) {
+-		files := []baidu.File{f}
++		files := []baidu.File{*f}
+ 		if l.sel.Has(f.FsID) {
+ 			files = l.chosen()
+ 		}
+ 		one := len(files) == 1
+ 		if one && m.Item("打开").Chosen() {
+-			a.open(f)
++			a.open(*f)
+ 		}
+-		if k := kindOf(&f); one && (k == kindVideo || k == kindAudio) {
++		if k := kindOf(f); one && (k == kindVideo || k == kindAudio) {
+ 			if m.Item("用 mpv 播放").Chosen() {
+-				a.playInMPV(f)
++				a.playInMPV(*f)
+ 			}
+ 		}
+ 		if label, ok := a.nextUndo(); ok {
+@@ -1149,7 +1210,7 @@ func (a *App) fileMenu(e ui.Element, l *listing, i int) {
+ 		}
+ 		m.Separator()
+ 		if one && m.Item("重命名").Shortcut(0, ui.KeyF2).Chosen() {
+-			a.rename(l, f)
++			a.rename(l, *f)
+ 		}
+ 		if m.Item("移动到…").Chosen() {
+ 			a.ask(dlgMove, l.dir, files)
+@@ -1169,8 +1230,8 @@ func (a *App) fileMenu(e ui.Element, l *listing, i int) {
+ 		if m.Item("复制路径").Shortcut(ui.Cmd|ui.Shift, ui.KeyC).Chosen() {
+ 			a.copyPaths(files)
+ 		}
+-		if one && kindOf(&f) == kindImage && m.Item("复制图片").Chosen() {
+-			a.copyImage(f, nil)
++		if one && kindOf(f) == kindImage && m.Item("复制图片").Chosen() {
++			a.copyImage(*f, nil)
+ 		}
+ 		if m.Item("显示详情").Shortcut(ui.Cmd, ui.KeyI).Chosen() {
+ 			a.showInfo(l.dir, files)
+diff --git a/app/files.go b/app/files.go
+index d98ed8b..76d157b 100644
+--- a/app/files.go
++++ b/app/files.go
+@@ -100,13 +100,32 @@ type listing struct {
+ 	// are where the breadcrumbs showed, by the folder each opens.
+ 	rowRects   map[int64]ui.Rect
+ 	crumbRects []crumbTarget
+-	// rowsShown are where the list's rows of the last frame showed, by
+-	// file, and rowsBuilt those of this frame (glideRow).
+-	rowsShown, rowsBuilt map[int64]float32
+-	glides               map[int64]rowGlide
+-	makerAt              ui.Rect // where the maker showed, in the window
+-	draftAt              ui.Rect // where the folder being named showed
+-	landing              string  // the path of the folder made, chosen once it lands
++	// rowsShown are where the list's rows stood in the last frame, by
++	// file, and rowsBuilt those of this frame: their places, not where a
++	// gliding row was drawn, so that a glide's own progress never looks
++	// like a row moving (glideRow); rowsSpare is the map of the frame
++	// before, cleared and filled as rowsBuilt next frame, so that a frame
++	// allocates no map. texts are the formatted size, kind and date last
++	// shown by file, so that a frame formats only what changed; hasDraft
++	// says the folder being named is the first row, which placeDraft puts
++	// there.
++	rowsShown, rowsBuilt, rowsSpare map[int64]float32
++	glides                          map[int64]rowGlide
++	tops                            []float32 // each row's top while rows move (rowTops)
++	texts                           map[int64]*rowText
++	hasDraft                        bool
++	// names is the set of the names l lists, for arrivals to tell the
++	// uploads it lacks without walking every file for each of them; it is
++	// dropped when the files change and made again as arrivals needs it.
++	names map[string]bool
++	// keyFn, labelFn and headerFn are the list's callbacks, made once with
++	// the listing rather than as closures every frame.
++	keyFn    func(int) any
++	labelFn  func(int) string
++	headerFn func(int) bool
++	makerAt  ui.Rect // where the maker showed, in the window
++	draftAt  ui.Rect // where the folder being named showed
++	landing  string  // the path of the folder made, chosen once it lands
+ 
+ 	loads       int      // counts the reads that came back
+ 	ghosts      []string // the uploads it shows that it does not list yet
+@@ -226,6 +245,8 @@ func (a *App) load(l *listing) {
+ 			} else {
+ 				l.files, l.loaded = a.keepDying(l.dir, files), true
+ 				l.sorted, l.ghosts = baidu.Order{}, nil
++				l.texts = nil // the files read again are formatted again
++				l.names = nil
+ 				l.loads++
+ 				if l.shown.IsZero() {
+ 					l.shown = time.Now()
+@@ -314,6 +335,63 @@ var nameCollator = collate.New(language.SimplifiedChinese, collate.IgnoreCase, c
+ 
+ func naturalCompare(a, b string) int { return nameCollator.CompareString(a, b) }
+ 
++// rowText is a file's size, kind and date as a row and a tile show them,
++// formatted once: a frame shows the same rows frame after frame, and
++// formatting each size, kind and date again costs a string and an
++// allocation apiece. The entry is used while it describes the file still
++// (its name, size and mtime), and the date it was written for, as
++// stampTime reads the day it is called on.
++type rowText struct {
++	size, kind, when, typeOf string
++	name                     string
++	sizeOf, mtime            int64
++	day, year                int
++}
++
++// textFor returns f's formatted size, kind and date in l, formatting them
++// when the file or the day changed. Ghost rows, uploads the listing shows
++// before it lists them, are made afresh as the upload moves and are not
++// kept.
++func (a *App) textFor(l *listing, f *baidu.File, now time.Time) *rowText {
++	if f.FsID < 0 {
++		return &rowText{size: sizeLabel(f), kind: kindLabel(f), when: stampTime(f.Mtime, now)}
++	}
++	t := l.texts[f.FsID]
++	if t != nil && t.name == f.Name && t.sizeOf == f.Size && t.mtime == f.Mtime {
++		if t.day != now.YearDay() || t.year != now.Year() {
++			// "今天" and "昨天" are the day's, the rest the year's.
++			t.when = stampTime(f.Mtime, now)
++			t.day, t.year = now.YearDay(), now.Year()
++		}
++		return t
++	}
++	t = &rowText{size: sizeLabel(f), kind: kindLabel(f), when: stampTime(f.Mtime, now),
++		name: f.Name, sizeOf: f.Size, mtime: f.Mtime, day: now.YearDay(), year: now.Year()}
++	if l.texts == nil {
++		l.texts = map[int64]*rowText{}
++	}
++	l.texts[f.FsID] = t
++	return t
++}
++
++// sizeLabel is a file's size as a row shows it: a folder's is a dash.
++func sizeLabel(f *baidu.File) string {
++	if f.IsDir {
++		return "—"
++	}
++	return humanSize(f.Size)
++}
++
++// typeFor returns f's type as a grid tile shows it, kept as textFor keeps
++// the row's strings.
++func (a *App) typeFor(l *listing, f *baidu.File, now time.Time) string {
++	t := a.textFor(l, f, now)
++	if t.typeOf == "" {
++		t.typeOf = typeLabel(f)
++	}
++	return t.typeOf
++}
++
+ // open opens a file: a folder goes into it, a file previews.
+ func (a *App) open(f baidu.File) {
+ 	if f.FsID < 0 || a.dying[f.FsID] != nil {
+diff --git a/app/landing.go b/app/landing.go
+index 32a344c..a1baee9 100644
+--- a/app/landing.go
++++ b/app/landing.go
+@@ -196,12 +196,21 @@ func (a *App) flightCards(c *ui.Context, t *ui.Theme, p *palette, l *listing, pa
+ func lerp(a, b, k float32) float32 { return a + (b-a)*k }
+ 
+ // rowTops returns where each row of l starts in its list, the rows closing
+-// up as they leave counted as they show.
+-func (a *App) rowTops(l *listing, now time.Time) map[int64]float32 {
+-	tops := make(map[int64]float32, len(l.files))
++// up as they leave counted as they show. The slice is the listing's own and
++// kept between frames: this runs while rows come or go, and a frame that
++// built a map of every file for it made the collector run for as long as
++// the animation lasted.
++func (a *App) rowTops(l *listing, now time.Time) []float32 {
++	n := len(l.files)
++	if cap(l.tops) < n {
++		l.tops = make([]float32, n)
++	} else {
++		l.tops = l.tops[:n]
++	}
+ 	y := float32(0)
+-	for _, f := range l.files {
+-		tops[f.FsID] = y
++	for i := range l.files {
++		f := &l.files[i]
++		l.tops[i] = y
+ 		h := float32(rowHeight)
+ 		if d := a.dying[f.FsID]; d != nil && !d.at.IsZero() {
+ 			h *= 1 - smoothstep(0.7, 1, since(now, d.at, dissolveFor))
+@@ -210,7 +219,7 @@ func (a *App) rowTops(l *listing, now time.Time) map[int64]float32 {
+ 		}
+ 		y += h
+ 	}
+-	return tops
++	return l.tops
+ }
+ 
+ // rowGlide is a row moving to its place from by DIPs away, from at.
+@@ -234,15 +243,22 @@ func glideRow(c *ui.Context, r ui.Element, l *listing, id int64, top float32, no
+ 			delete(l.glides, id)
+ 		}
+ 	}
+-	if was, ok := l.rowsShown[id]; ok && abs32(was-top-dy) > rowHeight/2 {
+-		dy = was - top
++	// A row's place moving is what starts a glide, or makes one follow the
++	// row it is catching up with again. rowsShown holds the place, not
++	// where the row was drawn: comparing against the drawn place restarted
++	// a glide every frame whose step came to more than half a row — a row
++	// pushed down a few rows by an upload's row, say — so that it never
++	// arrived, its row was drawn short of its place for good, and the frame
++	// asked to be built again and again.
++	if was, ok := l.rowsShown[id]; ok && abs32(was-top) > rowHeight/2 {
++		dy += was - top
+ 		l.glides[id] = rowGlide{from: dy, at: now}
+ 	}
+ 	if dy != 0 {
+ 		r.Translate(0, dy)
+ 		c.Invalidate()
+ 	}
+-	l.rowsBuilt[id] = top + dy
++	l.rowsBuilt[id] = top
+ }
+ 
+ func abs32(v float32) float32 {
+diff --git a/app/ops.go b/app/ops.go
+index bb03dc0..c5179fe 100644
+--- a/app/ops.go
++++ b/app/ops.go
+@@ -251,7 +251,6 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	if a.dlg.open || a.dlg.busy || a.undoBusy || a.pv != nil || a.renaming != nil || a.creating != nil {
+ 		return
+ 	}
+-	files := l.chosen()
+ 	if l.dir != "/" && (c.Shortcut(ui.Alt, ui.KeyUp) || c.Shortcut(ui.Cmd, ui.KeyUp)) {
+ 		a.router.Push(filesRoute(path.Dir(l.dir)))
+ 	}
+@@ -297,6 +296,14 @@ func (a *App) fileActions(c *ui.Context, l *listing) {
+ 	if c.Shortcut(ui.Cmd, ui.Key2) {
+ 		a.gridView = true
+ 	}
++	// The files chosen are asked for only now: the keys above act on the
++	// folder, not on a choice, and walking the folder and copying the
++	// chosen files on every frame is what a browser with nothing chosen
++	// used to pay for every frame it showed.
++	if l.sel.Len() == 0 {
++		return
++	}
++	files := l.chosen()
+ 	if len(files) == 0 {
+ 		return
+ 	}
+diff --git a/app/transfers.go b/app/transfers.go
+index 86d4900..bd84b20 100644
+--- a/app/transfers.go
++++ b/app/transfers.go
+@@ -25,6 +25,77 @@ type transfersState struct {
+ 	speeds  []float64 // the total speed each second, the latest last
+ 	sampled time.Time // when speeds last took a sample
+ 	notice  finishedNotice
++	// going and done are the tasks split as the two tabs show them, with
++	// the counts the page and its toolbar read: all made once for each
++	// change of the tasks (gen), not split and walked again every frame.
++	splitOK           bool
++	splitGen          int
++	splitLen          int
++	splitAt           *transfer.Task
++	going, done       []transfer.Task
++	stopped, active   int
++	running, down, up int
++	queued            int
++	runSpeed          float64
++	details           map[int64]string // finished tasks' detail lines, by task
++}
++
++// splitTasks puts the tasks into the going and the finished, counting what
++// the page and its toolbar and status dots show, once for each change of
++// them; the lists are kept and filled again as the tasks change.
++func (x *transfersState) splitTasks() {
++	// gen counts the app's changes of the tasks, and the tasks are replaced
++	// whole as they change; the length and the first task's address tell a
++	// replacement from the same slice as well, which the tests (and any
++	// caller setting the tasks without counting a change) rely on.
++	var at *transfer.Task
++	if len(x.tasks) > 0 {
++		at = &x.tasks[0]
++	}
++	if x.splitOK && x.splitGen == x.gen && x.splitLen == len(x.tasks) && x.splitAt == at {
++		return
++	}
++	x.splitOK, x.splitGen, x.splitLen, x.splitAt = true, x.gen, len(x.tasks), at
++	x.going, x.done = x.going[:0], x.done[:0]
++	x.stopped, x.active, x.running, x.down, x.up, x.queued, x.runSpeed = 0, 0, 0, 0, 0, 0, 0
++	clear(x.details)
++	for _, task := range x.tasks {
++		if task.State == transfer.Done {
++			x.done = append(x.done, task)
++			continue
++		}
++		x.going = append(x.going, task)
++		switch task.State {
++		case transfer.Paused, transfer.Failed:
++			x.stopped++
++		case transfer.Running:
++			x.active++
++			x.running++
++			x.runSpeed += task.Speed
++			if task.Kind == transfer.Download {
++				x.down++
++			} else {
++				x.up++
++			}
++		case transfer.Queued:
++			x.active++
++			x.queued++
++		}
++	}
++}
++
++// doneDetail is a finished task's line, written once until the tasks
++// change: a finished task's line does not.
++func (x *transfersState) doneDetail(task transfer.Task) string {
++	if s, ok := x.details[task.ID]; ok {
++		return s
++	}
++	if x.details == nil {
++		x.details = map[int64]string{}
++	}
++	s := transferDetail(task)
++	x.details[task.ID] = s
++	return s
+ }
+ 
+ // noticeDelay is how long finished transfers are gathered while the window
+@@ -108,6 +179,7 @@ func (a *App) startTransfers() {
+ 	}
+ 	a.xfer = m
+ 	a.transfers.tasks = m.Tasks()
++	a.transfers.splitOK = false
+ 	a.holdTransfers()
+ }
+ 
+@@ -267,44 +339,22 @@ func (a *App) pickUpload(dir string, from ui.Rect) {
+ 
+ // activeTransfers counts the tasks not finished.
+ func (a *App) activeTransfers() int {
+-	n := 0
+-	for _, t := range a.transfers.tasks {
+-		if t.State == transfer.Running || t.State == transfer.Queued {
+-			n++
+-		}
+-	}
+-	return n
++	a.transfers.splitTasks()
++	return a.transfers.active
+ }
+ 
+ // transferPulse returns how many tasks run and their speed together.
+ func (a *App) transferPulse() (int, float64) {
+-	n, speed := 0, 0.0
+-	for _, t := range a.transfers.tasks {
+-		if t.State == transfer.Running {
+-			n++
+-			speed += t.Speed
+-		}
+-	}
+-	return n, speed
++	a.transfers.splitTasks()
++	return a.transfers.running, a.transfers.runSpeed
+ }
+ 
+ // transferCounts counts the tasks running down and up, those queued, and
+ // adds up their speed.
+ func (a *App) transferCounts() (down, up, queued int, speed float64) {
+-	for _, task := range a.transfers.tasks {
+-		switch {
+-		case task.State == transfer.Queued:
+-			queued++
+-		case task.State != transfer.Running:
+-		case task.Kind == transfer.Download:
+-			down++
+-			speed += task.Speed
+-		default:
+-			up++
+-			speed += task.Speed
+-		}
+-	}
+-	return
++	a.transfers.splitTasks()
++	x := &a.transfers
++	return x.down, x.up, x.queued, x.runSpeed
+ }
+ 
+ // speedHistory is how many seconds of speed the transfers page draws.
+@@ -338,17 +388,10 @@ func (a *App) sampleSpeed(c *ui.Context) {
+ 
+ func (a *App) transfersPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	x := &a.transfers
+-	var going, done []transfer.Task
+-	for _, task := range x.tasks {
+-		if task.State == transfer.Done {
+-			done = append(done, task)
+-		} else {
+-			going = append(going, task)
+-		}
+-	}
+-	shown := going
++	x.splitTasks()
++	shown := x.going
+ 	if x.tab == 1 {
+-		shown = done
++		shown = x.done
+ 	}
+ 	reading := a.xfer != nil && a.xfer.Reading() > 0 && x.tab == 0
+ 	if len(shown) == 0 && reading {
+@@ -492,11 +535,15 @@ func (a *App) transferRow(c *ui.Context, t *ui.Theme, p *palette, task transfer.
+ 			}
+ 			ui.Text(c, arrow).FontSize(12).FontWeight(700).TextColor(color)
+ 			ui.Spacer(c)
+-			detail := figure(c, transferDetail(task)).FontSize(12).TextColor(t.TextMuted).Shrink(1)
++			detail := transferDetail(task)
++			if task.State == transfer.Done {
++				detail = a.transfers.doneDetail(task)
++			}
++			detailEl := figure(c, detail).FontSize(12).TextColor(t.TextMuted).Shrink(1)
+ 			if task.State == transfer.Failed {
+-				detail.TextColor(t.Danger)
++				detailEl.TextColor(t.Danger)
+ 			} else if task.State == transfer.Queued && task.Retries > 0 {
+-				detail.TextColor(t.Warning)
++				detailEl.TextColor(t.Warning)
+ 			}
+ 			ui.Row(c).Gap(0).Children(func() { a.transferActions(c, t, p, task) })
+ 		})
+@@ -612,29 +659,21 @@ func (a *App) transfersToolbar(c *ui.Context, t *ui.Theme, p *palette) {
+ 	if m == nil {
+ 		return
+ 	}
+-	stopped, going, done := 0, 0, 0
+-	for _, task := range a.transfers.tasks {
+-		if task.State == transfer.Paused || task.State == transfer.Failed {
+-			stopped++
+-		}
+-		if task.State == transfer.Done {
+-			done++
+-		} else {
+-			going++
+-		}
+-	}
++	x := &a.transfers
++	x.splitTasks()
++	stopped, going, done := x.stopped, len(x.going), len(x.done)
+ 	tabs := choice(c, t, p, &a.transfers.tab, a.compact, "进行中 "+itoa(going), "已完成 "+itoa(done)).Label("传输")
+ 	if !a.compact {
+ 		tabs.Width(190)
+ 	}
+-	if a.activeTransfers() > 0 {
++	if x.active > 0 {
+ 		if pill(c, t, p, "", "全部暂停", false).Clicked() {
+ 			m.PauseAll()
+ 		}
+ 	} else if stopped > 0 && pill(c, t, p, "", "全部开始", false).Clicked() {
+ 		m.ResumeAll()
+ 	}
+-	if a.transfers.tab == 1 && done > 0 && toolButton(c, t, p, "trash-2", "清除已完成").Clicked() {
++	if x.tab == 1 && done > 0 && toolButton(c, t, p, "trash-2", "清除已完成").Clicked() {
+ 		m.ClearFinished()
+ 	}
+ 	if toolButton(c, t, p, "folder-open", "打开下载文件夹").Clicked() {
+diff --git a/docs/PERFORMANCE.md b/docs/PERFORMANCE.md
+new file mode 100644
+index 0000000..00fd2da
+--- /dev/null
++++ b/docs/PERFORMANCE.md
+@@ -0,0 +1,213 @@
++# Desktop performance
++
++This file records what frames cost in this app's browser, what was measured,
++what changed and what it bought. Everything here was measured headlessly with
++`ui.Tester`, which builds real frames (including text shaping, layout and, on
++the CPU, painting) without a window.
++
++## What a frame costs
++
++Immediate mode means the view is built again for every frame, so everything a
++frame computes is paid at frame rate: formatting a row's size, date and kind,
++filling the maps that say where rows showed, asking the netdisk for
++thumbnails, telling uploads from the files a folder lists. A folder of 2 000
++files showed three costs that scale with the folder or with garbage:
++
++1. `rowTops` walked all 2 000 files and built a `map[int64]float32` of them on
++   **every** list frame — 105 KB per frame, 41% of a frame's allocations. That
++   garbage is what brings the collector in: 0.005 GCs per frame before, 0.001
++   after.
++2. `l.chosen()` — a walk of every file plus a slice of those chosen — ran on
++   every browser frame from `filesPage`, `fileActions` and `selectionBar`,
++   even with nothing chosen, and three times over with 100 files chosen
++   (225 KB per frame).
++3. Uploads gathering into a big folder had `arrivals` walk the folder once for
++   **each** uploading file, every frame (`slices.ContainsFunc` over
++   `l.files`): 50 uploads into 2 000 files walked 100 000 entries a frame.
++4. Per visible row, `humanSize`, `stampTime`, `kindLabel` and `typeLabel`
++   reformatted identical strings every frame (about 4 strings and allocations
++   each), `bindListState` made three closures, `rowRects`/`rowsBuilt` were new
++   maps, and the context-menu closure copied the whole `baidu.File` onto the
++   heap.
++
++## Before and after
++
++Measured with `go test ./app -run '^$' -bench 'Benchmark' -benchmem`
++(Intel i5-13400, 16 threads, machine shared with other builds). Wall time is
++the minimum of four paired runs (the files reverted to `HEAD` and swapped back
++between runs, so both sides saw the same load); allocations and `gc/op` are
++exact.
++
++| Benchmark (one frame) | ns/op min before → after | median before → after | B/op before → after | allocs before → after | gc/op before → after |
++|---|--:|--:|--:|--:|--:|
++| `BenchmarkFilesList2000` — list of 2 000 files | 568 281 → 487 517 (**−14%**) | 596 → 521 µs (−13%) | 105 553 → 23 130 | 930 → 687 | 0.0052 → 0.0011 |
++| `BenchmarkFilesListSelected` — same, 100 chosen | 726 854 → 601 481 (**−17%**) | 833 → 643 µs (−23%) | 225 649 → 103 804 | 1052 → 801 | 0.0036 → 0.0018 |
++| `BenchmarkFilesListUploads` — 2 000 files, 50 uploads | 821 991 → 516 276 (**−37%**) | 916 → 827 µs (−10%) | 105 642 → 23 224 | 939 → 696 | 0.0012 → ≈0 |
++| `BenchmarkFilesGrid2000` — grid of 2 000 files | 336 169 → 353 000 (noise) | 379 → 367 µs (−3%) | 17 657 → 13 576 | 412 → 352 | 0.0006 → 0.0003 |
++| `BenchmarkFilesListIdle` — the small root folder (control) | ~196 000 → ~195 000 | ~205 → ~208 µs | 18 456 → 16 520 | 296 → 266 | 0.0002 → 0.0002 |
++| `BenchmarkTransfersActive` — 200 tasks going (control) | unchanged | unchanged | 110 016 → 110 016 | 322 → 322 | unchanged |
++| `BenchmarkTransfersDone` — 200 finished tasks (control) | unchanged | unchanged | 145 320 → 145 321 | 407 → 407 | unchanged |
++| `BenchmarkSettings` — the settings page (control) | unchanged | unchanged | 16 479 → 16 479 | 207 → 207 | unchanged |
++
++The wall-time numbers move by up to ±15% from run to run on the shared machine
++— the two transfers benchmarks and the settings page, which no change touched,
++are the controls — so the allocation and `gc/op` columns are the reliable part;
++wall time is given as the minimum and the median of four paired runs, the files
++reverted to `HEAD` and swapped back between runs so both sides saw the same
++load. On a desktop the tester's CPU painting is done by the GPU instead, so the
++share of a frame spent on the Go side is larger than these numbers make it
++look; a grid frame's painting hides its (down 23%) allocation change entirely.
++
++## What changed
++
++Each change is a few lines, commented where it lives, and keeps the behaviour:
++row rectangles, marquee, drag, entrance and glide animations and the striping
++are as they were.
++
++- **`app/browser.go` — no map of every row unless rows move.** `rowTops` is
++  only asked for while a row is coming or going (a file dissolving, a failed
++  upload), where row heights differ; otherwise a row's top is its index times
++  `rowHeight`, which is what the map held. `rowsVary` recognises that case.
++  Before: 105 KB and a 2 000-entry walk per frame; after: neither.
++- **`app/browser.go` — the row maps are kept and cleared.** `rowsBuilt`,
++  `rowsShown` and `rowRects` are rotated between frames instead of allocated
++  anew each one.
++- **`app/browser.go` — the list's callbacks are made once.** `bindListState`
++  used to allocate three closures per frame; they now read `l.files` when the
++  list asks them and are kept on the listing.
++- **`app/files.go` — formatted strings once a file, not once a frame.**
++  `textFor`/`typeFor` keep each row's size, kind, date and type (keyed by
++  fs_id, revalidated by name/size/mtime) in the listing, dropped when the files
++  are read again, and the date re-made when the day changes. The date is the
++  one place `now` matters ("今天"/"昨天"), so an entry remembers the day it was
++  written for.
++- **`app/browser.go` — a choice is not rebuilt to be counted.** The
++  "one file chosen alone" test and the selection bar now ask `l.sel` first
++  instead of `l.chosen()`, so a folder with nothing chosen does not walk every
++  file (and a folder with 100 chosen no longer walks it a third time). The
++  status bar's draft count and the draft row are asked of a flag the browser
++  keeps (`hasDraft`) rather than `l.index(draftID)`, and `placeDraft` — a walk
++  of every file — runs only while a folder is being named or one still shows.
++- **`app/browser.go` — the context menu holds the file by pointer.** The
++  closure used to copy the whole `baidu.File` (three strings and six numbers)
++  onto the heap for every row and tile in view, every frame.
++- **`app/arrivals.go` — the uploads are told apart from a name set.**
++  `listingNames` keeps the names a listing holds in a set (made when the files
++  are read, dropped when a file dissolves out of them) and `arrivals` tests each
++  gathering upload against it: the per-frame cost went from
++  `uploads × files` comparisons to `files` (once) + `uploads`.
++
++## What was measured and left alone
++
++- **Thumbnails (`app/thumbs.go`).** A thumbnail already in memory costs one
++  map lookup per visible row or tile per frame (plus the small one it falls
++  back through) — well under 1 µs per visible tile, and below what a frame's
++  painting costs in the tester, so the scheduler was left as it is: entries are
++  keyed by `(fsid, mtime, size, small)` so the same thumbnail is never asked
++  for twice, the queue is capped at 4 096 and six workers fetch, and a job a
++  frame no longer shows is dropped before it is fetched (its entry is deleted
++  on the main thread through `a.update`). Nothing there showed up in a frame
++  profile of a 2 000-file grid or list.
++
++## Second round: the glide bug, the key walks and the transfers page
++
++Once the frame's own allocations were down, the remaining per-frame work was
++in four places; all four are fixed below.
++
++**The glide bug (`app/landing.go`).** A row whose place moves glides there over
++`motionPanel` (180 ms). The check that starts a glide compared the row's place
++recorded last frame — which was recorded *after* the frame restarted the
++glide — with this frame's progress: as soon as a glide's step per frame came to
++more than `rowHeight/2` (14 DIP, so a shift of five rows or more), the two
++differed by the step and the glide was restarted every frame. Measured on five
++upload rows sorting to the top of a folder: **26 glides still alive and 1 638
++restarts over one second, the view invalidating every frame — a `ui.Tester`
++frame built 20 views, the tester's cap, and would never settle.** A desktop
++kept repainting at full speed and drew the rows short of their places for as
++long as nothing else moved them.
++
++The fix records the rows' *places* in `rowsShown`/`rowsBuilt` rather than where
++each was drawn, so a glide is started by a place moving (and follows it again
++if it moves during the glide), never by its own progress.
++
++**`fileActions`'s walk (`app/ops.go`).** The browser's key handler asked for the
++chosen files — a walk of the folder and a slice of every chosen file — at the
++top of every frame, before it looked at any key. It now asks only after the
++folder keys (path up, new folder, refresh, undo, paste, select all, view
++switch) and only if something is chosen at all. The walk was about 2 µs for
++2 000 files, below the noise of a 500 µs frame; it is kept as a cost that grows
++with the folder and does not depend on a key being pressed.
++
++**The transfers page (`app/transfers.go`).** Every frame split the whole task
++list into the going and the finished (two slices the size of the queue, plus
++their growth), walked it again for the toolbar's counts, and formatted every
++finished row's line again. `transfersState` now keeps those lists and counts
++(going, done, stopped, active, running, down, up, queued, their speed, and a
++finished task's line) made once for each change of the tasks — `gen`, the
++change counter the app already keeps, with the tasks' length and first task
++addressed as well so that a caller replacing the slice without counting a
++change still gets the new lists.
++
++**`rowTops`'s map (`app/landing.go`).** While rows come or go it computed every
++row's top into a fresh `map[int64]float32` of every file, every frame, for as
++long as the animation lasted. It now fills a `[]float32` the listing keeps and
++grows (`listing.tops`), which a frame allocates nothing for.
++
++Measured the same way as the first table: the minimum of three paired runs, the
++five files reverted to their state before the second round and swapped back
++between runs. The `BenchmarkFilesListGathering` benchmark is the five uploads'
++rows arriving at the top of a 2 000-file folder.
++
++| Benchmark (one frame) | ns/op before → after | B/op before → after | allocs before → after |
++|---|--:|--:|--:|
++| `BenchmarkRowTops` — a row-top pass over 2 000 files (per call) | 50 324 → 8 359 (**−83%**) | 73 936 → 0 | 10 → 0 |
++| `BenchmarkTransfersActive` — 200 tasks going | 456 313 → 462 309 (noise; median 538 → 529 µs) | 110 019 → 12 320 (**−89%**) | 322 → 307 |
++| `BenchmarkTransfersDone` — 200 finished tasks | 473 138 → 491 708 (noise; median 521 → 492 µs) | 145 324 → 14 553 (**−90%**) | 407 → 398 |
++| `BenchmarkFilesListGathering` — five upload rows arriving | cannot be measured: a settled frame built 20 views (the tester's cap) | — | — |
++| the same, once the glide settles | 503 362–546 143 ns (503–546 µs) | 24 315 | 725 |
++| `BenchmarkFilesList2000` (control for the shortcut fix) | min 570 812 → 510 721 (noise; median 571 → 566 µs) | 23 130 → 23 146 | 687 → 687 |
++| `BenchmarkFilesListSelected` (control for the shortcut fix) | min 813 766 → 610 690 (noise; median 814 → 662 µs) | 103 807 → 103 822 | 801 → 801 |
++
++The transfers page's allocation drop is the largest of the second round: a queue
++of 200 tasks no longer copies itself into two new slices and formats every
++finished line on every frame (110 KB → 12 KB with a task going, 145 KB → 15 KB
++with them finished; the collector is no longer brought in by a page that shows
++the same queue: `gc/op` 0.0013 → 0 and 0.0017 → 0.0004). Its wall time in the
++tester barely moves because painting the rows and the speed chart is most of
++that frame on the CPU; a desktop draws the same rows on the GPU and pays the Go
++side, which is what these columns measure.
++
++`TestGlideSettles` in `app/bench_test.go` guards the glide fix: five upload rows
++arrive, the tester advances a second, and then the view must not ask for another
++frame and a frame must build exactly one view. It fails on the code before the
++fix (`the view still asks for frames after the rows glided: 26 glides left`) and
++`BenchmarkFilesListGathering` fails there too (`a settled frame builds 20 views,
++want 1`).
++
++## Reproducing
++
++```sh
++export GOMODCACHE=$PWD/.toolchain/gomodcache GOPATH=$PWD/.toolchain/gopath GOCACHE=$PWD/.gocache GOFLAGS=-mod=mod
++go test ./app -run '^$' -bench 'Benchmark' -benchmem -count=3
++```
++
++Each benchmark signs in to the fake netdisk, opens a folder of 2 000 files
++(none with a thumbnail, so a frame does not fetch images), settles the one-shot
++animations with `tt.Advance(time.Second)`, checks that a settled `tt.Frame()`
++builds exactly one view (`builds/frame` in the output: the tester's clock is
++frozen during `Frame()`, so an animation in flight always asks for another
++frame and the tester builds up to 20), and then times frames at a fixed clock.
++
++To find a hot spot:
++
++```sh
++go test ./app -run '^$' -bench 'BenchmarkFilesList2000$' -benchtime=5000x \
++  -cpuprofile=/tmp/list.cpu -memprofile=/tmp/list.mem
++go tool pprof -top -sample_index=alloc_space /tmp/list.mem
++go tool pprof -top /tmp/list.cpu
++```
++
++Absolute times are a `ui.Tester`'s: it draws on the CPU (the rasterizer and the
++text shaper are what a 2 000-file list spends most of its frame on) while a
++desktop draws on the GPU. The same view, window size, font and effects are built
++on both sides of a comparison, which is what the numbers above compare.
+\ No newline at end of file

@@ -1,0 +1,1709 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 13:46:18 +0800
+Subject: [PATCH] =?UTF-8?q?Bring=20recipient=20encryption=20and=20signing?=
+ =?UTF-8?q?=20to=20the=20Android=20client's=20Pgp=20on=20BouncyCastle=20?=
+ =?UTF-8?q?=E2=80=94=20the=20same=20packet=20layout=20as=20the=20desktop's?=
+ =?UTF-8?q?,=20tested=20against=20real=20gpg=20in=20both=20directions=20?=
+ =?UTF-8?q?=E2=80=94=20and=20let=20Backup.run=20take=20recipients,=20a=20s?=
+ =?UTF-8?q?igner=20and=20its=20passphrase.?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../pengstem/baidunetgo/core/backup/Backup.kt |  27 +-
+ .../pengstem/baidunetgo/core/crypto/Pgp.kt    | 614 ++++++++++++++----
+ .../pengstem/baidunetgo/core/crypto/PgpKey.kt | 221 +++++++
+ .../baidunetgo/core/backup/BackupTest.kt      |  31 +
+ .../baidunetgo/core/crypto/PgpKeysTest.kt     | 464 +++++++++++++
+ android/docs/CORE-API.md                      |  86 ++-
+ 6 files changed, 1316 insertions(+), 127 deletions(-)
+ create mode 100644 android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKey.kt
+ create mode 100644 android/core/src/test/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKeysTest.kt
+
+diff --git a/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/backup/Backup.kt b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/backup/Backup.kt
+index bdf6e30..2e7c4fb 100644
+--- a/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/backup/Backup.kt
++++ b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/backup/Backup.kt
+@@ -1,6 +1,7 @@
+ package com.pengstem.baidunetgo.core.backup
+ 
+ import com.pengstem.baidunetgo.core.crypto.Pgp
++import com.pengstem.baidunetgo.core.crypto.PgpKey
+ import com.pengstem.baidunetgo.core.net.BaiduException
+ import com.pengstem.baidunetgo.core.net.Netdisk
+ import com.pengstem.baidunetgo.core.net.NotLoggedInException
+@@ -37,7 +38,9 @@ import java.util.concurrent.atomic.AtomicLong
+  *   [Netdisk.upload]. Nothing is ever deleted, on either side.
+  * - With [BackupConfig.encrypt] each file is encrypted with [Pgp] into a unique
+  *   temporary file under `java.io.tmpdir` and uploaded as `<remote>.gpg`; the
+- *   temporary file is deleted in a `finally`, so at most `parallel` exist.
++ *   temporary file is deleted in a `finally`, so at most `parallel` exist. The
++ *   message is encrypted with the passphrase and/or to the recipients given to
++ *   [run], and signed when a signer key is given.
+  * - A failed file is recorded in [BackupResult.errors] and the run continues.
+  * - Cancelling the calling coroutine stops the run with a
+  *   [CancellationException], after the state of the files that finished has been
+@@ -48,16 +51,26 @@ object Backup {
+     /** Uploads at most this many parts of one file at once (the netdisk's default). */
+     private const val UploadConnections = 2
+ 
+-    /** Runs a backup. See the class documentation for the exact rules. */
++    /**
++     * Runs a backup. See the class documentation for the exact rules.
++     *
++     * When [config.encrypt] is set, each file is encrypted with [passphrase]
++     * and/or to [recipients] (at least one of the two is required), and signed
++     * with [signer] when it is given ([signerPassphrase] overrides the
++     * passphrase the signer key remembers from [Pgp.readPrivateKey]).
++     */
+     suspend fun run(
+         api: Netdisk,
+         source: BackupSource,
+         config: BackupConfig,
+         state: BackupStateStore,
+         passphrase: CharArray?,
++        recipients: List<PgpKey> = emptyList(),
++        signer: PgpKey? = null,
++        signerPassphrase: CharArray? = null,
+         onProgress: (BackupProgress) -> Unit = {},
+     ): BackupResult {
+-        if (config.encrypt && (passphrase == null || passphrase.isEmpty())) {
++        if (config.encrypt && (passphrase == null || passphrase.isEmpty()) && recipients.isEmpty()) {
+             throw BackupException("加密备份口令不能为空")
+         }
+ 
+@@ -107,6 +120,9 @@ object Backup {
+                             remoteRoot = remoteRoot,
+                             config = config,
+                             passphrase = passphrase,
++                            recipients = recipients,
++                            signer = signer,
++                            signerPassphrase = signerPassphrase,
+                             directories = directories,
+                             entries = entries,
+                             uploaded = uploaded,
+@@ -145,6 +161,9 @@ object Backup {
+         remoteRoot: String,
+         config: BackupConfig,
+         passphrase: CharArray?,
++        recipients: List<PgpKey>,
++        signer: PgpKey?,
++        signerPassphrase: CharArray?,
+         directories: DirectoryCreator,
+         entries: MutableMap<String, StateEntry>,
+         uploaded: AtomicInteger,
+@@ -179,7 +198,7 @@ object Backup {
+                 try {
+                     sourceFile.open().use { input ->
+                         temporary.outputStream().buffered().use { output ->
+-                            Pgp.encrypt(output, input, passphrase!!)
++                            Pgp.encrypt(output, input, passphrase, recipients, signer, signerPassphrase)
+                         }
+                     }
+                     api.upload(
+diff --git a/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/Pgp.kt b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/Pgp.kt
+index f082422..617480b 100644
+--- a/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/Pgp.kt
++++ b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/Pgp.kt
+@@ -1,37 +1,67 @@
+ package com.pengstem.baidunetgo.core.crypto
+ 
++import org.bouncycastle.bcpg.CompressionAlgorithmTags
+ import org.bouncycastle.bcpg.HashAlgorithmTags
++import org.bouncycastle.bcpg.PublicKeyPacket
++import org.bouncycastle.bcpg.sig.KeyFlags
+ import org.bouncycastle.bcpg.SymmetricKeyAlgorithmTags
++import org.bouncycastle.bcpg.sig.Features
++import org.bouncycastle.crypto.generators.RSAKeyPairGenerator
++import org.bouncycastle.crypto.params.RSAKeyGenerationParameters
+ import org.bouncycastle.openpgp.bc.BcPGPObjectFactory
+ import org.bouncycastle.openpgp.PGPCompressedData
++import org.bouncycastle.openpgp.PGPEncryptedData
+ import org.bouncycastle.openpgp.PGPEncryptedDataGenerator
+ import org.bouncycastle.openpgp.PGPEncryptedDataList
++import org.bouncycastle.openpgp.PGPException
++import org.bouncycastle.openpgp.PGPKeyPair
++import org.bouncycastle.openpgp.PGPKeyRingGenerator
+ import org.bouncycastle.openpgp.PGPLiteralData
+ import org.bouncycastle.openpgp.PGPLiteralDataGenerator
++import org.bouncycastle.openpgp.PGPOnePassSignature
++import org.bouncycastle.openpgp.PGPOnePassSignatureList
+ import org.bouncycastle.openpgp.PGPPBEEncryptedData
++import org.bouncycastle.openpgp.PGPPublicKey
++import org.bouncycastle.openpgp.PGPPublicKeyEncryptedData
++import org.bouncycastle.openpgp.PGPSignature
++import org.bouncycastle.openpgp.PGPSignatureGenerator
++import org.bouncycastle.openpgp.PGPSignatureList
++import org.bouncycastle.openpgp.PGPSignatureSubpacketGenerator
+ import org.bouncycastle.openpgp.PGPUtil
++import org.bouncycastle.openpgp.operator.PBESecretKeyEncryptor
++import org.bouncycastle.openpgp.operator.PGPDigestCalculator
+ import org.bouncycastle.openpgp.operator.bc.BcPBEDataDecryptorFactory
+ import org.bouncycastle.openpgp.operator.bc.BcPBEKeyEncryptionMethodGenerator
++import org.bouncycastle.openpgp.operator.bc.BcPBESecretKeyEncryptorBuilder
++import org.bouncycastle.openpgp.operator.bc.BcPGPContentSignerBuilder
++import org.bouncycastle.openpgp.operator.bc.BcPGPContentVerifierBuilderProvider
+ import org.bouncycastle.openpgp.operator.bc.BcPGPDataEncryptorBuilder
+ import org.bouncycastle.openpgp.operator.bc.BcPGPDigestCalculatorProvider
++import org.bouncycastle.openpgp.operator.bc.BcPGPKeyPair
++import org.bouncycastle.openpgp.operator.bc.BcPublicKeyDataDecryptorFactory
++import org.bouncycastle.openpgp.operator.bc.BcPublicKeyKeyEncryptionMethodGenerator
+ import java.io.File
+ import java.io.InputStream
+ import java.io.OutputStream
+ import java.security.SecureRandom
++import java.security.spec.RSAKeyGenParameterSpec
++import java.util.Date
+ 
+ /** A PGP failure with a user-facing (Chinese) message. */
+-class PgpException(message: String, cause: Throwable? = null) : Exception(message, cause)
++open class PgpException(message: String, cause: Throwable? = null) : Exception(message, cause)
+ 
+ /**
+- * OpenPGP symmetric (passphrase-only) encryption that matches the desktop app's
+- * Go `internal/pgp` and is readable by `gpg --decrypt`.
++ * OpenPGP encryption that matches the desktop app's Go `internal/pgp` and is
++ * readable by `gpg --decrypt`.
+  *
+- * The output is a binary (not armored) OpenPGP message: an iterated+salted
+- * SHA-256 S2K with 4 MiB of work, its key wrapping an AES-256 session, no
+- * compression, an integrity-protected SEIPD v1 (MDC) packet, and a binary
+- * literal-data packet whose file-name hint is empty. Both directions stream
+- * through one buffer, so a file is never held in memory, and the crypto code
+- * writes no temporary files.
++ * Symmetric (passphrase) messages are a binary (not armored) OpenPGP message:
++ * an iterated+salted SHA-256 S2K with 4 MiB of work, its key wrapping an
++ * AES-256 session, no compression, an integrity-protected SEIPD v1 (MDC)
++ * packet, and a binary literal-data packet whose file-name hint is empty.
++ * When recipients are given, one PKESK per recipient is added (a passphrase
++ * and recipients may be combined; then the SKESK wraps the same session key).
++ * Both directions stream through one buffer, so a file is never held in
++ * memory, and the crypto code writes no temporary files.
+  */
+ object Pgp {
+ 
+@@ -49,33 +79,181 @@ object Pgp {
+ 
+     private const val ErrWrongPassphrase = "解密失败：口令不正确或文件已损坏（完整性校验失败）"
+ 
++    // -----------------------------------------------------------------------
++    // Keys
++    // -----------------------------------------------------------------------
++
++    /**
++     * Reads every OpenPGP key in [armored]: one or more ASCII-armored blocks,
++     * public or private (a private block also yields a usable public key).
++     * Raises [PgpException] on text that holds no key.
++     */
++    fun readPublicKeys(armored: String): List<PgpKey> = PgpKey.parseArmored(armored)
++
+     /**
+-     * Encrypts [src] into [dst] with [passphrase]. [dst] is flushed but not
+-     * closed; [src] is not closed either.
++     * Reads a private key from [armored] and verifies [passphrase] against it,
++     * so a wrong passphrase fails here rather than mid-backup. The returned key
++     * remembers [passphrase]; callers may still override it through the
++     * `signerPassphrase` argument of [encrypt].
+      */
+-    fun encrypt(dst: OutputStream, src: InputStream, passphrase: CharArray) {
+-        val digest = try {
+-            BcPGPDigestCalculatorProvider().get(HashAlgorithmTags.SHA256)
++    fun readPrivateKey(armored: String, passphrase: CharArray): PgpKey {
++        val keys = PgpKey.parseArmored(armored)
++        val key = keys.firstOrNull { it.isPrivate }
++            ?: throw PgpException("导入失败：文本里没有 OpenPGP 私钥")
++        // Use the passphrase once: extraction fails with a clear error on a mismatch.
++        PgpKey.keyPair(key.signingSecretKey(), passphrase, action = "导入")
++        return PgpKey(key.publicKeys, key.secretRing, passphrase)
++    }
++
++    /**
++     * Generates an RSA-3072 key pair (master key certifies and signs, a subkey
++     * encrypts, both with SHA-256 self-signatures gpg accepts as they are),
++     * protected by [passphrase] (empty = unprotected), and returns both halves
++     * as ASCII-armored text. Takes a few seconds.
++     */
++    fun generateKeyPair(name: String, email: String, passphrase: CharArray): PgpKeyPair {
++        val userId = buildString {
++            if (name.isNotBlank()) append(name.trim())
++            if (email.isNotBlank()) {
++                if (isNotEmpty()) append(" ")
++                append("<").append(email.trim()).append(">")
++            }
++        }
++        if (userId.isEmpty()) {
++            throw PgpException("生成密钥失败：姓名和邮箱不能都为空")
++        }
++        try {
++            val date = Date()
++            // BC uses this calculator for the secret key's SHA-1 checksum; the
++            // self-signature hash is set separately on the certifier builder.
++            val sha1 = BcPGPDigestCalculatorProvider().get(HashAlgorithmTags.SHA1)
++            val certifier = BcPGPContentSignerBuilder(PGPPublicKey.RSA_GENERAL, HashAlgorithmTags.SHA256)
++            val encryptor = secretKeyEncryptor(passphrase)
++
++            val masterHashed = PGPSignatureSubpacketGenerator().apply {
++                setKeyFlags(false, KeyFlags.CERTIFY_OTHER or KeyFlags.SIGN_DATA)
++                setPreferredSymmetricAlgorithms(
++                    false,
++                    intArrayOf(
++                        SymmetricKeyAlgorithmTags.AES_256,
++                        SymmetricKeyAlgorithmTags.AES_192,
++                        SymmetricKeyAlgorithmTags.AES_128,
++                    ),
++                )
++                setPreferredHashAlgorithms(
++                    false,
++                    intArrayOf(HashAlgorithmTags.SHA256, HashAlgorithmTags.SHA384, HashAlgorithmTags.SHA512),
++                )
++                setPreferredCompressionAlgorithms(
++                    false,
++                    intArrayOf(CompressionAlgorithmTags.UNCOMPRESSED, CompressionAlgorithmTags.ZIP),
++                )
++                setFeature(false, Features.FEATURE_MODIFICATION_DETECTION)
++            }.generate()
++            val subkeyHashed = PGPSignatureSubpacketGenerator().apply {
++                setKeyFlags(false, KeyFlags.ENCRYPT_COMMS or KeyFlags.ENCRYPT_STORAGE)
++            }.generate()
++
++            val generator = PGPKeyRingGenerator(
++                PGPSignature.POSITIVE_CERTIFICATION,
++                rsaKeyPair(KeyBits, date),
++                userId,
++                sha1,
++                masterHashed,
++                null, // no unhashed subpackets
++                certifier,
++                encryptor,
++            )
++            generator.addSubKey(rsaKeyPair(KeyBits, date), subkeyHashed, null)
++            val secretArmored = PgpKey.armorFor(generator.generateSecretKeyRing())
++            val publicArmored = PgpKey.armorFor(generator.generatePublicKeyRing())
++            return PgpKeyPair(publicArmored = publicArmored, privateArmored = secretArmored)
++        } catch (e: PgpException) {
++            throw e
+         } catch (e: Exception) {
+-            throw PgpException("加密失败：无法初始化摘要算法", e)
++            throw PgpException("生成密钥失败：${e.message ?: e.javaClass.simpleName}", e)
+         }
+-        val method = BcPBEKeyEncryptionMethodGenerator(passphrase, digest, S2KEncodedCount)
+-            .setSecureRandom(SecureRandom())
+-        val builder = BcPGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.AES_256)
+-            .setWithIntegrityPacket(true)
++    }
++
++    /** RSA-3072, as gpg's own default; a couple of seconds per key. */
++    private const val KeyBits: Int = 3072
++
++    private fun rsaKeyPair(bits: Int, date: Date): PGPKeyPair {
++        val generator = RSAKeyPairGenerator()
++        generator.init(
++            RSAKeyGenerationParameters(
++                RSAKeyGenParameterSpec.F4,
++                SecureRandom(),
++                bits,
++                12, // certainty: ~100 rounds of Miller-Rabin equivalent
++            ),
++        )
++        return BcPGPKeyPair(
++            PublicKeyPacket.VERSION_4, // a plain v4 key, what gpg and the Go side expect
++            PGPPublicKey.RSA_GENERAL,
++            generator.generateKeyPair(),
++            date,
++        )
++    }
++
++    /** The secret-key encryptor for generated keys: AES-256, SHA-1 S2K (BC's key checksum is SHA-1 only). */
++    private fun secretKeyEncryptor(passphrase: CharArray): PBESecretKeyEncryptor {
++        val sha1 = BcPGPDigestCalculatorProvider().get(HashAlgorithmTags.SHA1)
++        return BcPBESecretKeyEncryptorBuilder(PGPEncryptedData.AES_256, sha1)
+             .setSecureRandom(SecureRandom())
+-        val generator = PGPEncryptedDataGenerator(builder)
+-        // With a single passphrase method the netdisk-compatible (and gpg's own)
+-        // form is a v4 SKESK that carries *no* encrypted session key: the S2K
+-        // derived key is the session key. BC only takes that path when it is not
+-        // forced to make a separate session key; forcing one writes a v5-style
+-        // ESK into a v4 packet, which gpg (and the Go side) reject.
+-        generator.setForceSessionKey(false)
+-        generator.addMethod(method)
++            .build(if (passphrase.isEmpty()) null else passphrase)
++    }
++
++    // -----------------------------------------------------------------------
++    // Encrypt
++    // -----------------------------------------------------------------------
++
++    /**
++     * Encrypts [src] into [dst] with [passphrase] and/or for [recipients] (at
++     * least one of the two must be given). With [signer] the message is also
++     * signed with that key's signing key (SHA-256, binary document); the
++     * signing passphrase is [signerPassphrase], or the one the key remembers
++     * from [readPrivateKey]. [dst] is flushed but not closed; [src] is not
++     * closed either.
++     */
++    fun encrypt(
++        dst: OutputStream,
++        src: InputStream,
++        passphrase: CharArray? = null,
++        recipients: List<PgpKey> = emptyList(),
++        signer: PgpKey? = null,
++        signerPassphrase: CharArray? = null,
++    ) {
++        if ((passphrase == null || passphrase.isEmpty()) && recipients.isEmpty()) {
++            throw PgpException("加密失败：必须提供口令或至少一个接收人")
++        }
++        val signerSetup = signer?.let { setupSigner(it, signerPassphrase) }
+         try {
++            val digest = BcPGPDigestCalculatorProvider().get(HashAlgorithmTags.SHA256)
++            val builder = BcPGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.AES_256)
++                .setWithIntegrityPacket(true)
++                .setSecureRandom(SecureRandom())
++            val generator = PGPEncryptedDataGenerator(builder)
++            // With a single passphrase method the netdisk-compatible (and gpg's own)
++            // form is a v4 SKESK that carries *no* encrypted session key: the S2K
++            // derived key is the session key. BC only takes that path when it is not
++            // forced to make a separate session key; forcing one writes a v5-style
++            // ESK into a v4 packet, which gpg (and the Go side) reject.
++            generator.setForceSessionKey(false)
++            if (passphrase != null && passphrase.isNotEmpty()) {
++                val method = BcPBEKeyEncryptionMethodGenerator(passphrase, digest, S2KEncodedCount)
++                    .setSecureRandom(SecureRandom())
++                generator.addMethod(method)
++            }
++            for (recipient in recipients) {
++                generator.addMethod(BcPublicKeyKeyEncryptionMethodGenerator(recipient.encryptionPublicKey()))
++            }
+             // The non-closing wrapper keeps [dst] open for the caller while the
+             // generator still closes its own stream (which writes the MDC).
+             val encrypted = generator.open(NonClosingOutputStream(dst), ByteArray(BufferSize))
++            // The one-pass signature comes first, before the literal packet's
++            // header is on the stream (the generator writes it up front).
++            if (signerSetup != null) signerSetup.onePass.encode(encrypted)
+             val literalGenerator = PGPLiteralDataGenerator()
+             val literal = literalGenerator.open(
+                 encrypted,
+@@ -85,10 +263,16 @@ object Pgp {
+                 ByteArray(BufferSize),
+             )
+             try {
+-                copy(src, literal)
++                if (signerSetup != null) {
++                    copy(src, SigningOutputStream(literal, signerSetup.generator))
++                } else {
++                    copy(src, literal)
++                }
+             } finally {
+                 literal.close()
+             }
++            // The signature packet closes the signed message, after the literal.
++            if (signerSetup != null) signerSetup.generator.generate().encode(encrypted)
+             generator.close()
+             dst.flush()
+         } catch (e: PgpException) {
+@@ -98,56 +282,37 @@ object Pgp {
+         }
+     }
+ 
+-    /**
+-     * Decrypts [src] into [dst]. On a wrong passphrase this throws
+-     * [PgpException] — but since it is a single streaming pass and OpenPGP's
+-     * integrity check (MDC) only arrives at the end, bytes written to [dst]
+-     * before that point are already there. Callers that must never see partial
+-     * plaintext use [decryptFile], which verifies before writing.
+-     */
+-    fun decrypt(dst: OutputStream, src: InputStream, passphrase: CharArray) {
+-        val digestProvider = BcPGPDigestCalculatorProvider()
+-        try {
+-            val decoded = PGPUtil.getDecoderStream(src)
+-            val objects = BcPGPObjectFactory(decoded)
+-            val first = objects.nextObject()
+-            val list = first as? PGPEncryptedDataList
+-                ?: throw PgpException("解密失败：不是 OpenPGP 加密文件")
+-            val pbe = list.getEncryptedDataObjects().asSequence()
+-                .filterIsInstance<PGPPBEEncryptedData>()
+-                .firstOrNull()
+-                ?: throw PgpException("解密失败：文件不是用口令加密的")
+-            val factory = BcPBEDataDecryptorFactory(passphrase, digestProvider)
+-            val clear = try {
+-                pbe.getDataStream(factory)
+-            } catch (e: Exception) {
+-                throw PgpException(ErrWrongPassphrase, e)
+-            }
+-            copyLiteralData(clear, dst)
+-            if (pbe.isIntegrityProtected) {
+-                val ok = try {
+-                    pbe.verify()
+-                } catch (e: Exception) {
+-                    false
+-                }
+-                if (!ok) throw PgpException(ErrWrongPassphrase)
+-            }
+-        } catch (e: PgpException) {
+-            throw e
+-        } catch (e: Exception) {
+-            throw PgpException("解密失败：${e.message ?: e.javaClass.simpleName}", e)
+-        }
++    private class SignerSetup(val onePass: PGPOnePassSignature, val generator: PGPSignatureGenerator)
++
++    private fun setupSigner(signer: PgpKey, signerPassphrase: CharArray?): SignerSetup {
++        val secret = signer.signingSecretKey()
++        val passphrase = signerPassphrase ?: signer.passphrase
++            ?: throw PgpException("签名失败：缺少签名私钥的口令")
++        val keyPair = PgpKey.keyPair(secret, passphrase, action = "签名")
++        val generator = PGPSignatureGenerator(
++            BcPGPContentSignerBuilder(keyPair.publicKey.algorithm, HashAlgorithmTags.SHA256),
++            keyPair.publicKey,
++        )
++        generator.init(PGPSignature.BINARY_DOCUMENT, keyPair.privateKey)
++        return SignerSetup(onePass = generator.generateOnePassVersion(false), generator = generator)
+     }
+ 
+     /**
+      * Encrypts [src] into [dst], overwriting [dst]. Returns the number of bytes
+      * written. A partial [dst] is removed when encryption fails.
+      */
+-    fun encryptFile(dst: File, src: File, passphrase: CharArray): Long {
++    fun encryptFile(
++        dst: File,
++        src: File,
++        passphrase: CharArray? = null,
++        recipients: List<PgpKey> = emptyList(),
++        signer: PgpKey? = null,
++        signerPassphrase: CharArray? = null,
++    ): Long {
+         val counter = CountingOutputStream(dst.outputStream().buffered(BufferSize))
+         try {
+             src.inputStream().buffered(BufferSize).use { input ->
+-                encrypt(counter, input, passphrase)
++                encrypt(counter, input, passphrase, recipients, signer, signerPassphrase)
+             }
+             counter.flush()
+             return counter.count
+@@ -160,25 +325,264 @@ object Pgp {
+         }
+     }
+ 
++    // -----------------------------------------------------------------------
++    // Decrypt
++    // -----------------------------------------------------------------------
++
++    /**
++     * Decrypts [src] into [dst], encrypted with [passphrase], to one of [keys],
++     * or both (a passphrase-only, key-only, or mixed message all work; a
++     * signed message that is not encrypted, as `gpg --sign` writes, works too).
++     * Returns what the message's signature verified as.
++     *
++     * A signature that cannot be trusted — tampered bytes, a malformed
++     * signature, or an unknown signer — throws [PgpSignatureException], as
++     * does any other failure with the existing clear [PgpException] errors.
++     *
++     * This is a single streaming pass, so bytes written to [dst] before a
++     * failure are already there. Callers that must never see partial plaintext
++     * use [decryptFile], which verifies before writing.
++     */
++    fun decrypt(
++        dst: OutputStream,
++        src: InputStream,
++        passphrase: CharArray? = null,
++        keys: List<PgpKey> = emptyList(),
++    ): VerifyResult {
++        try {
++            val decoded = PGPUtil.getDecoderStream(src)
++            val objects = BcPGPObjectFactory(decoded)
++            val first = objects.nextObject()
++            if (first is PGPEncryptedDataList) {
++                val opened = openEncrypted(first, passphrase, keys)
++                val verifier = SignatureVerifier(keys)
++                try {
++                    if (!unwrap(opened.stream, dst, verifier)) {
++                        throw PgpException("解密失败：文件里没有数据")
++                    }
++                } finally {
++                    try {
++                        opened.stream.close()
++                    } catch (e: Exception) {
++                        // The MDC failure (if any) is the real error; keep unwinding.
++                    }
++                }
++                // Signature problems first: a signed, tampered message reports
++                // the signature, an unsigned one the integrity check.
++                val result = verifier.result()
++                opened.verifyIntegrity()
++                return result
++            }
++            // Not encrypted: a signed message (gpg --sign) over plain literal data.
++            val verifier = SignatureVerifier(keys)
++            var wrote = unwrapObject(first, dst, verifier)
++            while (true) {
++                val obj = objects.nextObject() ?: break
++                if (unwrapObject(obj, dst, verifier)) wrote = true
++            }
++            if (!wrote) throw PgpException("解密失败：文件里没有数据")
++            return verifier.result()
++        } catch (e: PgpException) {
++            throw e
++        } catch (e: Exception) {
++            throw PgpException("解密失败：${e.message ?: e.javaClass.simpleName}", e)
++        }
++    }
++
++    /** An encrypted message opened into a plaintext packet stream. */
++    private class Opened(val stream: InputStream, val data: PGPEncryptedData?) {
++        fun verifyIntegrity() {
++            if (data == null || !data.isIntegrityProtected) return
++            val ok = try {
++                data.verify()
++            } catch (e: Exception) {
++                false
++            }
++            if (!ok) throw PgpException(ErrWrongPassphrase)
++        }
++    }
++
++    /**
++     * Picks how to open an encrypted message: a PKESK one of [keys] holds the
++     * secret key for, else the SKESK with [passphrase].
++     */
++    private fun openEncrypted(list: PGPEncryptedDataList, passphrase: CharArray?, keys: List<PgpKey>): Opened {
++        val objects = list.encryptedDataObjects.asSequence().toList()
++        if (keys.isNotEmpty()) {
++            for (obj in objects.filterIsInstance<PGPPublicKeyEncryptedData>()) {
++                for (key in keys) {
++                    val secret = key.secretRing?.getSecretKey(obj.keyIdentifier.keyId) ?: continue
++                    val passphraseOfKey = key.passphrase ?: passphrase
++                    if (passphraseOfKey == null) continue
++                    val keyPair = PgpKey.keyPair(secret, passphraseOfKey, action = "解密")
++                    val stream = try {
++                        obj.getDataStream(BcPublicKeyDataDecryptorFactory(keyPair))
++                    } catch (e: Exception) {
++                        throw PgpException("解密失败：私钥解密失败或文件已损坏（完整性校验失败）", e)
++                    }
++                    return Opened(stream, obj)
++                }
++            }
++        }
++        val pbe = objects.filterIsInstance<PGPPBEEncryptedData>().firstOrNull()
++        if (pbe != null) {
++            if (passphrase == null || passphrase.isEmpty()) {
++                throw PgpException("解密失败：文件用口令加密，但未提供口令")
++            }
++            val stream = try {
++                pbe.getDataStream(BcPBEDataDecryptorFactory(passphrase, BcPGPDigestCalculatorProvider()))
++            } catch (e: Exception) {
++                throw PgpException(ErrWrongPassphrase, e)
++            }
++            return Opened(stream, pbe)
++        }
++        throw PgpException("解密失败：没有能解开此文件的密钥")
++    }
++
++    /**
++     * Copies the plaintext out of an already-opened message, unwrapping
++     * compression packets (gpg may compress) and feeding every packet to the
++     * signature verifier. Returns whether any literal data was written.
++     */
++    private fun unwrap(clear: InputStream, dst: OutputStream, verifier: SignatureVerifier): Boolean {
++        val outer = BcPGPObjectFactory(clear)
++        var wrote = false
++        while (true) {
++            val obj = outer.nextObject() ?: break
++            if (unwrapObject(obj, dst, verifier)) wrote = true
++        }
++        return wrote
++    }
++
++    /** Handles one packet; returns whether it carried literal data. */
++    private fun unwrapObject(obj: Any, dst: OutputStream, verifier: SignatureVerifier): Boolean = when (obj) {
++        is PGPCompressedData -> {
++            var wrote = false
++            val inner = BcPGPObjectFactory(obj.dataStream)
++            while (true) {
++                val nested = inner.nextObject() ?: break
++                if (unwrapObject(nested, dst, verifier)) wrote = true
++            }
++            wrote
++        }
++        is PGPLiteralData -> {
++            verifier.copyLiteral(obj.inputStream, dst)
++            true
++        }
++        else -> {
++            verifier.accept(obj)
++            false // marker/signature packets carry no data
++        }
++    }
++
++    /**
++     * Collects one-pass signatures, feeds them the literal data as it streams
++     * by, and checks the signature packet at the end.
++     */
++    private class SignatureVerifier(private val keys: List<PgpKey>) {
++
++        private var onePass: PGPOnePassSignature? = null
++        private var signer: PGPPublicKey? = null
++        private var unknownSignerKeyId: Long? = null
++        private var sawSignaturePacket = false
++        private var verified = false
++        private var tampered = false
++
++        fun accept(obj: Any) {
++            when (obj) {
++                is PGPOnePassSignatureList -> {
++                    for (index in 0 until obj.size()) {
++                        val candidate = obj[index]
++                        val key = publicKeyOf(candidate.keyID)
++                        if (key == null) {
++                            if (unknownSignerKeyId == null) unknownSignerKeyId = candidate.keyID
++                            continue
++                        }
++                        if (onePass != null) continue // verify the first verifiable signer only
++                        try {
++                            candidate.init(BcPGPContentVerifierBuilderProvider(), key)
++                            onePass = candidate
++                            signer = key
++                        } catch (e: PGPException) {
++                            if (unknownSignerKeyId == null) unknownSignerKeyId = candidate.keyID
++                        }
++                    }
++                }
++                is PGPSignatureList -> {
++                    if (obj.size() > 0) sawSignaturePacket = true
++                    val active = onePass
++                    if (active == null) return
++                    for (index in 0 until obj.size()) {
++                        val signature = obj[index]
++                        if (signature.keyID != active.keyID) continue
++                        val ok = try {
++                            active.verify(signature)
++                        } catch (e: Exception) {
++                            false
++                        }
++                        if (ok) verified = true else tampered = true
++                    }
++                }
++            }
++        }
++
++        /** Streams [src]'s literal bytes to [dst] while updating the signature. */
++        fun copyLiteral(src: InputStream, dst: OutputStream) {
++            val active = onePass
++            val buffer = ByteArray(BufferSize)
++            while (true) {
++                val read = src.read(buffer)
++                if (read < 0) return
++                dst.write(buffer, 0, read)
++                active?.update(buffer, 0, read)
++            }
++        }
++
++        fun result(): VerifyResult = when {
++            verified -> VerifyResult(
++                signedByKeyId = signer!!.keyID,
++                signedByName = signer!!.userIDs.asSequence().firstOrNull(),
++                verified = true,
++            )
++            tampered || onePass != null -> throw PgpSignatureException("解密失败：签名校验未通过，文件已损坏或被篡改")
++            unknownSignerKeyId != null -> throw PgpSignatureException(
++                "解密失败：无法验证签名：缺少签名者的公钥（key id 0x${unknownSignerKeyId!!.toHexString()}）",
++            )
++            sawSignaturePacket -> throw PgpSignatureException("解密失败：无法验证签名")
++            else -> VerifyResult.Unsigned
++        }
++
++        private fun publicKeyOf(keyId: Long): PGPPublicKey? =
++            keys.asSequence().flatMap { it.publicKeys.asSequence() }.firstOrNull { it.keyID == keyId }
++    }
++
++    private fun Long.toHexString(): String = "%016X".format(this)
++
+     /**
+      * Decrypts [src] into [dst], overwriting [dst]. Returns the number of bytes
+      * written.
+      *
+-     * The ciphertext is read twice: the first pass verifies the passphrase and
+-     * the message's integrity check without writing anything, so a wrong
+-     * passphrase never leaves a partial plaintext file behind; the second pass
+-     * writes it. A failure removes the destination.
++     * The ciphertext is read twice: the first pass verifies the passphrase (or
++     * key) and the message's integrity check — and the signature, when there
++     * is one — without writing anything, so a wrong passphrase never leaves a
++     * partial plaintext file behind; the second pass writes it. A failure
++     * removes the destination.
+      */
+-    fun decryptFile(dst: File, src: File, passphrase: CharArray): Long {
+-        // Pass 1: check the passphrase / MDC, discarding the plaintext.
++    fun decryptFile(
++        dst: File,
++        src: File,
++        passphrase: CharArray? = null,
++        keys: List<PgpKey> = emptyList(),
++    ): Long {
++        // Pass 1: check the passphrase / key / MDC / signature, discarding the plaintext.
+         src.inputStream().buffered(BufferSize).use { input ->
+-            decrypt(OutputStream.nullOutputStream(), input, passphrase)
++            decrypt(OutputStream.nullOutputStream(), input, passphrase, keys)
+         }
+         // Pass 2: decrypt into the destination.
+         val counter = CountingOutputStream(dst.outputStream().buffered(BufferSize))
+         try {
+             src.inputStream().buffered(BufferSize).use { input ->
+-                decrypt(counter, input, passphrase)
++                decrypt(counter, input, passphrase, keys)
+             }
+             counter.flush()
+             return counter.count
+@@ -195,37 +599,6 @@ object Pgp {
+     // Packets
+     // -----------------------------------------------------------------------
+ 
+-    /**
+-     * Copies the literal data out of an already-decrypted stream, unwrapping
+-     * compression packets (gpg may compress) and draining everything so the
+-     * integrity check sees the end of the encrypted data.
+-     */
+-    private fun copyLiteralData(clear: InputStream, dst: OutputStream) {
+-        val outer = BcPGPObjectFactory(clear)
+-        var wrote = false
+-        while (true) {
+-            val obj = outer.nextObject() ?: break
+-            when (obj) {
+-                is PGPCompressedData -> {
+-                    val inner = BcPGPObjectFactory(obj.dataStream)
+-                    while (true) {
+-                        val nested = inner.nextObject() ?: break
+-                        if (nested is PGPLiteralData) {
+-                            copy(nested.inputStream, dst)
+-                            wrote = true
+-                        }
+-                    }
+-                }
+-                is PGPLiteralData -> {
+-                    copy(obj.inputStream, dst)
+-                    wrote = true
+-                }
+-                else -> Unit // marker/signature packets carry no data
+-            }
+-        }
+-        if (!wrote) throw PgpException("解密失败：文件里没有数据")
+-    }
+-
+     private fun copy(src: InputStream, dst: OutputStream) {
+         val buffer = ByteArray(BufferSize)
+         while (true) {
+@@ -250,6 +623,29 @@ private class NonClosingOutputStream(private val delegate: OutputStream) : Outpu
+     }
+ }
+ 
++/** Feeds every byte to the signature generator as well as the literal stream. */
++private class SigningOutputStream(
++    private val literal: OutputStream,
++    private val generator: PGPSignatureGenerator,
++) : OutputStream() {
++    override fun write(b: Int) {
++        literal.write(b)
++        generator.update(byteArrayOf(b.toByte()), 0, 1)
++    }
++
++    override fun write(b: ByteArray, off: Int, len: Int) {
++        literal.write(b, off, len)
++        generator.update(b, off, len)
++    }
++
++    override fun flush() = literal.flush()
++
++    override fun close() {
++        // The literal stream is closed by the caller's finally; closing twice
++        // would corrupt the packet, so this does nothing.
++    }
++}
++
+ /** Counts what was written and can be closed more than once. */
+ private class CountingOutputStream(private val delegate: OutputStream) : OutputStream() {
+     var count: Long = 0
+@@ -277,4 +673,4 @@ private class CountingOutputStream(private val delegate: OutputStream) : OutputS
+             // Nothing useful to do: the caller already has the real failure.
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKey.kt b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKey.kt
+new file mode 100644
+index 0000000..b6dee2b
+--- /dev/null
++++ b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKey.kt
+@@ -0,0 +1,221 @@
++package com.pengstem.baidunetgo.core.crypto
++
++import org.bouncycastle.bcpg.ArmoredOutputStream
++import org.bouncycastle.bcpg.sig.KeyFlags
++import org.bouncycastle.openpgp.PGPException
++import org.bouncycastle.openpgp.PGPKeyRing
++import org.bouncycastle.openpgp.PGPKeyPair
++import org.bouncycastle.openpgp.PGPPublicKey
++import org.bouncycastle.openpgp.PGPPublicKeyRing
++import org.bouncycastle.openpgp.PGPSecretKey
++import org.bouncycastle.openpgp.PGPSecretKeyRing
++import org.bouncycastle.openpgp.PGPSignature
++import org.bouncycastle.openpgp.PGPUtil
++import org.bouncycastle.openpgp.bc.BcPGPObjectFactory
++import org.bouncycastle.openpgp.operator.bc.BcPBESecretKeyDecryptorBuilder
++import org.bouncycastle.openpgp.operator.bc.BcPGPDigestCalculatorProvider
++import java.io.ByteArrayOutputStream
++import java.io.IOException
++import java.io.InputStream
++
++/**
++ * Thrown when a message is signed but the signature cannot be trusted: the
++ * bytes were tampered with, the signature packet is missing or malformed, or
++ * the signer's public key is not among the keys given to [Pgp.decrypt]. A
++ * subclass of [PgpException], so existing `catch (PgpException)` code keeps
++ * catching it.
++ */
++class PgpSignatureException(message: String, cause: Throwable? = null) : PgpException(message, cause)
++
++/**
++ * What [Pgp.decrypt] learned about the message's signature: who signed it and
++ * whether the bytes verified. Unsigned messages read as `(null, null, false)`.
++ */
++data class VerifyResult(
++    /** The key id of the signing key, or null when the message is unsigned. */
++    val signedByKeyId: Long?,
++    /** The signer's first user id, e.g. `"张三 <me@example.com>"`, or null. */
++    val signedByName: String?,
++    /** Whether the signature over the literal data verified. */
++    val verified: Boolean,
++) {
++    internal companion object {
++        val Unsigned = VerifyResult(signedByKeyId = null, signedByName = null, verified = false)
++    }
++}
++
++/** A generated OpenPGP key pair: both halves as ASCII-armored text. */
++data class PgpKeyPair(
++    /** The public key (master + subkey), armor-ready to give to a recipient. */
++    val publicArmored: String,
++    /** The private key, armor-ready to import on the machine that decrypts. */
++    val privateArmored: String,
++)
++
++/**
++ * One OpenPGP key (a public key ring, or a secret key ring with the public
++ * parts), as read by [Pgp.readPublicKeys]/[Pgp.readPrivateKey] or handed to
++ * [Pgp.encrypt] as a recipient or a signer.
++ *
++ * Keys are in-memory objects over the parsed BouncyCastle packets; nothing
++ * here touches a file, a keyring store or Android. Callers persist keys as
++ * armored text ([publicArmored]/[privateArmored]) and parse them again on load
++ * — a [PgpKey] itself is not serializable.
++ */
++class PgpKey internal constructor(
++    /** The ring's public keys, master first. */
++    internal val publicKeys: List<PGPPublicKey>,
++    /** The secret ring when the key carries private material, else null. */
++    internal val secretRing: PGPSecretKeyRing?,
++    /** The passphrase remembered from [Pgp.readPrivateKey], if any. */
++    internal val passphrase: CharArray?,
++) {
++
++    /** Whether the key carries private (secret) material and can sign/decrypt. */
++    val isPrivate: Boolean
++        get() = secretRing != null
++
++    /** The primary key's id, e.g. `0x...` as a plain long. */
++    val keyId: Long
++        get() = master.keyID
++
++    /** The primary key's first user id, e.g. `"张三 <me@example.com>"`. */
++    val userId: String?
++        get() = master.userIDs.asSequence().firstOrNull()
++
++    /** The primary key's fingerprint, upper-case hex. */
++    val fingerprint: String
++        get() = master.fingerprint.joinToString(separator = "") { "%02X".format(it) }
++
++    /** The public half as ASCII armor, ready to share with a recipient. */
++    val publicArmored: String
++        get() = armor(PGPPublicKeyRing(publicKeys))
++
++    /** The private half as ASCII armor, or null for a public-only key. */
++    val privateArmored: String?
++        get() = secretRing?.let { armor(it) }
++
++    /** The ring's master (primary) public key. */
++    internal val master: PGPPublicKey
++        get() = publicKeys.firstOrNull { it.isMasterKey } ?: publicKeys.first()
++
++    /**
++     * The public key to encrypt the session key to: the encryption-capable
++     * subkey (gpg-style) when the ring has one, else the master key.
++     */
++    internal fun encryptionPublicKey(): PGPPublicKey {
++        val encryptFlags = KeyFlags.ENCRYPT_COMMS or KeyFlags.ENCRYPT_STORAGE
++        val capable = publicKeys.filter { it.isEncryptionKey }
++        return capable.firstOrNull { !it.isMasterKey && hasKeyFlag(it, encryptFlags) }
++            ?: capable.firstOrNull { it.isMasterKey && hasKeyFlag(it, encryptFlags) }
++            ?: capable.firstOrNull { !it.isMasterKey }
++            ?: capable.firstOrNull()
++            ?: throw PgpException("加密失败：该密钥不能用于加密")
++    }
++
++    /**
++     * The secret key to sign with: the master key (its SIGN key flag, as
++     * gpg-generated keys carry) when it has one, else a signing subkey, else
++     * the master's secret key.
++     */
++    internal fun signingSecretKey(): PGPSecretKey {
++        val ring = secretRing ?: throw PgpException("签名失败：需要私钥，请导入私钥后重试")
++        val keys = ring.getSecretKeys().asSequence().toList()
++        return keys.firstOrNull { it.isMasterKey && hasKeyFlag(it.publicKey, KeyFlags.SIGN_DATA) }
++            ?: keys.firstOrNull { !it.isMasterKey && hasKeyFlag(it.publicKey, KeyFlags.SIGN_DATA) }
++            ?: keys.firstOrNull { it.isMasterKey }
++            ?: ring.getSecretKey()
++    }
++
++    /** Whether any signature on [key] grants the given key flags. */
++    private fun hasKeyFlag(key: PGPPublicKey, wanted: Int): Boolean {
++        val signatures = try {
++            key.getSignatures().asSequence().toList()
++        } catch (e: Exception) {
++            emptyList()
++        }
++        return signatures.any { flagsOf(it) and wanted != 0 }
++    }
++
++    internal companion object {
++
++        /** The key flags any signature on [key] grants; 0 when there are none. */
++        private fun flagsOf(signature: PGPSignature): Int = try {
++            signature.hashedSubPackets?.keyFlags ?: 0
++        } catch (e: Exception) {
++            0
++        }
++
++        /** Extracts [secret]'s private key with [passphrase]; wrong passphrase is a clear error. */
++        internal fun keyPair(secret: PGPSecretKey, passphrase: CharArray?, action: String): PGPKeyPair {
++            val decryptor = BcPBESecretKeyDecryptorBuilder(BcPGPDigestCalculatorProvider())
++                .build(if (passphrase == null || passphrase.isEmpty()) null else passphrase)
++            return try {
++                secret.extractKeyPair(decryptor)
++            } catch (e: PGPException) {
++                throw PgpException("${action}失败：私钥口令不正确", e)
++            }
++        }
++
++        /** Builds a key from a parsed secret ring, remembering [passphrase] for later use. */
++        internal fun ofSecret(ring: PGPSecretKeyRing, passphrase: CharArray?): PgpKey =
++            PgpKey(
++                publicKeys = ring.getPublicKeys().asSequence().toList(),
++                secretRing = ring,
++                passphrase = passphrase,
++            )
++
++        /**
++         * Collects every key in an armored or binary key stream. ASCII armor
++         * is split into its `BEGIN…END` blocks first, because a decoder stream
++         * stops after the first one.
++         */
++        internal fun parse(input: InputStream): List<PgpKey> {
++            val keys = ArrayList<PgpKey>()
++            try {
++                val objects = BcPGPObjectFactory(PGPUtil.getDecoderStream(input))
++                while (true) {
++                    val obj = objects.nextObject() ?: break
++                    when (obj) {
++                        is PGPPublicKeyRing -> keys += PgpKey(obj.getPublicKeys().asSequence().toList(), null, null)
++                        is PGPSecretKeyRing -> keys += ofSecret(obj, null)
++                    }
++                }
++            } catch (e: PGPException) {
++                throw PgpException("导入失败：不是有效的 OpenPGP 密钥文本", e)
++            } catch (e: IOException) {
++                throw PgpException("导入失败：不是有效的 OpenPGP 密钥文本", e)
++            }
++            return keys
++        }
++
++        /** Collects every key in [armored] (one or more ASCII-armored blocks). */
++        internal fun parseArmored(armored: String): List<PgpKey> {
++            val blocks = Regex(
++                "-----BEGIN PGP [A-Z ]*KEY BLOCK-----.*?-----END PGP [A-Z ]*KEY BLOCK-----",
++                RegexOption.DOT_MATCHES_ALL,
++            ).findAll(armored).map { "${it.value}\n" }.toList()
++            val keys = if (blocks.isEmpty()) {
++                parse(armored.toByteArray().inputStream())
++            } else {
++                blocks.flatMap { parse(it.toByteArray().inputStream()) }
++            }
++            if (keys.isEmpty()) throw PgpException("导入失败：文本里没有 OpenPGP 密钥")
++            return keys
++        }
++
++        private fun armor(ring: PGPKeyRing): String {
++            val out = ByteArrayOutputStream()
++            val armored = ArmoredOutputStream(out)
++            try {
++                ring.encode(armored)
++            } finally {
++                armored.close() // writes the "-----END ..." line
++            }
++            return out.toString("UTF-8")
++        }
++
++        /** Armors a parsed key ring for [Pgp.generateKeyPair] and [PgpKey]'s properties. */
++        internal fun armorFor(ring: PGPKeyRing): String = armor(ring)
++    }
++}
+diff --git a/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/backup/BackupTest.kt b/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/backup/BackupTest.kt
+index 0e3dcb4..d63970d 100644
+--- a/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/backup/BackupTest.kt
++++ b/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/backup/BackupTest.kt
+@@ -18,6 +18,7 @@ import org.junit.Assert.fail
+ import org.junit.Rule
+ import org.junit.Test
+ import org.junit.rules.TemporaryFolder
++import java.io.ByteArrayOutputStream
+ import java.io.File
+ import java.nio.file.Files
+ import java.nio.file.attribute.PosixFilePermissions
+@@ -197,6 +198,36 @@ class BackupTest {
+         assertEquals(0, fake.uploads.size)
+     }
+ 
++    @Test
++    fun encryptedBackupToARecipientRoundTrips() = runBlocking {
++        val pair = Pgp.generateKeyPair("Backup 测试", "test@example.com", "key pass".toCharArray())
++        val recipient = Pgp.readPublicKeys(pair.publicArmored).single()
++        val root = tmp.newFolder("密钥源")
++        writeFile(root, "secret.bin", "给接收人的内容".toByteArray())
++        val fake = FakeNetdisk()
++
++        val result = Backup.run(
++            fake,
++            FolderSource(root),
++            BackupConfig(dest = "/备份", remoteName = "密钥", encrypt = true),
++            store("state.json"),
++            passphrase = null,
++            recipients = listOf(recipient),
++        )
++
++        assertEquals(1, result.uploaded)
++        assertEquals(0, result.failed)
++        val remote = fake.files.keys.single()
++        assertEquals("/备份/密钥/secret.bin.gpg", remote)
++        val decrypted = ByteArrayOutputStream()
++        Pgp.decrypt(
++            decrypted,
++            fake.files[remote]!!.inputStream(),
++            keys = listOf(Pgp.readPrivateKey(pair.privateArmored, "key pass".toCharArray())),
++        )
++        assertEquals("给接收人的内容", String(decrypted.toByteArray()))
++    }
++
+     // -----------------------------------------------------------------------
+     // Failures and cancellation
+     // -----------------------------------------------------------------------
+diff --git a/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKeysTest.kt b/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKeysTest.kt
+new file mode 100644
+index 0000000..646d285
+--- /dev/null
++++ b/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/crypto/PgpKeysTest.kt
+@@ -0,0 +1,464 @@
++package com.pengstem.baidunetgo.core.crypto
++
++import org.junit.Assert.assertArrayEquals
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Assert.fail
++import org.junit.After
++import org.junit.Assume.assumeTrue
++import org.junit.Before
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++import java.io.ByteArrayInputStream
++import java.io.ByteArrayOutputStream
++import java.io.File
++import java.io.IOException
++import java.util.Random
++import java.util.concurrent.TimeUnit
++
++/**
++ * Public-key (recipient) encryption and signing with [Pgp]: generated keys
++ * round-trip with each other and with the real `gpg` 2.4 in both directions.
++ *
++ * `gpg` is required; the class skips itself cleanly when it is absent. Every
++ * test gets a throw-away `GNUPGHOME`, so nothing touches the machine's keyrings.
++ */
++class PgpKeysTest {
++
++    @get:Rule
++    val tmp = TemporaryFolder()
++
++    private val passphrase = "correct horse battery staple"
++
++    private lateinit var gnupgHome: File
++
++    @Before
++    fun setUp() {
++        assumeTrue("gpg is required for the OpenPGP interop tests", gpgAvailable())
++        // gpg-agent binds its control sockets under GNUPGHOME, so the home must
++        // be a short path (the 108-byte Unix socket limit) and owner-only (0700),
++        // which a long build/tmp path or a loose TemporaryFolder mode breaks.
++        gnupgHome = File("/tmp", "bng-gpg-" + java.lang.Long.toHexString(System.nanoTime()))
++        gnupgHome.mkdir()
++        gnupgHome.setReadable(false, false)
++        gnupgHome.setWritable(false, false)
++        gnupgHome.setExecutable(false, false)
++        gnupgHome.setReadable(true, true)
++        gnupgHome.setWritable(true, true)
++        gnupgHome.setExecutable(true, true)
++    }
++
++    @After
++    fun tearDown() {
++        gnupgHome.deleteRecursively()
++    }
++
++    // -----------------------------------------------------------------------
++    // Kotlin-only round trips
++    // -----------------------------------------------------------------------
++
++    @Test
++    fun generatedPairRoundTripsInKotlin() {
++        val pair = generated()
++        val keys = Pgp.readPublicKeys(pair.publicArmored)
++        assertEquals("one public block is one key", 1, keys.size)
++        val recipient = keys.first()
++        assertEquals("Backup 测试 <test@example.com>", recipient.userId)
++        assertEquals(false, recipient.isPrivate)
++
++        val payload = randomBytes(64 shl 10)
++        val encrypted = ByteArrayOutputStream()
++        Pgp.encrypt(encrypted, payload.inputStream(), recipients = listOf(recipient))
++
++        val plain = ByteArrayOutputStream()
++        val result = Pgp.decrypt(plain, encrypted.toByteArray().inputStream(), keys = listOf(readSecret(pair)))
++        assertArrayEquals("the recipient's key decrypts", payload, plain.toByteArray())
++        assertNull("an unsigned message has no signer", result.signedByKeyId)
++        assertNull(result.signedByName)
++        assertEquals(false, result.verified)
++    }
++
++    @Test
++    fun twoRecipientsEitherKeyDecrypts() {
++        val (first, second) = Pair(generated(), generated())
++        val payload = randomBytes(16 shl 10)
++        val encrypted = ByteArrayOutputStream()
++        Pgp.encrypt(
++            encrypted,
++            payload.inputStream(),
++            recipients = listOf(
++                Pgp.readPublicKeys(first.publicArmored).first(),
++                Pgp.readPublicKeys(second.publicArmored).first(),
++            ),
++        )
++
++        for (pair in listOf(first, second)) {
++            val plain = ByteArrayOutputStream()
++            Pgp.decrypt(plain, encrypted.toByteArray().inputStream(), keys = listOf(readSecret(pair)))
++            assertArrayEquals("each recipient can decrypt", payload, plain.toByteArray())
++        }
++    }
++
++    @Test
++    fun passphraseAndRecipientsWorkTogether() {
++        val pair = generated()
++        val payload = randomBytes(8 shl 10)
++        val encrypted = ByteArrayOutputStream()
++        Pgp.encrypt(
++            encrypted,
++            payload.inputStream(),
++            passphrase = passphrase.toCharArray(),
++            recipients = listOf(Pgp.readPublicKeys(pair.publicArmored).first()),
++        )
++
++        val withKey = ByteArrayOutputStream()
++        Pgp.decrypt(withKey, encrypted.toByteArray().inputStream(), keys = listOf(readSecret(pair)))
++        assertArrayEquals("the key alone decrypts", payload, withKey.toByteArray())
++
++        val withPassphrase = ByteArrayOutputStream()
++        Pgp.decrypt(withPassphrase, encrypted.toByteArray().inputStream(), passphrase.toCharArray())
++        assertArrayEquals("the passphrase alone decrypts too", payload, withPassphrase.toByteArray())
++    }
++
++    @Test
++    fun signatureIsVerifiedAndTamperingThrows() {
++        val pair = generated()
++        val other = generated()
++        val payload = randomBytes(32 shl 10)
++        val encrypted = ByteArrayOutputStream()
++        Pgp.encrypt(
++            encrypted,
++            payload.inputStream(),
++            passphrase = "vault".toCharArray(),
++            recipients = listOf(Pgp.readPublicKeys(other.publicArmored).first()),
++            signer = readSecret(pair),
++        )
++
++        val result = Pgp.decrypt(
++            ByteArrayOutputStream(),
++            encrypted.toByteArray().inputStream(),
++            "vault".toCharArray(),
++            keys = listOf(readSecret(other), readSecret(pair)),
++        )
++        assertEquals("the signature verifies", true, result.verified)
++        assertEquals(publicKey(pair).keyId, result.signedByKeyId)
++        assertEquals("Backup 测试 <test@example.com>", result.signedByName)
++
++        // One flipped byte of ciphertext must break the signature (or the MDC).
++        val tampered = encrypted.toByteArray().also { it[it.size / 2] = (it[it.size / 2] + 1).toByte() }
++        try {
++            Pgp.decrypt(
++                ByteArrayOutputStream(),
++                ByteArrayInputStream(tampered),
++                "vault".toCharArray(),
++                keys = listOf(readSecret(other), readSecret(pair)),
++            )
++            fail("a tampered signed message must throw")
++        } catch (expected: PgpSignatureException) {
++            assertTrue("the message must be user facing: ${expected.message}", expected.message!!.contains("签名"))
++        }
++    }
++
++    @Test
++    fun unknownSignerThrows() {
++        val signer = generated()
++        val recipient = generated()
++        val encrypted = ByteArrayOutputStream()
++        Pgp.encrypt(
++            encrypted,
++            randomBytes(4096).inputStream(),
++            recipients = listOf(Pgp.readPublicKeys(recipient.publicArmored).first()),
++            signer = readSecret(signer),
++        )
++        try {
++            Pgp.decrypt(
++                ByteArrayOutputStream(),
++                encrypted.toByteArray().inputStream(),
++                keys = listOf(readSecret(recipient)), // the signer's key is not here
++            )
++            fail("an untrusted signature must throw")
++        } catch (expected: PgpSignatureException) {
++            assertTrue(expected.message!!.contains("公钥"))
++        }
++    }
++
++    @Test
++    fun signingWithoutSecretOrPassphraseFailsClearly() {
++        val pair = generated()
++        val recipient = Pgp.readPublicKeys(pair.publicArmored).first()
++        // A public-only key cannot sign.
++        try {
++            Pgp.encrypt(
++                ByteArrayOutputStream(),
++                randomBytes(64).inputStream(),
++                passphrase = "vault".toCharArray(),
++                recipients = listOf(recipient),
++                signer = recipient,
++            )
++            fail("signing with a public-only key must throw")
++        } catch (expected: PgpException) {
++            assertTrue(expected.message!!.contains("私钥"))
++        }
++        // A secret ring whose passphrase was never given cannot sign either
++        // (readPublicKeys does not remember one).
++        try {
++            Pgp.encrypt(
++                ByteArrayOutputStream(),
++                randomBytes(64).inputStream(),
++                passphrase = "vault".toCharArray(),
++                recipients = listOf(recipient),
++                signer = Pgp.readPublicKeys(generated().privateArmored).first(),
++            )
++            fail("signing without any passphrase must throw")
++        } catch (expected: PgpException) {
++            assertTrue(expected.message!!.contains("口令"))
++        }
++    }
++
++    @Test
++    fun wrongSignerPassphraseFailsClearly() {
++        val pair = generated()
++        val recipient = Pgp.readPublicKeys(pair.publicArmored).first()
++        try {
++            Pgp.encrypt(
++                ByteArrayOutputStream(),
++                randomBytes(64).inputStream(),
++                passphrase = "vault".toCharArray(),
++                recipients = listOf(recipient),
++                signer = readSecret(pair),
++                signerPassphrase = "wrong".toCharArray(),
++            )
++            fail("signing with the wrong passphrase must throw")
++        } catch (expected: PgpException) {
++            assertTrue(expected.message!!.contains("口令"))
++        }
++    }
++
++    @Test
++    fun encryptNeedsAPassphraseOrARecipient() {
++        try {
++            Pgp.encrypt(ByteArrayOutputStream(), randomBytes(64).inputStream())
++            fail("encrypting to nobody must throw")
++        } catch (expected: PgpException) {
++            assertTrue(expected.message!!.contains("接收人"))
++        }
++    }
++
++    @Test
++    fun readPrivateKeyVerifiesPassphraseAndReadsSeveralBlocks() {
++        val first = generated()
++        val second = generated()
++        try {
++            Pgp.readPrivateKey(first.privateArmored, "wrong".toCharArray())
++            fail("a wrong private-key passphrase must throw at import")
++        } catch (expected: PgpException) {
++            assertTrue(expected.message!!.contains("口令"))
++        }
++        val key = Pgp.readPrivateKey(first.privateArmored, passphrase.toCharArray())
++        assertEquals(true, key.isPrivate)
++
++        val both = first.publicArmored + second.publicArmored
++        assertEquals("two concatenated blocks are two keys", 2, Pgp.readPublicKeys(both).size)
++    }
++
++    @Test
++    fun wrongPrivateKeyPassphraseFailsAtDecrypt() {
++        val pair = generated()
++        val encrypted = ByteArrayOutputStream()
++        Pgp.encrypt(encrypted, randomBytes(64).inputStream(), recipients = listOf(
++            Pgp.readPublicKeys(pair.publicArmored).first(),
++        ))
++        // A key read with the wrong passphrase cannot be verified, so it cannot
++        // have been imported; decrypting with a key whose remembered passphrase
++        // is right must work, one read with a wrong one must not exist.
++        Pgp.decrypt(ByteArrayOutputStream(), encrypted.toByteArray().inputStream(), keys = listOf(
++            Pgp.readPrivateKey(pair.privateArmored, passphrase.toCharArray()),
++        ))
++    }
++
++    // -----------------------------------------------------------------------
++    // gpg interop
++    // -----------------------------------------------------------------------
++
++    @Test
++    fun gpgDecryptsKotlinRecipientEncryption() {
++        val pair = generated()
++        importKeys(pair)
++        val src = tmp.newFile("plain.bin").apply { writeBytes(randomBytes(4 shl 20)) }
++        val encrypted = tmp.newFile("plain.bin.gpg")
++        val decrypted = tmp.newFile("plain.out").apply { delete() }
++
++        Pgp.encryptFile(encrypted, src, passphrase = null, recipients = listOf(publicKey(pair)))
++
++        val result = gpg(
++            "--batch", "--yes", "--no-tty",
++            "--pinentry-mode", "loopback",
++            "--passphrase", passphrase,
++            "--trust-model", "always",
++            "--output", decrypted.absolutePath,
++            "--decrypt", encrypted.absolutePath,
++        )
++        assertEquals("gpg could not decrypt our recipient-encrypted file: ${result.output}", 0, result.exitCode)
++        assertArrayEquals(src.readBytes(), decrypted.readBytes())
++    }
++
++    @Test
++    fun gpgDecryptsAndVerifiesKotlinSignEncrypt() {
++        val pair = generated()
++        importKeys(pair)
++        val src = tmp.newFile("signed.bin").apply { writeBytes(randomBytes(256 shl 10)) }
++        val encrypted = tmp.newFile("signed.bin.gpg")
++        val decrypted = tmp.newFile("signed.out").apply { delete() }
++
++        Pgp.encryptFile(
++            encrypted,
++            src,
++            passphrase = passphrase.toCharArray(),
++            recipients = listOf(publicKey(pair)),
++            signer = readSecret(pair),
++        )
++
++        val result = gpg(
++            "--batch", "--yes", "--no-tty",
++            "--pinentry-mode", "loopback",
++            "--passphrase", passphrase,
++            "--trust-model", "always",
++            "--status-fd", "1",
++            "--output", decrypted.absolutePath,
++            "--decrypt", encrypted.absolutePath,
++        )
++        assertEquals("gpg could not decrypt our signed file: ${result.output}", 0, result.exitCode)
++        assertTrue("gpg must report a good signature:\n${result.output}", result.output.contains("GOODSIG"))
++        assertArrayEquals(src.readBytes(), decrypted.readBytes())
++    }
++
++    @Test
++    fun kotlinDecryptsGpgRecipientEncryption() {
++        val pair = generated()
++        importKeys(pair)
++        val src = tmp.newFile("from-gpg.bin").apply { writeBytes(randomBytes(1 shl 20)) }
++        val encrypted = tmp.newFile("from-gpg.bin.gpg").apply { delete() }
++        val decrypted = tmp.newFile("from-gpg.out").apply { delete() }
++
++        val result = gpg(
++            "--batch", "--yes", "--no-tty",
++            "--trust-model", "always",
++            "--encrypt", "--recipient", publicKey(pair).fingerprint,
++            "--output", encrypted.absolutePath,
++            src.absolutePath,
++        )
++        assertEquals("gpg could not encrypt: ${result.output}", 0, result.exitCode)
++
++        Pgp.decryptFile(decrypted, encrypted, keys = listOf(readSecret(pair)))
++        assertArrayEquals(src.readBytes(), decrypted.readBytes())
++    }
++
++    @Test
++    fun kotlinVerifiesGpgSignedMessages() {
++        val pair = generated()
++        importKeys(pair)
++        val src = tmp.newFile("gpg-signed.bin").apply { writeBytes(randomBytes(128 shl 10)) }
++        val signed = tmp.newFile("gpg-signed.asc").apply { delete() }
++
++        val result = gpg(
++            "--batch", "--yes", "--no-tty",
++            "--pinentry-mode", "loopback",
++            "--passphrase", passphrase,
++            "--output", signed.absolutePath,
++            "--sign", src.absolutePath,
++        )
++        assertEquals("gpg could not sign: ${result.output}", 0, result.exitCode)
++
++        // gpg --sign writes a signed (not encrypted) OpenPGP message; decrypt()
++        // unwraps it and verifies the signature.
++        val plain = ByteArrayOutputStream()
++        val verified = Pgp.decrypt(plain, signed.inputStream(), keys = listOf(readSecret(pair)))
++        assertEquals(true, verified.verified)
++        assertEquals("Backup 测试 <test@example.com>", verified.signedByName)
++        assertArrayEquals(src.readBytes(), plain.toByteArray())
++
++        // And the combined encrypt+sign form of gpg's.
++        val both = tmp.newFile("gpg-both.gpg").apply { delete() }
++        val combined = gpg(
++            "--batch", "--yes", "--no-tty",
++            "--pinentry-mode", "loopback",
++            "--passphrase", passphrase,
++            "--trust-model", "always",
++            "--encrypt", "--sign", "--recipient", publicKey(pair).fingerprint,
++            "--output", both.absolutePath,
++            src.absolutePath,
++        )
++        assertEquals("gpg could not encrypt+sign: ${combined.output}", 0, combined.exitCode)
++        val plainBoth = ByteArrayOutputStream()
++        val verifiedBoth = Pgp.decrypt(plainBoth, both.inputStream(), keys = listOf(readSecret(pair)))
++        assertEquals(true, verifiedBoth.verified)
++        assertEquals("Backup 测试 <test@example.com>", verifiedBoth.signedByName)
++        assertArrayEquals(src.readBytes(), plainBoth.toByteArray())
++    }
++
++    @Test
++    fun gpgAcceptsTheGeneratedKeyRing() {
++        val pair = generated()
++        val file = tmp.newFile("public.asc")
++        file.writeText(pair.publicArmored)
++        val packets = gpg("--batch", "--no-tty", "--list-packets", file.absolutePath)
++        assertEquals("gpg cannot parse our generated key:\n${packets.output}", 0, packets.exitCode)
++        val text = packets.output
++        assertTrue("a master key is expected:\n$text", text.contains("public key packet"))
++        assertTrue("an encryption subkey is expected:\n$text", text.contains("sub key packet"))
++        assertTrue("a user id is expected:\n$text", text.contains("user ID packet"))
++        assertTrue("SHA-256 self-signatures are expected:\n$text", text.contains("digest algo 8"))
++    }
++
++    // -----------------------------------------------------------------------
++
++    private fun generated(): PgpKeyPair =
++        Pgp.generateKeyPair("Backup 测试", "test@example.com", passphrase.toCharArray())
++
++    private fun publicKey(pair: PgpKeyPair): PgpKey = Pgp.readPublicKeys(pair.publicArmored).first()
++
++    private fun readSecret(pair: PgpKeyPair): PgpKey =
++        Pgp.readPrivateKey(pair.privateArmored, passphrase.toCharArray())
++
++    /** Imports the pair's secret key (which carries the public half) into the test's GNUPGHOME. */
++    private fun importKeys(vararg pairs: PgpKeyPair) {
++        val file = tmp.newFile("keys.asc")
++        file.writeText(pairs.joinToString(separator = "\n") { it.privateArmored })
++        val result = gpg("--batch", "--yes", "--no-tty", "--import", file.absolutePath)
++        assertEquals("gpg could not import the generated key: ${result.output}", 0, result.exitCode)
++    }
++
++    private fun randomBytes(size: Int): ByteArray {
++        val bytes = ByteArray(size)
++        Random(size.toLong() xor 0x5EED).nextBytes(bytes)
++        return bytes
++    }
++
++    private class GpgResult(val exitCode: Int, val output: String)
++
++    private fun gpg(vararg args: String): GpgResult {
++        val command = ArrayList<String>(args.size + 1)
++        command += "gpg"
++        command += args
++        val process = ProcessBuilder(command)
++            .redirectErrorStream(true)
++            .apply { environment()["GNUPGHOME"] = gnupgHome.absolutePath }
++            .start()
++        val output = process.inputStream.readBytes().toString(Charsets.UTF_8)
++        if (!process.waitFor(180, TimeUnit.SECONDS)) {
++            process.destroyForcibly()
++            fail("gpg did not finish in time: $output")
++        }
++        return GpgResult(process.exitValue(), output)
++    }
++
++    private fun gpgAvailable(): Boolean = try {
++        val process = ProcessBuilder("gpg", "--version").redirectErrorStream(true).start()
++        process.inputStream.readBytes()
++        process.waitFor(15, TimeUnit.SECONDS) && process.exitValue() == 0
++    } catch (e: IOException) {
++        false
++    }
++}
+diff --git a/android/docs/CORE-API.md b/android/docs/CORE-API.md
+index e22c59c..6e70cac 100644
+--- a/android/docs/CORE-API.md
++++ b/android/docs/CORE-API.md
+@@ -141,32 +141,83 @@ Package `com.pengstem.baidunetgo.core.crypto`, BouncyCastle `bcpg` only (no JCE
+ provider to install). Exact shipped API:
+ 
+ ```kotlin
+-class PgpException(message: String, cause: Throwable? = null) : Exception(message, cause)
++open class PgpException(message: String, cause: Throwable? = null) : Exception(message, cause)
++class PgpSignatureException(message: String, cause: Throwable? = null) : PgpException(message, cause)
++
++class PgpKey                 // one parsed key (a public ring, or a secret ring)
++{
++    val isPrivate: Boolean   // carries secret material (can sign / decrypt)
++    val keyId: Long          // primary key's id
++    val userId: String?      // first user id, e.g. "张三 <me@example.com>"
++    val fingerprint: String  // upper-case hex
++    val publicArmored: String    // the public half as ASCII armor
++    val privateArmored: String?  // the private half as ASCII armor, or null
++}
++
++data class PgpKeyPair(val publicArmored: String, val privateArmored: String)
++data class VerifyResult(val signedByKeyId: Long?, val signedByName: String?, val verified: Boolean)
+ 
+ object Pgp {
+     const val Suffix = ".gpg"
+-    fun encrypt(dst: OutputStream, src: InputStream, passphrase: CharArray)
+-    fun decrypt(dst: OutputStream, src: InputStream, passphrase: CharArray)
+-    fun encryptFile(dst: File, src: File, passphrase: CharArray): Long   // bytes written
+-    fun decryptFile(dst: File, src: File, passphrase: CharArray): Long   // bytes written
++
++    // keys
++    fun readPublicKeys(armored: String): List<PgpKey>            // one or more armored blocks
++    fun readPrivateKey(armored: String, passphrase: CharArray): PgpKey
++        // verifies the passphrase at import; the key remembers it for signing/decrypting
++    fun generateKeyPair(name: String, email: String, passphrase: CharArray): PgpKeyPair
++        // RSA-3072: master certifies + signs (SHA-256 self-signatures), a subkey
++        // encrypts; a few seconds. Empty passphrase = unprotected key.
++
++    // encrypt: passphrase and/or recipients (at least one); signing optional
++    fun encrypt(dst: OutputStream, src: InputStream, passphrase: CharArray? = null,
++                recipients: List<PgpKey> = emptyList(),
++                signer: PgpKey? = null, signerPassphrase: CharArray? = null)
++    fun encryptFile(dst: File, src: File, passphrase: CharArray? = null,
++                    recipients: List<PgpKey> = emptyList(),
++                    signer: PgpKey? = null, signerPassphrase: CharArray? = null): Long
++
++    // decrypt: symmetric-only, key-encrypted, or both; also a signed, unencrypted
++    // message (what `gpg --sign` writes). Passphrase for SKESKs; keys carry their
++    // own remembered passphrases (from readPrivateKey).
++    fun decrypt(dst: OutputStream, src: InputStream,
++                passphrase: CharArray? = null, keys: List<PgpKey> = emptyList()): VerifyResult
++    fun decryptFile(dst: File, src: File,
++                    passphrase: CharArray? = null, keys: List<PgpKey> = emptyList()): Long
+ }
+ ```
+ 
++Errors: a wrong passphrase or corrupted message throws `PgpException` (Chinese,
++user-facing, same messages as before); a signature that is present but cannot be
++trusted — tampered bytes, a malformed signature, or an unknown signer — throws
++`PgpSignatureException` (a `PgpException` subclass, so existing catch blocks
++keep working). In a passphrase+recipients message the SKESK decrypts first: gpg
++aborts on a wrong SKESK passphrase even when a PKESK it could use follows, so
++pass the passphrase the message was encrypted with.
++
+ Format: decryptable by the desktop app's Go `internal/pgp` **and** by real gpg 2.4
+-— binary OpenPGP, symmetric (passphrase only), AES-256 (`cipher 9`), iterated+salted
+-S2K with SHA-256 (`s2k 3, hash 8`), count 4194304 (encoded byte `0xC0`, exactly what
++— binary OpenPGP, AES-256 (`cipher 9`), iterated+salted S2K with SHA-256
++(`s2k 3, hash 8`), count 4194304 (encoded byte `0xC0`, exactly what
+ `gpg --s2k-count 4194304` emits), **no compression**, integrity-protected SEIPD v1
+ (`mdc_method: 2`), binary literal data with an empty file-name hint. The v4 SKESK
+ carries no encrypted session key (the S2K-derived key is the session key), which is
+-also the form gpg itself writes.
++also the form gpg itself writes — that stays the symmetric-only shape; when
++recipients join, one v3 PKESK per recipient (session key wrapped to each
++recipient's encryption subkey) is added and the SKESK then wraps the same session
++key (all still readable by gpg and by `gpg -d` with either secret). Signing wraps
++the literal data in one-pass-signature → literal → signature packets (SHA-256,
++binary document), all inside the encryption.
+ 
+ Streaming both ways through one 256 KiB buffer; no temp files. `decrypt` is a single
+ streaming pass, so on a wrong passphrase bytes may already have reached `dst` before
+ the MDC check fails (it still throws `PgpException`). `decryptFile` is what callers
+-that must never see partial plaintext use: it first verifies passphrase + MDC with
+-the output discarded, then writes the real file, and removes it on failure. The file
+-variants flush/close their own handles, leave no partial file behind, and return the
+-number of bytes written.
++that must never see partial plaintext use: it first verifies passphrase + MDC (and
++the signature) with the output discarded, then writes the real file, and removes it
++on failure. The file variants flush/close their own handles, leave no partial file
++behind, and return the number of bytes written.
++
++Keys are in-memory objects: persist them as armored text (`publicArmored` /
++`privateArmored`) and re-parse with `readPublicKeys` / `readPrivateKey` on load —
++a `PgpKey` itself is not serializable.
+ 
+ ## 3. Backup engine (`:core`)
+ 
+@@ -220,6 +271,9 @@ object Backup {
+         api: Netdisk,                // pass the real BaiduApi; tests pass a fake
+         source: BackupSource, config: BackupConfig,
+         state: BackupStateStore, passphrase: CharArray?,
++        recipients: List<PgpKey> = emptyList(),   // encrypt to these keys instead of/with the passphrase
++        signer: PgpKey? = null,                   // optional signer (its secret key)
++        signerPassphrase: CharArray? = null,      // overrides the signer's remembered passphrase
+         onProgress: (BackupProgress) -> Unit = {},
+     ): BackupResult
+ }
+@@ -233,7 +287,7 @@ fatal; cancellation is `CancellationException` and still saves the state for
+ finished files. `dest`/`remoteName` may carry leading or trailing slashes — remote
+ paths are normalised. Encrypted uploads use a unique temp file under
+ `java.io.tmpdir`, uploaded as `<remote>.gpg`, removed in a `finally`; at most
+-`parallel` exist. An empty passphrase with `encrypt = true` throws
++`parallel` exist. `encrypt = true` with neither a passphrase nor recipients throws
+ `BackupException` (加密备份口令不能为空). Progress is throttled to ≤ 4/s per file and
+ carries cumulative counters.
+ 
+@@ -292,7 +346,11 @@ Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `POST_NOTIFICATIONS` (33+, ask
+   same bytes; `gpg --symmetric --cipher-algo AES256 --s2k-digest-algo SHA256 --s2k-count 4194304`
+   output → `Pgp.decryptFile` matches; `gpg --list-packets` confirms cipher 9, `s2k 3, hash 8`,
+   count 4194304, `mdc_method: 2`, a literal packet and no compression (skip when gpg is absent,
+-  always use a throw-away `GNUPGHOME`).
++  always use a throw-away short `GNUPGHOME` — gpg-agent's sockets must fit the 108-byte Unix
++  socket limit, so `build/tmp` paths are too long). Plus the public-key interop in
++  `PgpKeysTest`: generated RSA-3072 keys round-trip in Kotlin and with gpg in both directions
++  (gpg decrypts Kotlin's recipient-encrypted output, verifies its signature, and Kotlin
++  decrypts `gpg --encrypt` and verifies `gpg --sign` output), with real `gpg 2.4`.
+ - backup engine: fake `Netdisk` + temp dir sources covering first run, skip-unchanged, changed
+   file, nested folders, exclusions, encryption (`.gpg` name + temp file gone), failure keeps
+   going, cancellation, state round-trip.
