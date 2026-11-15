@@ -1,0 +1,560 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 15:01:40 +0800
+Subject: [PATCH 44/47] =?UTF-8?q?Add=20the=20Android=20client's=20duplicat?=
+ =?UTF-8?q?e-file=20engine=20to=20:core=20=E2=80=94=20size+MD5=20grouping,?=
+ =?UTF-8?q?=20a=20bounded=20concurrent=20scan=20and=20regroup-after-delete?=
+ =?UTF-8?q?=20mirroring=20internal/dedup,=20tested=20against=20cmd/fakepan?=
+ =?UTF-8?q?d.?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../pengstem/baidunetgo/core/dedup/Dedup.kt   | 307 ++++++++++++++++++
+ .../baidunetgo/core/dedup/DedupTest.kt        | 155 +++++++++
+ android/docs/CORE-API.md                      |  58 ++++
+ 3 files changed, 520 insertions(+)
+ create mode 100644 android/core/src/main/kotlin/com/pengstem/baidunetgo/core/dedup/Dedup.kt
+ create mode 100644 android/core/src/test/kotlin/com/pengstem/baidunetgo/core/dedup/DedupTest.kt
+
+diff --git a/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/dedup/Dedup.kt b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/dedup/Dedup.kt
+new file mode 100644
+index 0000000..ab8d5c6
+--- /dev/null
++++ b/android/core/src/main/kotlin/com/pengstem/baidunetgo/core/dedup/Dedup.kt
+@@ -0,0 +1,307 @@
++package com.pengstem.baidunetgo.core.dedup
++
++import com.pengstem.baidunetgo.core.net.Netdisk
++import com.pengstem.baidunetgo.core.net.RemoteFile
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.async
++import kotlinx.coroutines.awaitAll
++import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.ensureActive
++
++/**
++ * What makes two files the same content: their size and their (unscrambled) MD5.
++ *
++ * The netdisk's listings already carry every file's MD5, so the duplicate engine
++ * compares no bytes.
++ */
++data class DedupKey(val size: Long, val md5: String)
++
++/**
++ * One file a scan found.
++ *
++ * [path] is the full netdisk path, e.g. `/文档/读我.txt`; [modified] is in seconds,
++ * as the netdisk reports it ("server_mtime"), and decides which copy of a group is
++ * the one kept.
++ */
++data class DedupFile(
++    val path: String,      // full netdisk path, e.g. "/文档/读我.txt"
++    val name: String,
++    val size: Long,
++    val fsId: Long,
++    val md5: String,
++    val modified: Long,    // seconds, the netdisk's server_mtime
++)
++
++/**
++ * A set of files holding the same content.
++ *
++ * [files] comes earliest modified first, its path breaking a tie, so `files[0]` is
++ * the copy the interface keeps by default.
++ */
++data class DedupGroup(
++    val key: DedupKey,
++    val files: List<DedupFile>,   // earliest modified first, path breaking a tie (the kept copy is files[0])
++) {
++    /** The size of one copy. */
++    val size: Long get() = key.size
++
++    /** The size of every copy in the group. */
++    val total: Long get() = key.size * files.size
++
++    /** What deleting every copy but one would free. */
++    val reclaim: Long get() = key.size * (files.size - 1)
++}
++
++/** How far a scan has got: the folder just read, folders read, and files found. */
++data class DedupProgress(val dir: String, val dirs: Int, val files: Int)
++
++/**
++ * What a scan found.
++ *
++ * [files] are every non-folder entry once, those without an MD5 and 0-byte ones
++ * included (group() leaves them out). [failed] are folders that could not be read;
++ * [truncated] says the scan stopped at one of its limits.
++ */
++data class DedupScanResult(
++    val files: List<DedupFile>,
++    val dirs: Int,
++    val failed: List<String>,
++    val truncated: Boolean,
++)
++
++/** The result of grouping: the duplicate groups, and how many files were skipped for having no MD5. */
++data class DedupGrouping(val groups: List<DedupGroup>, val skipped: Int)
++
++/**
++ * Finds the files of the netdisk that hold the same content.
++ *
++ * Mirrors the desktop Go engine (`internal/dedup`): [scan] walks the folders under
++ * a root a few at a time and collects their files; [group] groups what it found by
++ * size and MD5; [without] regroups the results after copies were deleted.
++ */
++object Dedup {
++    const val DefaultConcurrency = 4
++    const val DefaultMaxFiles = 50_000
++    const val DefaultMaxDirs = 5_000
++
++    /** Groups come by reclaim desc, then size desc, then md5 asc — exactly the Go sortGroups. */
++    private val groupOrder: Comparator<DedupGroup> =
++        compareByDescending<DedupGroup> { it.reclaim }
++            .thenByDescending { it.size }
++            .thenBy { it.key.md5 }
++
++    /**
++     * Walks [root] and all its subfolders breadth-first, [concurrency] folders at a
++     * time, collecting every non-directory file once (repeated fsIds are deduped).
++     *
++     * A folder that cannot be read is recorded in [DedupScanResult.failed] and the
++     * scan goes on without it, unless it is the root: then its error is rethrown.
++     * The scan stops at [maxFiles] or [maxDirs], reporting
++     * [DedupScanResult.truncated]. Cancellation is cooperative
++     * (`currentCoroutineContext().ensureActive()`), so a `CancellationException`
++     * aborts promptly. [onProgress] is called after each folder.
++     *
++     * A blank [root] means `/`. Paths are built as clean paths:
++     * `parent.trimEnd('/') + "/" + name` (root `/` gives `/name`).
++     */
++    suspend fun scan(
++        netdisk: Netdisk,
++        root: String = "/",
++        concurrency: Int = DefaultConcurrency,
++        maxFiles: Int = DefaultMaxFiles,
++        maxDirs: Int = DefaultMaxDirs,
++        onProgress: (DedupProgress) -> Unit = {},
++    ): DedupScanResult {
++        val workers = if (concurrency <= 0) DefaultConcurrency else concurrency
++        val filesLimit = if (maxFiles <= 0) DefaultMaxFiles else maxFiles
++        val dirsLimit = if (maxDirs <= 0) DefaultMaxDirs else maxDirs
++
++        val start = cleanPath("/" + trimRoot(root))
++        val files = ArrayList<DedupFile>()
++        val failed = ArrayList<String>()
++        var dirs = 0
++        var truncated = false
++
++        val seenDirs = HashSet<String>()
++        seenDirs.add(start)
++        val seenFiles = HashSet<Long>()
++        var level: List<String> = listOf(start)
++
++        coroutineScope {
++            while (level.isNotEmpty() && !truncated) {
++                currentCoroutineContext().ensureActive()
++                val next = ArrayList<String>()
++                var index = 0
++                while (index < level.size) {
++                    currentCoroutineContext().ensureActive()
++                    val end = minOf(index + workers, level.size)
++                    val chunk = level.subList(index, end)
++                    val listings = chunk.map { dir ->
++                        async(Dispatchers.IO) { listFolder(netdisk, dir) }
++                    }.awaitAll()
++                    for (listing in listings) {
++                        val error = listing.error
++                        if (error != null) {
++                            currentCoroutineContext().ensureActive()
++                            if (listing.dir == start) throw error
++                            failed.add(listing.dir)
++                            continue
++                        }
++                        dirs++
++                        for (file in listing.files) {
++                            if (file.isDir) {
++                                val path = joinPath(listing.dir, file.name)
++                                if (path.isEmpty() || path == "/" || path in seenDirs) continue
++                                if (seenDirs.size >= dirsLimit) {
++                                    truncated = true
++                                    break
++                                }
++                                seenDirs.add(path)
++                                next.add(path)
++                                continue
++                            }
++                            if (file.fsId != 0L) {
++                                if (!seenFiles.add(file.fsId)) continue
++                            }
++                            if (files.size >= filesLimit) {
++                                truncated = true
++                                break
++                            }
++                            files.add(
++                                DedupFile(
++                                    path = joinPath(listing.dir, file.name),
++                                    name = file.name,
++                                    size = file.size,
++                                    fsId = file.fsId,
++                                    md5 = file.md5,
++                                    modified = file.modified,
++                                )
++                            )
++                        }
++                        onProgress(DedupProgress(listing.dir, dirs, files.size))
++                        if (truncated) break
++                    }
++                    if (truncated) break
++                    index = end
++                }
++                level = next
++            }
++        }
++
++        return DedupScanResult(files = files, dirs = dirs, failed = failed, truncated = truncated)
++    }
++
++    /**
++     * Groups [files] by (size, md5).
++     *
++     * 0-byte/negative-size files are left out (they free nothing), and files with a
++     * blank md5 — which cannot be compared — are counted in
++     * [DedupGrouping.skipped]. Files are deduped by fsId when it is non-zero.
++     * Within a group the copies are sorted by modified ascending then path, so the
++     * earliest modified is the copy to keep; only groups of two or more files are
++     * returned, sorted by reclaim desc, then size desc, then md5 asc.
++     */
++    fun group(files: List<DedupFile>): DedupGrouping {
++        val byKey = LinkedHashMap<DedupKey, MutableList<DedupFile>>()
++        val seen = HashSet<Long>()
++        var skipped = 0
++        for (file in files) {
++            if (file.size <= 0) continue
++            if (file.fsId != 0L) {
++                if (!seen.add(file.fsId)) continue
++            }
++            if (file.md5.isBlank()) {
++                skipped++
++                continue
++            }
++            byKey.getOrPut(DedupKey(file.size, file.md5)) { ArrayList() }.add(file)
++        }
++        val groups = ArrayList<DedupGroup>()
++        for ((key, copies) in byKey) {
++            if (copies.size < 2) continue
++            val sorted = copies.sortedWith(
++                compareBy<DedupFile> { it.modified }.thenBy { it.path }
++            )
++            groups.add(DedupGroup(key = key, files = sorted))
++        }
++        groups.sortWith(groupOrder)
++        return DedupGrouping(groups = groups, skipped = skipped)
++    }
++
++    /**
++     * Returns the groups left when the files at the paths in [gone] are removed: a
++     * group keeps its other copies as they came, a group that falls below two copies
++     * is dropped, and the result is re-sorted like [group].
++     */
++    fun without(groups: List<DedupGroup>, gone: Set<String>): List<DedupGroup> {
++        val out = ArrayList<DedupGroup>()
++        for (group in groups) {
++            val kept = group.files.filter { it.path !in gone }
++            if (kept.size < 2) continue
++            out.add(DedupGroup(key = group.key, files = kept))
++        }
++        out.sortWith(groupOrder)
++        return out
++    }
++
++    // -----------------------------------------------------------------------
++    // Internals
++    // -----------------------------------------------------------------------
++
++    /** One folder's listing or the error reading it (cancellation is rethrown, never captured). */
++    private class Listing(
++        val dir: String,
++        val files: List<RemoteFile>,
++        val error: Throwable?,
++    )
++
++    private suspend fun listFolder(netdisk: Netdisk, dir: String): Listing =
++        try {
++            Listing(dir, netdisk.list(dir), null)
++        } catch (e: CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            Listing(dir, emptyList(), e)
++        }
++
++    /** Removes the leading slashes a root may carry, for [cleanPath] to put back. */
++    private fun trimRoot(root: String): String {
++        var value = root
++        while (value.isNotEmpty() && value[0] == '/') value = value.substring(1)
++        return value
++    }
++
++    private val duplicateSlashes = Regex("/{2,}")
++
++    /** `parent.trimEnd('/') + "/" + name`, with duplicate slashes collapsed; root `/` gives `/name`. */
++    private fun joinPath(parent: String, name: String): String {
++        val base = parent.trimEnd('/')
++        return duplicateSlashes.replace("$base/$name", "/")
++    }
++
++    /**
++     * Go's `path.Clean` for an absolute netdisk path: collapses duplicate slashes,
++     * drops `.` segments, resolves `..`, and drops a trailing slash. An empty
++     * result becomes `/`.
++     */
++    private fun cleanPath(path: String): String {
++        val absolute = path.startsWith('/')
++        val parts = ArrayList<String>()
++        for (segment in path.split('/')) {
++            when (segment) {
++                "", "." -> Unit
++                ".." -> if (parts.isNotEmpty() && parts.last() != "..") {
++                    parts.removeAt(parts.size - 1)
++                } else if (!absolute) {
++                    parts.add("..")
++                }
++                else -> parts.add(segment)
++            }
++        }
++        val body = parts.joinToString("/")
++        val result = if (absolute) "/$body" else body
++        return if (result.isEmpty()) if (absolute) "/" else "." else result
++    }
++}
+diff --git a/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/dedup/DedupTest.kt b/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/dedup/DedupTest.kt
+new file mode 100644
+index 0000000..775cd02
+--- /dev/null
++++ b/android/core/src/test/kotlin/com/pengstem/baidunetgo/core/dedup/DedupTest.kt
+@@ -0,0 +1,155 @@
++package com.pengstem.baidunetgo.core.dedup
++
++import com.pengstem.baidunetgo.core.net.BaiduApi
++import com.pengstem.baidunetgo.core.net.FakePand
++import kotlinx.coroutines.runBlocking
++import org.junit.After
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertTrue
++import org.junit.Assume.assumeTrue
++import org.junit.Before
++import org.junit.Test
++
++/**
++ * The duplicate engine against the real Go fake netdisk (`cmd/fakepand`) and, as
++ * pure functions, its grouping and regrouping rules.
++ *
++ * The class skips itself cleanly when neither `go` (to build `cmd/fakepand`) nor a
++ * running `FAKEPAN_URL` is available, exactly like `BaiduApiTest`.
++ */
++class DedupTest {
++
++    private lateinit var server: FakePand
++    private lateinit var api: BaiduApi
++
++    @Before
++    fun setUp() {
++        val fake = FakePand.startOrNull()
++        assumeTrue(
++            "the fake netdisk needs `go` or FAKEPAN_URL: ${FakePand.unavailableReason()}",
++            fake != null,
++        )
++        server = fake!!
++        api = BaiduApi(base = server.url)
++    }
++
++    @After
++    fun tearDown() {
++        if (::server.isInitialized) server.close()
++    }
++
++    // -----------------------------------------------------------------------
++
++    @Test
++    fun scanWalksTheTreeAndGroupFindsTheSeededPairs() = runBlocking {
++        val result = Dedup.scan(api, "/")
++        assertTrue("dirs: ${result.dirs}", result.dirs > 0)
++        assertTrue("files: ${result.files.size}", result.files.isNotEmpty())
++        assertFalse("the seeded tree is small, nothing should be truncated", result.truncated)
++        assertTrue("no folder should fail: ${result.failed}", result.failed.isEmpty())
++
++        val grouping = Dedup.group(result.files)
++        assertTrue("the fake seeds several duplicates: ${grouping.groups.size}", grouping.groups.size >= 2)
++
++        for (group in grouping.groups) {
++            assertTrue("a group holds at least two copies", group.files.size >= 2)
++            val size = group.files[0].size
++            val md5 = group.files[0].md5
++            assertTrue("group md5 must not be blank", md5.isNotBlank())
++            for (file in group.files) {
++                assertEquals("every copy shares the group's size", size, file.size)
++                assertEquals("every copy shares the group's md5", md5, file.md5)
++            }
++            // files[0] is the kept copy: modified ascending, then path breaking a tie.
++            for (i in 1 until group.files.size) {
++                val earlier = group.files[i - 1]
++                val later = group.files[i]
++                assertTrue(
++                    "copies are modified-ascending, path breaking a tie: ${earlier.path} vs ${later.path}",
++                    earlier.modified < later.modified ||
++                        (earlier.modified == later.modified && earlier.path <= later.path),
++                )
++            }
++        }
++
++        // Groups come by reclaim desc.
++        for (i in 1 until grouping.groups.size) {
++            assertTrue(
++                "groups are sorted by reclaim desc",
++                grouping.groups[i - 1].reclaim >= grouping.groups[i].reclaim,
++            )
++        }
++
++        // The fake has a file with no MD5: it must be counted as skipped.
++        assertTrue("a file with no MD5 must be skipped: ${grouping.skipped}", grouping.skipped >= 1)
++
++        val textGroup = grouping.groups.firstOrNull { g -> g.files.any { it.path == "/文档/读我.txt" } }
++        assertNotNull("the 读我.txt pair must be a group", textGroup)
++        assertTrue(
++            "the pair is /文档/读我.txt + /代码/备份/读我（副本）.txt",
++            textGroup!!.files.any { it.path == "/代码/备份/读我（副本）.txt" },
++        )
++        assertEquals(
++            "the earliest-modified (kept) copy is /文档/读我.txt",
++            "/文档/读我.txt",
++            textGroup.files[0].path,
++        )
++
++        assertTrue(
++            "a file with no MD5 is never in a group",
++            grouping.groups.none { g -> g.files.any { it.path == "/代码/备份/缺少哈希的镜像.iso" } },
++        )
++    }
++
++    @Test
++    fun withoutDropsDeletedFileAndGroupsThatFallBelowTwo() {
++        val a1 = DedupFile("/x/a1", "a1", 100, 1, "aaaa", 10)
++        val a2 = DedupFile("/x/a2", "a2", 100, 2, "aaaa", 20)
++        val b1 = DedupFile("/y/b1", "b1", 200, 3, "bbbb", 10)
++        val b2 = DedupFile("/y/b2", "b2", 200, 4, "bbbb", 20)
++        val c1 = DedupFile("/y/c1", "c1", 300, 5, "cccc", 10) // a singleton: never a group
++
++        val groups = Dedup.group(listOf(a1, a2, b1, b2, c1)).groups
++        assertEquals(2, groups.size)
++
++        val left = Dedup.without(groups, setOf("/x/a1"))
++        assertEquals("a group reduced to one copy is dropped", 1, left.size)
++        assertEquals(
++            "the untouched group keeps both its copies",
++            setOf("/y/b1", "/y/b2"),
++            left[0].files.map { it.path }.toSet(),
++        )
++
++        // Dropping one copy of a group of three leaves a valid group of two.
++        val d1 = DedupFile("/z/d1", "d1", 400, 6, "dddd", 10)
++        val d2 = DedupFile("/z/d2", "d2", 400, 7, "dddd", 20)
++        val d3 = DedupFile("/z/d3", "d3", 400, 8, "dddd", 30)
++        val three = Dedup.group(listOf(d1, d2, d3)).groups
++        val reduced = Dedup.without(three, setOf("/z/d2"))
++        assertEquals(1, reduced.size)
++        assertEquals(setOf("/z/d1", "/z/d3"), reduced[0].files.map { it.path }.toSet())
++        assertEquals("reclaim follows the reduced copy count", 400L, reduced[0].reclaim)
++    }
++
++    @Test
++    fun groupSkipsZeroByteAndBlankMd5Files() {
++        val first = DedupFile("/a.txt", "a.txt", 10, 1, "same", 100)
++        val second = DedupFile("/b.txt", "b.txt", 10, 2, "same", 200)
++        val zeroByte = DedupFile("/empty.txt", "empty.txt", 0, 3, "", 50)
++        val noHash = DedupFile("/noHash.iso", "noHash.iso", 700, 4, "", 10)
++
++        val grouping = Dedup.group(listOf(first, second, zeroByte, noHash))
++
++        assertEquals(1, grouping.groups.size)
++        assertEquals(listOf("/a.txt", "/b.txt"), grouping.groups[0].files.map { it.path })
++        // Only the non-zero-size file with a blank MD5 is skipped; the 0-byte one is
++        // left out before the MD5 check and is not counted.
++        assertEquals(1, grouping.skipped)
++        assertTrue(
++            "neither the 0-byte nor the no-hash file is in a group",
++            grouping.groups.none { g -> g.files.any { it.path == "/empty.txt" || it.path == "/noHash.iso" } },
++        )
++    }
++}
+diff --git a/android/docs/CORE-API.md b/android/docs/CORE-API.md
+index 6e70cac..916fa23 100644
+--- a/android/docs/CORE-API.md
++++ b/android/docs/CORE-API.md
+@@ -369,3 +369,61 @@ to `android/screenshots/`); skip rather than fight it if it costs too much time.
+   of recomputing lists per frame, no work in composables that touches disk or network,
+   Coil with memory+disk cache for thumbnails.
+ - The album list must be paged/aggregated in one MediaStore query per album kind, not per album.
++
++## 7. Duplicate files (`:core`)
++
++Package `com.pengstem.baidunetgo.core.dedup`. Mirrors the desktop Go engine
++(`internal/dedup`): it reads no file content, comparing only the size and unscrambled
++MD5 every listing already carries. Exact shipped API:
++
++```kotlin
++data class DedupKey(val size: Long, val md5: String)
++
++data class DedupFile(
++    val path: String,      // full netdisk path, e.g. "/文档/读我.txt"
++    val name: String, val size: Long, val fsId: Long,
++    val md5: String,       // unscrambled; "" when the netdisk gave none
++    val modified: Long,    // seconds, server_mtime
++)
++
++data class DedupGroup(val key: DedupKey, val files: List<DedupFile>) {
++    val size: Long get() = key.size                 // size of one copy
++    val total: Long get() = key.size * files.size   // size of every copy
++    val reclaim: Long get() = key.size * (files.size - 1)  // freed by keeping one
++}
++
++data class DedupProgress(val dir: String, val dirs: Int, val files: Int)
++data class DedupScanResult(
++    val files: List<DedupFile>, val dirs: Int,
++    val failed: List<String>, val truncated: Boolean,
++)
++data class DedupGrouping(val groups: List<DedupGroup>, val skipped: Int)
++
++object Dedup {
++    const val DefaultConcurrency = 4
++    const val DefaultMaxFiles = 50_000
++    const val DefaultMaxDirs = 5_000
++
++    suspend fun scan(netdisk: Netdisk, root: String = "/",
++                     concurrency: Int = DefaultConcurrency,
++                     maxFiles: Int = DefaultMaxFiles, maxDirs: Int = DefaultMaxDirs,
++                     onProgress: (DedupProgress) -> Unit = {}): DedupScanResult
++    fun group(files: List<DedupFile>): DedupGrouping
++    fun without(groups: List<DedupGroup>, gone: Set<String>): List<DedupGroup>
++}
++```
++
++`scan` walks `root` and every subfolder breadth-first, `concurrency` folders at a time,
++collecting each non-folder entry once (repeated fsIds deduped) and building full paths
++(`parent.trimEnd('/') + "/" + name`; a blank root means `/`). A folder that cannot be
++read is recorded in `failed` and skipped, unless it is the root, whose error is
++rethrown; it stops at `maxFiles`/`maxDirs` with `truncated = true`, reports
++`onProgress` after each folder, and aborts on `CancellationException`.
++
++`group` groups files by (size, md5): 0-byte/negative files are dropped, files with a
++blank md5 are counted in `skipped`, copies are deduped by non-zero fsId, and within a
++group they are sorted by modified ascending then path — `files[0]` is the copy to keep.
++Only groups of two or more are returned, ordered by `reclaim` desc, then size desc,
++then md5 asc. `without` removes the files at paths in `gone`, keeps each group's other
++copies as they were, drops groups that fall below two, and re-sorts the same way, so
++the results of a scan minus what it deleted are exactly what `group` would find left.

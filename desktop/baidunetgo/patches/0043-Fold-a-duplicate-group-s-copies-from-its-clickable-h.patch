@@ -1,0 +1,397 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 15:01:40 +0800
+Subject: [PATCH 43/47] =?UTF-8?q?Fold=20a=20duplicate=20group's=20copies?=
+ =?UTF-8?q?=20from=20its=20clickable=20heading=20in=20the=20=E6=9F=A5?=
+ =?UTF-8?q?=E9=87=8D=20group=20view,=20so=20=E6=8C=89=E9=87=8D=E5=A4=8D?=
+ =?UTF-8?q?=E7=BB=84=20collapses=20like=20=E6=8C=89=E6=96=87=E4=BB=B6?=
+ =?UTF-8?q?=E5=A4=B9=20while=20each=20view=20keeps=20its=20own=20folds=20a?=
+ =?UTF-8?q?nd=20=E4=BF=9D=E7=95=99=E4=B8=80=E4=BB=BD=20never=20folds=20the?=
+ =?UTF-8?q?=20group.?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ app/dedup.go      | 119 ++++++++++++++++++++++++++--------
+ app/dedup_test.go | 159 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 251 insertions(+), 27 deletions(-)
+
+diff --git a/app/dedup.go b/app/dedup.go
+index ef0ec65..d4fe55d 100644
+--- a/app/dedup.go
++++ b/app/dedup.go
+@@ -58,17 +58,22 @@ type dedupState struct {
+ 	rows   []dedupRow
+ 
+ 	// The view the results are in: the groups together (0, the way the
+-	// page opens), or the folders (1), whose lines can be folded away.
+-	// Neither holds results of its own: the same groups, chosen files and
+-	// scan lie under both, and switching between them keeps the choice.
+-	byFolder int
+-	folded   map[string]bool // folders folded away in the folder view, by path
+-	dirs     []dedupFolder   // the folders of the folder view, built by flatten
+-	// A folder's line clicked to fold it, applied once the list is built:
+-	// the lines under it leave while it walks them. foldWantRow is the row
+-	// the line was at, kept in view as it folds.
+-	foldWant    string
+-	foldWantRow int
++	// page opens), or the folders (1). A group's heading and a folder's
++	// line both fold their copies away. Neither view holds results of its
++	// own: the same groups, chosen files and scan lie under both, and
++	// switching between them keeps the choice and each view's folds.
++	byFolder    int
++	folded      map[string]bool    // folders folded away in the folder view, by path
++	groupFolded map[dedup.Key]bool // groups folded away in the group view, by key
++	dirs        []dedupFolder      // the folders of the folder view, built by flatten
++	// A line clicked to fold it, applied once the list is built: the lines
++	// under it leave while it walks them. The row keeps the row it was at,
++	// kept in view as it folds. A folder's line and a group's heading each
++	// have one, so switching views drops neither's.
++	foldWant         string
++	foldWantRow      int
++	groupFoldWant    *dedup.Key
++	groupFoldWantRow int
+ 
+ 	scannedDirs, scannedFiles int
+ 	skipped                   int // files with no MD5, not compared
+@@ -567,9 +572,24 @@ func (d *dedupState) flatten() {
+ 		d.flattenFolders()
+ 		return
+ 	}
++	// A group that no longer exists keeps no fold.
++	if len(d.groupFolded) > 0 {
++		live := make(map[dedup.Key]bool, len(d.groups))
++		for _, g := range d.groups {
++			live[g.Key] = true
++		}
++		for k := range d.groupFolded {
++			if !live[k] {
++				delete(d.groupFolded, k)
++			}
++		}
++	}
+ 	d.rows = d.rows[:0]
+ 	for gi, g := range d.groups {
+ 		d.rows = append(d.rows, dedupRow{dir: -1, group: gi, file: -1})
++		if d.groupFolded[g.Key] {
++			continue
++		}
+ 		for fi := range g.Files {
+ 			d.rows = append(d.rows, dedupRow{dir: -1, group: gi, file: fi})
+ 		}
+@@ -648,15 +668,17 @@ func dedupDirLabel(root, dir string) string {
+ 
+ // setView shows the results as the groups (0) or as the folders (1),
+ // reordering the lines only: the groups, the files chosen and what a delete
+-// would remove stay as they are, so switching views loses no choice. The
+-// view in hand is the caller's, as the control that changed it has already
+-// written it: setView always builds the lines again.
++// would remove stay as they are, so switching views loses no choice, and
++// each view keeps its own folds. The view in hand is the caller's, as the
++// control that changed it has already written it: setView always builds the
++// lines again, from the start and with no fold left pending.
+ func (d *dedupState) setView(v int) {
+ 	if v != 0 {
+ 		v = 1
+ 	}
+ 	d.byFolder = v
+ 	d.foldWant = ""
++	d.groupFoldWant = nil
+ 	d.flatten()
+ 	d.scrollTop = true
+ }
+@@ -676,6 +698,21 @@ func (d *dedupState) toggleFold(dir string) {
+ 	d.flatten()
+ }
+ 
++// toggleGroupFold folds a group of the group view away, or shows it again,
++// keyed by the group's key so that it stays folded across a regroup. Like
++// toggleFold it reads nothing again and starts no scan.
++func (d *dedupState) toggleGroupFold(key dedup.Key) {
++	if d.groupFolded == nil {
++		d.groupFolded = map[dedup.Key]bool{}
++	}
++	if d.groupFolded[key] {
++		delete(d.groupFolded, key)
++	} else {
++		d.groupFolded[key] = true
++	}
++	d.flatten()
++}
++
+ // chooseDefaults chooses every copy but each group's kept one: the
+ // earliest modified, its path breaking a tie.
+ func (d *dedupState) chooseDefaults() {
+@@ -1106,7 +1143,7 @@ func (a *App) dedupHeader(c *ui.Context, t *ui.Theme, p *palette) {
+ 				FontSize(11).TextColor(t.TextMuted).SingleLine()
+ 		}
+ 		if d.loaded && len(d.groups) > 0 {
+-			hint := "每组默认保留修改时间最早的一份，勾选其余副本一起移入回收站"
++			hint := "每组默认保留修改时间最早的一份，勾选其余副本一起移入回收站，点击组标题可折叠"
+ 			if d.byFolder == 1 {
+ 				hint = "同一组的副本按所在文件夹分列，按可释放空间排序；点击文件夹可折叠，每组保留的仍是修改时间最早的一份"
+ 			}
+@@ -1142,7 +1179,7 @@ func (a *App) dedupProgress(c *ui.Context, t *ui.Theme, p *palette) {
+ 
+ // dedupResults is the list of the results, as the view in hand orders
+ // them: a group's heading over its copies, or a folder's heading over the
+-// copies it holds.
++// copies it holds. A click on either heading folds its copies away.
+ func (a *App) dedupResults(c *ui.Context, t *ui.Theme, p *palette) {
+ 	d := &a.dedup
+ 	if d.scrollTop {
+@@ -1187,21 +1224,27 @@ func (a *App) dedupResults(c *ui.Context, t *ui.Theme, p *palette) {
+ 		case r.file < 0 && r.dir >= 0:
+ 			a.dedupFolderRow(c, t, p, r.dir, i)
+ 		case r.file < 0:
+-			a.dedupGroupRow(c, t, p, d.groups[r.group], r.group)
++			a.dedupGroupRow(c, t, p, d.groups[r.group], r.group, i)
+ 		default:
+ 			a.dedupFileRow(c, t, p, r, i, now)
+ 		}
+ 	}).Grow(1).Padding(4, 10, 12)
+-	// A folder's line clicked folds it once the list has been built: its
+-	// copies leave the lines, which must not happen while the list walks
+-	// them. The line keeps the row it was clicked at, as folding it leaves
+-	// every row before it alone, and the list is asked to keep it in view.
++	// A line clicked folds it once the list has been built: its copies
++	// leave the lines, which must not happen while the list walks them.
++	// The line keeps the row it was clicked at, as folding it leaves every
++	// row before it alone, and the list is asked to keep it in view.
+ 	if d.foldWant != "" && d.byFolder == 1 {
+ 		dir, row := d.foldWant, d.foldWantRow
+ 		d.foldWant = ""
+ 		d.toggleFold(dir)
+ 		d.list.ScrollIntoView(row)
+ 	}
++	if d.groupFoldWant != nil && d.byFolder == 0 {
++		key, row := *d.groupFoldWant, d.groupFoldWantRow
++		d.groupFoldWant = nil
++		d.toggleGroupFold(key)
++		d.list.ScrollIntoView(row)
++	}
+ }
+ 
+ // dedupFolderRow heads a folder of the folder view: its path under the
+@@ -1370,12 +1413,29 @@ func (a *App) dedupFileMenu(row ui.Element, g dedup.Group, fi int) {
+ 	})
+ }
+ 
+-// dedupGroupRow heads a group with its count and what it could free, and a
+-// way to keep just one of its copies.
+-func (a *App) dedupGroupRow(c *ui.Context, t *ui.Theme, p *palette, g dedup.Group, gi int) {
++// dedupGroupRow heads a group with an arrow of its fold, its count, what it
++// could free, and a way to keep just one of its copies. A click on the
++// heading folds its copies away or shows them again; a click on the 保留一份
++// pill keeps one copy and folds nothing, as the pill is that click's own
++// target.
++func (a *App) dedupGroupRow(c *ui.Context, t *ui.Theme, p *palette, g dedup.Group, gi, row int) {
++	d := &a.dedup
+ 	narrow := a.dedupNarrow(c)
+-	row := ui.Row(c).Height(42).PaddingX(10).Gap(8).AlignItems(ui.Center).Background(t.Background)
+-	row.Children(func() {
++	folded := d.groupFolded[g.Key]
++	chevron := "chevron-down"
++	if folded {
++		chevron = "chevron-right"
++	}
++	b := ui.ButtonBase(c.Key(g.Key)).Label(itoa(len(g.Files)) + " 个相同文件").
++		Height(42).PaddingX(10).Gap(8).AlignItems(ui.Center).Radius(8)
++	bg := t.Background
++	if b.Hovered() {
++		bg = t.SurfaceHover
++	}
++	b.Background(b.AnimateColor("bg", bg, motionHover))
++	pillClicked := false
++	b.Children(func() {
++		ui.Icon(c, icon(chevron)).FontSize(13).TextColor(t.TextMuted)
+ 		ui.Icon(c, icon("copy")).FontSize(13).TextColor(t.TextMuted)
+ 		figure(c, itoa(len(g.Files))+" 个相同文件").FontSize(12).FontWeight(600)
+ 		if !narrow {
+@@ -1385,9 +1445,14 @@ func (a *App) dedupGroupRow(c *ui.Context, t *ui.Theme, p *palette, g dedup.Grou
+ 		figure(c, "共 "+humanSize(g.Total())+" · 可释放 "+humanSize(g.Reclaim)).
+ 			FontSize(11).TextColor(t.TextMuted)
+ 		if pillOf(c, t, p, "check", "保留一份", false, narrow).Disabled(a.dedup.busy).Clicked() {
+-			a.dedup.keepOne(gi)
++			d.keepOne(gi)
++			pillClicked = true
+ 		}
+ 	})
++	if b.Clicked() && !pillClicked {
++		key := g.Key
++		d.groupFoldWant, d.groupFoldWantRow = &key, row
++	}
+ }
+ 
+ // dedupBar is the bar under the results: what is chosen, and the action.
+diff --git a/app/dedup_test.go b/app/dedup_test.go
+index 92c8e44..7ec32aa 100644
+--- a/app/dedup_test.go
++++ b/app/dedup_test.go
+@@ -175,6 +175,165 @@ func TestDedup(t *testing.T) {
+ 	save(t, tt, "dedup-after-delete")
+ }
+ 
++// TestDedupFold checks that both views fold: a group's heading hides its
++// copies in the group view, a folder's line hides its copies in the folder
++// view, each view keeps its folds across a switch, and the 保留一份 pill
++// folds nothing.
++func TestDedupFold(t *testing.T) {
++	oldWorkers, oldReport := dedupWorkers, dedupReport
++	dedupWorkers, dedupReport = 2, 0
++	t.Cleanup(func() { dedupWorkers, dedupReport = oldWorkers, oldReport })
++
++	a, tt, _ := signedIn(t)
++	a.router.Replace("/dedup")
++	waitUntil(t, tt, "the dedup scan", func() bool { return a.dedup.loaded })
++	tt.Advance(300 * time.Millisecond)
++
++	d := &a.dedup
++	if len(d.groups) < 2 {
++		t.Fatalf("only %d groups to fold", len(d.groups))
++	}
++	// The rows a group of either view shows in groupRows: its heading and
++	// its copies.
++	groupRows := func(gi int) (heading bool, copies int) {
++		for _, r := range d.rows {
++			if r.group != gi {
++				continue
++			}
++			if r.file < 0 {
++				heading = true
++			} else {
++				copies++
++			}
++		}
++		return
++	}
++	folderRows := func(di int) (heading bool, files int) {
++		for _, r := range d.rows {
++			if r.dir != di {
++				continue
++			}
++			if r.file < 0 {
++				heading = true
++			} else {
++				files++
++			}
++		}
++		return
++	}
++
++	gi, g := 0, d.groups[0]
++	if heading, copies := groupRows(gi); !heading || copies != len(g.Files) {
++		t.Fatalf("group %d shows heading %v with %d of %d copies", gi, heading, copies, len(g.Files))
++	}
++	total := len(d.rows)
++
++	// 保留一份 is the pill's own click: it keeps one copy and folds nothing.
++	if err := tt.Click("保留一份"); err != nil {
++		t.Fatalf("%v; texts %q", err, tt.Texts())
++	}
++	tt.Advance(100 * time.Millisecond)
++	if len(d.groupFolded) != 0 {
++		t.Errorf("保留一份 folded %d groups", len(d.groupFolded))
++	}
++	if len(d.rows) != total {
++		t.Errorf("保留一份 changed the rows from %d to %d", total, len(d.rows))
++	}
++	if d.chosen[g.Files[0].Path] {
++		t.Errorf("保留一份 of group %d kept no copy", gi)
++	}
++	for _, f := range g.Files[1:] {
++		if !d.chosen[f.Path] {
++			t.Errorf("保留一份 of group %d did not choose %q", gi, f.Path)
++		}
++	}
++
++	// Clicking the heading folds the group's copies away and keeps the
++	// heading; the other groups stay open.
++	head := "每个 " + humanSize(g.Size())
++	if err := tt.Click(head); err != nil {
++		t.Fatalf("%v; texts %q", err, tt.Texts())
++	}
++	tt.Advance(100 * time.Millisecond)
++	if !d.groupFolded[g.Key] {
++		t.Fatalf("clicking the heading did not fold group %d", gi)
++	}
++	if heading, copies := groupRows(gi); !heading || copies != 0 {
++		t.Errorf("folded group %d shows heading %v with %d copies", gi, heading, copies)
++	}
++	if heading, copies := groupRows(1); !heading || copies != len(d.groups[1].Files) {
++		t.Errorf("folding group %d changed group 1: heading %v, %d copies", gi, heading, copies)
++	}
++
++	// The folder view folds too, and keeps its own fold state.
++	if err := tt.Click("按文件夹"); err != nil {
++		t.Fatalf("%v; texts %q", err, tt.Texts())
++	}
++	tt.Advance(200 * time.Millisecond)
++	if d.byFolder != 1 {
++		t.Fatalf("the view did not switch to folders: byFolder %d", d.byFolder)
++	}
++	if !d.groupFolded[g.Key] {
++		t.Error("switching views dropped the group's fold")
++	}
++	if len(d.dirs) == 0 {
++		t.Fatal("the folder view has no folders")
++	}
++	// The first folder, the one that could free the most, unless it is the
++	// root, whose label the sidebar shows too.
++	di := 0
++	if d.dirs[di].path == "/" && len(d.dirs) > 1 {
++		di = 1
++	}
++	f := d.dirs[di]
++	if heading, files := folderRows(di); !heading || files != len(f.files) {
++		t.Fatalf("folder %q shows heading %v with %d of %d files", f.label, heading, files, len(f.files))
++	}
++	clickDedupRow(t, tt, f.label)
++	tt.Advance(100 * time.Millisecond)
++	if !d.folded[f.path] {
++		t.Fatalf("clicking folder %q did not fold it", f.label)
++	}
++	if heading, files := folderRows(di); !heading || files != 0 {
++		t.Errorf("folded folder %q shows heading %v with %d files", f.label, heading, files)
++	}
++	// Unfolding shows its copies again.
++	clickDedupRow(t, tt, f.label)
++	tt.Advance(100 * time.Millisecond)
++	if d.folded[f.path] {
++		t.Fatal("the second click did not unfold the folder")
++	}
++	if _, files := folderRows(di); files != len(f.files) {
++		t.Errorf("unfolded folder %q shows %d of %d files", f.label, files, len(f.files))
++	}
++
++	// Back in the group view the group folded earlier is still folded, and
++	// unfolding it brings its copies back.
++	if err := tt.Click("按重复组"); err != nil {
++		t.Fatalf("%v; texts %q", err, tt.Texts())
++	}
++	tt.Advance(200 * time.Millisecond)
++	if d.byFolder != 0 {
++		t.Fatalf("the view did not switch back: byFolder %d", d.byFolder)
++	}
++	if !d.groupFolded[g.Key] {
++		t.Error("the group's fold did not survive the view switch")
++	}
++	if heading, copies := groupRows(gi); !heading || copies != 0 {
++		t.Errorf("the folded group %d shows heading %v with %d copies after switching back", gi, heading, copies)
++	}
++	if err := tt.Click(head); err != nil {
++		t.Fatalf("%v; texts %q", err, tt.Texts())
++	}
++	tt.Advance(100 * time.Millisecond)
++	if d.groupFolded[g.Key] {
++		t.Fatal("the second click did not unfold the group")
++	}
++	if _, copies := groupRows(gi); copies != len(g.Files) {
++		t.Errorf("unfolded group %d shows %d of %d copies", gi, copies, len(g.Files))
++	}
++}
++
+ // TestDedupSkipsChangedFiles checks the scan's results against the folders
+ // again before deleting: a copy that changed since it was found, or a group
+ // whose kept copy is gone, is left alone.
