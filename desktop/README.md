@@ -67,14 +67,24 @@ Any other platform reading the feed (an ARM or macOS build of the same app) ends
 up on the "更新信息没有 … 的下载地址" path, which reports that the feed has no
 download URL for this platform.
 
-The version in the feed and in the release tag is the upstream `mygo.json`
-version, because that is what the app compares against. Rebuilding the same
-upstream version therefore does not count as an update — the tag and feed change
-(`short_sha` differs) but the app does not prompt again, which keeps it from
-nagging. To publish a queue change before upstream moves (a broken installer, a
-fix that should be downloadable now), dispatch the workflow with `force`; that
-refreshes the Release and the feed immediately, and the in-app prompt arrives
-with the next upstream version bump.
+The community build carries a version of its own: `build-baidunetgo.sh` rewrites
+`mygo.json`'s version to `<upstream version>.<patch count>` before building, so
+0.8.3 with 21 patches is `0.8.3.21`. The app compares versions segment by
+segment, which makes a queue change an update (`0.8.3.21 < 0.8.3.22`), lets an
+upstream bump win (`0.8.3.22 < 0.8.4.21`), and keeps a rebuild of the same tree
+from prompting again — same version, nothing newer. The version lands in the
+binary, the package names, the release tag and the feed, and Settings → About
+shows it as the running build.
+
+To publish a queue change before upstream moves (a broken installer, a fix that
+should be downloadable now), dispatch the workflow with `force`; that builds the
+new patch count's version, and since it is higher the installed apps are offered
+the update on their next check.
+
+The count only goes down when patches are dropped (upstream merged a fix, or a
+patch was retired). If that ever lands below a version already published, set a
+higher version by hand in `mygo.json` for that build: the script keeps whatever
+the tree names as the upstream part and only appends the count.
 
 The workflow artifact (`baidunetgo-x86-<sha>`, kept 90 days) is still uploaded
 as the quickest way to grab a build without a Release round trip.

@@ -289,6 +289,22 @@ build() {
         echo "==> linking the default update feed: $FEED_URL"
     fi
 
+    # The community build carries a version of its own: upstream's, with the
+    # queue's patch count after it (0.8.3 with 21 patches is 0.8.3.21). The app
+    # compares versions segment by segment, so a build with one more patch is
+    # newer than the one before it, while an upstream bump still wins
+    # (0.8.3.21 < 0.8.4.21). The version lands in mygo.json before the build, so
+    # the binary reports it, and the packages, the release tag and the feed all
+    # name it.
+    local upstream_version community_version
+    upstream_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$WORK/mygo.json" | head -n 1)"
+    [[ -n "$upstream_version" ]] || die "no version in $WORK/mygo.json"
+    community_version="$upstream_version.${patch_count:-0}"
+    sed -i -E "s|^([[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\")[^\"]*(\")|\1${community_version}\2|" "$WORK/mygo.json"
+    grep -q "\"$community_version\"" "$WORK/mygo.json" \
+        || die "could not set version $community_version in $WORK/mygo.json"
+    echo "==> version: $community_version (upstream $upstream_version + ${patch_count:-0} patch(es))"
+
     echo "==> Building $PROJECT_NAME $PLATFORMS"
     (
         cd "$WORK"
@@ -317,7 +333,9 @@ build() {
     fi
 
     local version platform dir
-    version="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$WORK/mygo.json" | head -n 1)"
+    # The version the build was given above, not the one upstream's mygo.json
+    # held: the community version is what the packages and build-info.txt name.
+    version="$community_version"
 
     shopt -s nullglob
     for dir in "$WORK"/build/*/; do

@@ -44,7 +44,7 @@ code.
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `11cc955` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 10 | `0.1.3-patchwork` (11203, arm64-v8a) |
-| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 21 | `0.8.3` (linux/windows x86, Arch package; Release + feed) |
+| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 22 | `0.8.3.22` — upstream `0.8.3` + 22 patches (linux/windows x86, Arch package; Release + feed) |
 
 The three Android apps are published in F-Droid. **BaiduNetGo is not**: it is a
 Go/MyGo desktop program, built on its own 10-day schedule. Its installers —
@@ -299,7 +299,7 @@ with the arm64 build.
 │   ├── screentime/{app.conf,patches/}   # 0001..0011, KEEP_ABIS=ARM
 │   └── fcitx5/{app.conf,patches/}       # 0001..0010
 ├── desktop/
-│   ├── baidunetgo/{app.conf,patches/}   # 0001..0021, x86 desktop build
+│   ├── baidunetgo/{app.conf,patches/}   # 0001..0022, x86 desktop build
 │   └── .build-state.json                # last upstream commit built
 ├── .watch-state.json          # last android/baidunetgo 10-day check
 ├── scripts/
