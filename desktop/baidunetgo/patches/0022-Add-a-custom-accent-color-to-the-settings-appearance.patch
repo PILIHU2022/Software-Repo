@@ -1,0 +1,725 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 08:10:14 +0800
+Subject: [PATCH] Add a custom accent color to the settings' appearance
+ section, as eight presets or any #RRGGBB, and show the build's version in a
+ row of the About section, since the interface was fixed to the system blue
+ and the version it runs could only be guessed from the title bar.
+
+---
+ CHANGELOG.md             |   1 +
+ app/app.go               |   7 +
+ app/settings.go          |   4 +
+ app/settings_page.go     |  87 ++++++++++-
+ app/theme.go             | 204 ++++++++++++++++++++++---
+ app/theme_accent_test.go | 323 +++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 608 insertions(+), 18 deletions(-)
+ create mode 100644 app/theme_accent_test.go
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index cfb7875..afcc2b3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -8,2 +8,3 @@
+ 
++- 设置页「外观」新增「主题色」：八个预设色块（蓝、紫、粉、橙、绿、红、青、靛）一点即换，也可在「自定义…」里填任意 `#RRGGBB` / `#RGB`（弹窗里边填边预览，写错就地提示、不保存不关闭），还能用「默认」回到系统蓝；强调色与由它派生的悬停、按下、选中、焦点配色一起生效并保存在设置里，深色外观下自动提亮，按钮上的文字按底色明暗取黑或白以保证可读。「关于」同时新增一行显示当前版本号，第一行的应用名不再重复版本。
+ - 设置页新增「更新」小节：自动检查更新开关（默认开，启动后静默检查一次）、「立即检查」手动检查，发现新版本可把对应平台（GOOS-GOARCH）的安装包下载到下载目录（构建未内置更新签名密钥，下载的包不做签名校验）；「更新地址」可在弹出的对话框里填写，留空时功能显示为「待配置」状态、不发任何网络请求，发布通道就绪后填入即可，构建时也可用 `-ldflags -X …internal/updates.defaultFeed=…` 注入默认地址。feed 格式与接入 GitHub Actions 的交接清单见 `docs/UPDATES.md`。
+diff --git a/app/app.go b/app/app.go
+index b4f03c8..abedb38 100644
+--- a/app/app.go
++++ b/app/app.go
+@@ -126,2 +126,9 @@ type App struct {
+ 	queued  []func()
++
++	// accentEditing, accentDraft and accentErr are the settings page's
++	// 主题色 dialog: whether it is open, the color it edits and why the
++	// last save refused it (settings_page.go).
++	accentEditing bool
++	accentDraft   string
++	accentErr     string
+ }
+diff --git a/app/settings.go b/app/settings.go
+index 43cf18c..365a003 100644
+--- a/app/settings.go
++++ b/app/settings.go
+@@ -49,2 +49,6 @@ type settings struct {
+ 	UpdateChannel string `json:"update_channel,omitempty"`
++	// AccentColor is the interface's accent color as #rrggbb, the one the
++	// 外观 section of the settings offers; empty keeps the theme's own,
++	// the system blue.
++	AccentColor string `json:"accent_color,omitempty"`
+ }
+diff --git a/app/settings_page.go b/app/settings_page.go
+index fa5ee61..6588f47 100644
+--- a/app/settings_page.go
++++ b/app/settings_page.go
+@@ -360,2 +360,83 @@ func (a *App) updateDialog(c *ui.Context, t *ui.Theme, p *palette) {
+ 
++// accentRow is the 外观 section's 主题色: the preset colors as swatches, one
++// press each, a way back to the theme's own color, and a dialog for a color
++// of the user's own.
++func (a *App) accentRow(c *ui.Context, t *ui.Theme, p *palette) {
++	s := &a.settings
++	settingRow(c, t, p, "主题色", "", accentDetail(s.AccentColor), func() {
++		for _, preset := range accentPresets {
++			b := ui.ButtonBase(c.Key("accent:"+preset.Hex)).Label(preset.Name).Tooltip(preset.Name).
++				Size(20, 20).Radius(10).Center().Background(ui.Hex(preset.Hex))
++			// The color in effect wears a ring; with none of the user's
++			// own, that is the theme's blue, which the first preset is.
++			if preset.Hex == s.AccentColor || (s.AccentColor == "" && preset.Hex == accentPresets[0].Hex) {
++				b.Border(2, t.Text)
++			}
++			if b.Clicked() {
++				s.AccentColor = preset.Hex
++				a.applySettings()
++			}
++		}
++		if pill(c, t, p, "", "默认", false).Clicked() {
++			s.AccentColor = ""
++			a.applySettings()
++		}
++		if pill(c, t, p, "", "自定义…", false).Clicked() {
++			a.accentErr = ""
++			a.accentDraft = s.AccentColor
++			if a.accentDraft == "" {
++				a.accentDraft = accentPresets[0].Hex // the dialog starts on the system blue
++			}
++			a.accentEditing = true
++		}
++	})
++}
++
++// saveAccent keeps the 主题色 dialog's color once it reads as one, as
++// #rrggbb; a color it cannot read leaves the dialog open with the reason.
++func (a *App) saveAccent() {
++	hex, err := accentNormalize(a.accentDraft)
++	if err != nil {
++		a.accentErr = err.Error()
++		return
++	}
++	a.accentErr, a.accentEditing = "", false
++	if a.settings.AccentColor == hex {
++		return
++	}
++	a.settings.AccentColor = hex
++	a.applySettings()
++}
++
++// accentDialog asks for a color of the user's own in a small dialog of the
++// settings page's own, like the 更新地址 one, showing the color as it is
++// typed.
++func (a *App) accentDialog(c *ui.Context, t *ui.Theme, p *palette) {
++	ui.Modal(c, &a.accentEditing, func() {
++		dialogTitle(c, t, "主题色", "预设之外的颜色，填写 #RRGGBB 或 #RGB")
++		in := ui.TextInputBase(c.Key("accent-hex"), &a.accentDraft).Label("主题色").
++			Placeholder("#007aff").Grow(1)
++		if a.accentErr != "" {
++			ui.Text(c, a.accentErr).FontSize(11).TextColor(t.Danger).Transition(rowEnter)
++		}
++		if hex, err := accentNormalize(a.accentDraft); err == nil {
++			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
++				ui.ButtonBase(c).Size(20, 20).Radius(10).Background(ui.Hex(hex))
++				ui.Text(c, accentDetail(hex)).FontSize(11).TextColor(t.TextMuted)
++			})
++		}
++		ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++			if pill(c, t, p, "", "取消", false).Clicked() {
++				a.accentEditing, a.accentErr = false, ""
++			}
++			if pill(c, t, p, "", "保存", true).Clicked() {
++				a.saveAccent()
++			}
++		})
++		if in.Submitted() {
++			a.saveAccent()
++		}
++	})
++}
++
+ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+@@ -390,2 +471,3 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 				})
++				a.accentRow(c, t, p)
+ 			})
+@@ -417,3 +499,3 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 			section(c, t, p, "关于", func() {
+-				settingRow(c, t, p, "BaiduNetGo", "", version()+" · 百度网盘的原生桌面客户端", func() {
++				settingRow(c, t, p, "BaiduNetGo", "", "百度网盘的原生桌面客户端", func() {
+ 					if pill(c, t, p, "external-link", "项目主页", false).Clicked() {
+@@ -422,2 +504,4 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 				})
++				// 当前版本号：报问题、对更新说明时都要它，单独一行。
++				settingRow(c, t, p, "版本", "", version(), func() {})
+ 				// 社区修复版的声明：谁改了什么。
+@@ -434,2 +518,3 @@ func (a *App) settingsPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	a.updateDialog(c, t, p)
++	a.accentDialog(c, t, p)
+ }
+diff --git a/app/theme.go b/app/theme.go
+index 2487241..3646fcb 100644
+--- a/app/theme.go
++++ b/app/theme.go
+@@ -3,2 +3,3 @@ package app
+ import (
++	"fmt"
+ 	"math"
+@@ -42,6 +43,20 @@ var (
+ 
+-func init() {
+-	accentLight := ui.Hex("#007aff")
+-	accentDark := ui.Hex("#0a84ff")
++// accentSet is an accent color with the shades drawn from it: its hover
++// and pressed states, and the text that reads on it.
++type accentSet struct {
++	Accent  ui.Color // buttons filled with it, chosen rows, links
++	Hover   ui.Color // the same under the pointer
++	Pressed ui.Color // the same pressed
++	Text    ui.Color // text and glyphs drawn on it
++}
++
++// accentLightDefault and accentDarkDefault are the accents the themes keep
++// when the user chooses none of their own: the system blue of macOS, each
++// with the shades the look has always had.
++var (
++	accentLightDefault = accentSet{ui.Hex("#007aff"), ui.Hex("#006ee6"), ui.Hex("#0062cc"), ui.Hex("#ffffff")}
++	accentDarkDefault  = accentSet{ui.Hex("#0a84ff"), ui.Hex("#2b95ff"), ui.Hex("#0077e6"), ui.Hex("#ffffff")}
++)
+ 
++func init() {
+ 	t := ui.LightTheme()
+@@ -54,6 +69,3 @@ func init() {
+ 	t.TextMuted = ui.Hex("#6e6e73")
+-	t.Accent = accentLight
+-	t.AccentHover = ui.Hex("#006ee6")
+-	t.AccentPressed = ui.Hex("#0062cc")
+-	t.AccentText = ui.Hex("#ffffff")
++	applyAccent(t, "")
+ 	t.Danger = ui.Hex("#ff3b30")
+@@ -61,4 +73,2 @@ func init() {
+ 	t.Warning = ui.Hex("#ff9500")
+-	t.Selection = accentLight.Alpha(0.22)
+-	t.Focus = accentLight.Alpha(0.5)
+ 	t.Radius = 6
+@@ -91,6 +101,3 @@ func init() {
+ 	d.TextMuted = ui.Hex("#98989d")
+-	d.Accent = accentDark
+-	d.AccentHover = ui.Hex("#2b95ff")
+-	d.AccentPressed = ui.Hex("#0077e6")
+-	d.AccentText = ui.Hex("#ffffff")
++	applyAccent(d, "")
+ 	d.Danger = ui.Hex("#ff453a")
+@@ -98,4 +105,2 @@ func init() {
+ 	d.Warning = ui.Hex("#ff9f0a")
+-	d.Selection = accentDark.Alpha(0.35)
+-	d.Focus = accentDark.Alpha(0.6)
+ 	d.Radius = 6
+@@ -121,2 +126,163 @@ func init() {
+ 
++// accentPreset is one of the accent colors the settings page offers beside
++// a color of the user's own.
++type accentPreset struct {
++	Name string // what the settings page calls it: 蓝, 紫, 粉 …
++	Hex  string // its color, as #rrggbb
++}
++
++// accentPresets are the colors offered in the 外观 section, in the order
++// the swatches show them.
++var accentPresets = []accentPreset{
++	{"蓝", "#007aff"},
++	{"紫", "#af52de"},
++	{"粉", "#ff2d55"},
++	{"橙", "#ff9500"},
++	{"绿", "#34c759"},
++	{"红", "#ff3b30"},
++	{"青", "#32ade6"},
++	{"靛", "#5856d6"},
++}
++
++// defaultAccent is the accent a theme keeps when the user chooses none: the
++// one its init gave it.
++func defaultAccent(dark bool) accentSet {
++	if dark {
++		return accentDarkDefault
++	}
++	return accentLightDefault
++}
++
++// accentColors derives a theme's accent colors from hex, the color the user
++// chose: the base itself in the light theme and a tenth of the way to white
++// in the dark one, so it holds up on a dark background, a hover shade
++// toward white, a pressed shade toward black, and the text that reads on the
++// base: white on a dark color, near black on a light one such as #ffd60a.
++// The color may be #rgb or #rrggbb in either case; anything else is an
++// error, as ui.Hex would otherwise panic on it.
++func accentColors(hex string, dark bool) (acc, hover, pressed, text ui.Color, err error) {
++	norm, err := accentNormalize(hex)
++	if err != nil {
++		return ui.Color{}, ui.Color{}, ui.Color{}, ui.Color{}, err
++	}
++	white, black := ui.Hex("#ffffff"), ui.Hex("#000000")
++	base := ui.Hex(norm)
++	if dark {
++		base = base.Mix(white, 0.10)
++	}
++	acc = base
++	if dark {
++		hover, pressed = base.Mix(white, 0.12), base.Mix(black, 0.18)
++	} else {
++		hover, pressed = base.Mix(white, 0.16), base.Mix(black, 0.14)
++	}
++	text = white
++	if accentLuminance(base) >= 0.55 {
++		text = ui.Hex("#1d1d1f")
++	}
++	return acc, hover, pressed, text, nil
++}
++
++// accentNormalize reads an accent color as #rrggbb in lower case. It takes
++// #rgb or #rrggbb, the letters in either case, with or without the #, so a
++// color typed into the dialog is read as it is meant. Anything else is an
++// error naming what it wanted, which the dialog shows.
++func accentNormalize(hex string) (string, error) {
++	h := accentTrimSpace(hex)
++	if len(h) > 0 && h[0] == '#' {
++		h = h[1:]
++	}
++	switch len(h) {
++	case 3:
++		h = string([]byte{h[0], h[0], h[1], h[1], h[2], h[2]})
++	case 6:
++	default:
++		return "", fmt.Errorf("主题色 %q 不是 #RRGGBB 或 #RGB", hex)
++	}
++	out := make([]byte, 0, 7)
++	out = append(out, '#')
++	for i := 0; i < len(h); i++ {
++		c := h[i]
++		switch {
++		case '0' <= c && c <= '9', 'a' <= c && c <= 'f':
++		case 'A' <= c && c <= 'F':
++			c += 'a' - 'A'
++		default:
++			return "", fmt.Errorf("主题色 %q 不是 #RRGGBB 或 #RGB", hex)
++		}
++		out = append(out, c)
++	}
++	return string(out), nil
++}
++
++// accentTrimSpace cuts the white space a pasted color may bring from both
++// ends of s.
++func accentTrimSpace(s string) string {
++	space := func(c byte) bool {
++		return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
++	}
++	for len(s) > 0 && space(s[0]) {
++		s = s[1:]
++	}
++	for len(s) > 0 && space(s[len(s)-1]) {
++		s = s[:len(s)-1]
++	}
++	return s
++}
++
++// accentLuminance is the relative luminance of c's sRGB value, 0 for black
++// and 1 for white: what tells whether text reads on it.
++func accentLuminance(c ui.Color) float64 {
++	linear := func(v uint8) float64 {
++		s := float64(v) / 255
++		if s <= 0.04045 {
++			return s / 12.92
++		}
++		return math.Pow((s+0.055)/1.055, 2.4)
++	}
++	return 0.2126*linear(c.R) + 0.7152*linear(c.G) + 0.0722*linear(c.B)
++}
++
++// accentName is the preset hex names, or "" when it is none of them.
++func accentName(hex string) string {
++	for _, p := range accentPresets {
++		if p.Hex == hex {
++			return p.Name
++		}
++	}
++	return ""
++}
++
++// accentDetail names the accent in effect for the settings page: the
++// theme's own, a preset's name, or the color the user typed.
++func accentDetail(hex string) string {
++	if hex == "" {
++		return "默认（系统蓝）"
++	}
++	if name := accentName(hex); name != "" {
++		return name
++	}
++	return hex
++}
++
++// applyAccent puts the user's accent color into t, rebuilding everything
++// drawn from it: an empty or unreadable hex falls back to the theme's own
++// color, which keeps a broken setting from breaking the interface. The
++// selection and focus tints are made from the accent in effect, so clearing
++// a custom color puts them back as well.
++func applyAccent(t *ui.Theme, hex string) {
++	set := defaultAccent(t.Dark)
++	if hex != "" {
++		if acc, hover, pressed, text, err := accentColors(hex, t.Dark); err == nil {
++			set = accentSet{acc, hover, pressed, text}
++		}
++	}
++	t.Accent, t.AccentHover, t.AccentPressed, t.AccentText = set.Accent, set.Hover, set.Pressed, set.Text
++	if t.Dark {
++		t.Selection, t.Focus = set.Accent.Alpha(0.35), set.Accent.Alpha(0.6)
++	} else {
++		t.Selection, t.Focus = set.Accent.Alpha(0.22), set.Accent.Alpha(0.5)
++	}
++}
++
+ // The built-in font, used when the user does not follow fontconfig: 13
+@@ -140,4 +306,6 @@ var (
+ // applyTheme sets the app's theme for this frame, following the system's
+-// light or dark appearance and the user's font choice, and returns it with
+-// the matching palette.
++// light or dark appearance, the user's font choice and their accent color,
++// and returns it with the matching palette. The accent is applied every
++// frame: the themes are package-level, so a custom color cleared while it
++// showed must give way to the default of the theme now in effect.
+ func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
+@@ -146,2 +314,3 @@ func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
+ 		darkTheme.Font, darkTheme.FontSize = family, size
++		applyAccent(darkTheme, a.settings.AccentColor)
+ 		c.SetTheme(darkTheme)
+@@ -150,2 +319,3 @@ func (a *App) applyTheme(c *ui.Context) (*ui.Theme, *palette) {
+ 	lightTheme.Font, lightTheme.FontSize = family, size
++	applyAccent(lightTheme, a.settings.AccentColor)
+ 	c.SetTheme(lightTheme)
+diff --git a/app/theme_accent_test.go b/app/theme_accent_test.go
+new file mode 100644
+index 0000000..b6c4275
+--- /dev/null
++++ b/app/theme_accent_test.go
+@@ -0,0 +1,323 @@
++package app
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/egoist/mygo"
++	"github.com/egoist/mygo/ui"
++)
++
++// TestAccentColors derives the shades of an accent color: the base itself
++// in the light theme, a lighter one in the dark theme, a hover toward white
++// and a pressed toward black, and text that reads on the base.
++func TestAccentColors(t *testing.T) {
++	light, hover, pressed, text, err := accentColors("#007aff", false)
++	if err != nil {
++		t.Fatalf("#007aff: %v", err)
++	}
++	if light != ui.Hex("#007aff") {
++		t.Errorf("light base %v, want #007aff", light)
++	}
++	if light == hover || light == pressed || hover == pressed {
++		t.Errorf("shades %v, %v, %v are not apart", light, hover, pressed)
++	}
++	if accentLuminance(hover) <= accentLuminance(light) {
++		t.Errorf("hover %v is not lighter than the base %v", hover, light)
++	}
++	if accentLuminance(pressed) >= accentLuminance(light) {
++		t.Errorf("pressed %v is not darker than the base %v", pressed, light)
++	}
++	if text != ui.Hex("#ffffff") {
++		t.Errorf("text on #007aff is %v, want white", text)
++	}
++
++	dark, darkHover, darkPressed, darkText, err := accentColors("#007aff", true)
++	if err != nil {
++		t.Fatalf("#007aff in the dark: %v", err)
++	}
++	if accentLuminance(dark) <= accentLuminance(light) {
++		t.Errorf("dark base %v is not lighter than the light one %v", dark, light)
++	}
++	if accentLuminance(darkHover) <= accentLuminance(dark) {
++		t.Errorf("dark hover %v is not lighter than the dark base %v", darkHover, dark)
++	}
++	if accentLuminance(darkPressed) >= accentLuminance(dark) {
++		t.Errorf("dark pressed %v is not darker than the dark base %v", darkPressed, dark)
++	}
++	if darkText != ui.Hex("#ffffff") {
++		t.Errorf("text on the dark base %v, want white", darkText)
++	}
++
++	// A light accent takes near-black text rather than white.
++	if _, _, _, onYellow, err := accentColors("#ffd60a", false); err != nil {
++		t.Fatalf("#ffd60a: %v", err)
++	} else if onYellow != ui.Hex("#1d1d1f") {
++		t.Errorf("text on #ffd60a is %v, want #1d1d1f", onYellow)
++	}
++
++	// #rgb doubles each digit, and case does not matter.
++	if acc, _, _, _, err := accentColors("#F90", false); err != nil {
++		t.Fatalf("#F90: %v", err)
++	} else if acc != ui.Hex("#ff9900") {
++		t.Errorf("#F90 read as %v, want #ff9900", acc)
++	}
++
++	for _, bad := range []string{"red", "#12345", "#gggggg", "", "#", "#1234567"} {
++		if _, _, _, _, err := accentColors(bad, false); err == nil {
++			t.Errorf("%q parsed as a color", bad)
++		}
++	}
++
++	// What the dialog saves is the color in one shape, whatever came in.
++	for in, want := range map[string]string{
++		"#007AFF": "#007aff",
++		" af52de": "#af52de",
++		"#F90":    "#ff9900",
++		"#abc":    "#aabbcc",
++	} {
++		if got, err := accentNormalize(in); err != nil {
++			t.Errorf("%q: %v", in, err)
++		} else if got != want {
++			t.Errorf("%q normalized to %q, want %q", in, got, want)
++		}
++	}
++}
++
++// TestApplyAccent puts an accent into a theme: the theme's own color when
++// the user has none, theirs when they have one, and the default again when
++// what they have cannot be read, so a broken setting cannot break the look.
++func TestApplyAccent(t *testing.T) {
++	t.Cleanup(func() {
++		applyAccent(lightTheme, "")
++		applyAccent(darkTheme, "")
++	})
++
++	light := ui.LightTheme()
++	applyAccent(light, "")
++	if light.Accent != ui.Hex("#007aff") {
++		t.Errorf("light default accent %v, want #007aff", light.Accent)
++	}
++	if light.AccentHover != ui.Hex("#006ee6") || light.AccentPressed != ui.Hex("#0062cc") || light.AccentText != ui.Hex("#ffffff") {
++		t.Errorf("light default shades %v, %v, %v", light.AccentHover, light.AccentPressed, light.AccentText)
++	}
++	if light.Selection != ui.Hex("#007aff").Alpha(0.22) || light.Focus != ui.Hex("#007aff").Alpha(0.5) {
++		t.Errorf("light default tints %v, %v", light.Selection, light.Focus)
++	}
++
++	dark := ui.DarkTheme()
++	applyAccent(dark, "")
++	if dark.Accent != ui.Hex("#0a84ff") {
++		t.Errorf("dark default accent %v, want #0a84ff", dark.Accent)
++	}
++	if dark.AccentHover != ui.Hex("#2b95ff") || dark.AccentPressed != ui.Hex("#0077e6") {
++		t.Errorf("dark default shades %v, %v", dark.AccentHover, dark.AccentPressed)
++	}
++	if dark.Selection != ui.Hex("#0a84ff").Alpha(0.35) || dark.Focus != ui.Hex("#0a84ff").Alpha(0.6) {
++		t.Errorf("dark default tints %v, %v", dark.Selection, dark.Focus)
++	}
++
++	// A color of the user's own, with the tints made from it, not from the
++	// theme's default.
++	acc, hover, pressed, text, err := accentColors("#ff9500", false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	applyAccent(light, "#ff9500")
++	if light.Accent != acc || light.AccentHover != hover || light.AccentPressed != pressed || light.AccentText != text {
++		t.Errorf("custom accent %v, %v, %v, %v; want %v, %v, %v, %v",
++			light.Accent, light.AccentHover, light.AccentPressed, light.AccentText, acc, hover, pressed, text)
++	}
++	if light.Accent == ui.Hex("#007aff") {
++		t.Error("the custom accent left the default in place")
++	}
++	if light.Selection != acc.Alpha(0.22) || light.Focus != acc.Alpha(0.5) {
++		t.Errorf("custom tints %v, %v made from the accent", light.Selection, light.Focus)
++	}
++	if light.Selection.A == 0 || light.Focus.A == 0 {
++		t.Errorf("tints %v, %v are invisible", light.Selection, light.Focus)
++	}
++
++	// A theme now in dark mode takes the dark shades of the same color.
++	dacc, _, _, _, err := accentColors("#ff9500", true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	applyAccent(dark, "#ff9500")
++	if dark.Accent != dacc {
++		t.Errorf("dark custom accent %v, want %v", dark.Accent, dacc)
++	}
++	if dark.Selection != dacc.Alpha(0.35) || dark.Focus != dacc.Alpha(0.6) {
++		t.Errorf("dark custom tints %v, %v", dark.Selection, dark.Focus)
++	}
++
++	// A setting that does not read as a color falls back to the default.
++	applyAccent(light, "not a color")
++	if light.Accent != ui.Hex("#007aff") {
++		t.Errorf("unreadable accent left %v, want the default", light.Accent)
++	}
++
++	// And clearing it goes back to the default too.
++	applyAccent(light, "#ff9500")
++	applyAccent(light, "")
++	if light.Accent != ui.Hex("#007aff") || light.Selection != ui.Hex("#007aff").Alpha(0.22) {
++		t.Errorf("cleared accent is %v with tint %v, want the default", light.Accent, light.Selection)
++	}
++}
++
++// TestAccentSettingJSON keeps the accent in the settings file under its own
++// key, and leaves the key out while the default is chosen.
++func TestAccentSettingJSON(t *testing.T) {
++	data, err := json.Marshal(settings{AccentColor: "#ff9500"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(data), `"accent_color":"#ff9500"`) {
++		t.Errorf("saved %s, without the accent", data)
++	}
++	empty, err := json.Marshal(settings{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.Contains(string(empty), "accent_color") {
++		t.Errorf("the default accent saved as %s", empty)
++	}
++	var s settings
++	if err := json.Unmarshal([]byte(`{"accent_color":"#ff9500"}`), &s); err != nil {
++		t.Fatal(err)
++	}
++	if s.AccentColor != "#ff9500" {
++		t.Errorf("read back %q", s.AccentColor)
++	}
++}
++
++// TestSettingsAccentColor chooses an accent in the 外观 section, which saves
++// it and paints the interface with it, tries a color of the user's own in
++// the dialog, which refuses one it cannot read, and tells the version in
++// 关于 in a row of its own.
++func TestSettingsAccentColor(t *testing.T) {
++	// Keep what this test saves out of the real profile.
++	dir := t.TempDir()
++	mygo.App.SetPath(mygo.PathUserData, dir)
++	t.Cleanup(func() { mygo.App.SetPath(mygo.PathUserData, "") })
++
++	a, tt, _ := signedIn(t)
++	// A window tall enough that the whole settings page shows at once, so
++	// its rows are there to be pressed.
++	tt.SetSize(1180, 2400)
++	a.router.Push("/settings")
++	waitFor(t, tt, "主题色")
++	tt.Advance(300 * time.Millisecond)
++	save(t, tt, "settings-accent")
++
++	// 关于 tells the version, once, in a row of its own.
++	if !tt.HasText("百度网盘的原生桌面客户端") {
++		t.Fatalf("about copy missing; texts %q", tt.Texts())
++	}
++	if _, ok := tt.Find("版本"); !ok {
++		t.Errorf("no 版本 row; texts %q", tt.Texts())
++	}
++	// The title bar names the build too; the page tells it once, as a row.
++	shown := 0
++	for _, text := range tt.Texts() {
++		if text == version() {
++			shown++
++		}
++	}
++	if shown != 1 {
++		t.Errorf("version %q shown %d times, want its own row", version(), shown)
++	}
++	if tt.HasText(version() + " · 百度网盘的原生桌面客户端") {
++		t.Error("the version still rides on the name row")
++	}
++
++	// A preset swatch is the whole choice: press it and the accent is saved
++	// and in effect.
++	if err := tt.Click("紫"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(200 * time.Millisecond)
++	if a.settings.AccentColor != "#af52de" {
++		t.Errorf("accent %q after pressing 紫, want #af52de", a.settings.AccentColor)
++	}
++	if want, _, _, _, err := accentColors("#af52de", false); err != nil {
++		t.Fatal(err)
++	} else if lightTheme.Accent != want {
++		t.Errorf("theme accent %v, want %v", lightTheme.Accent, want)
++	}
++	if got := savedAccent(t, dir); got != "#af52de" {
++		t.Errorf("saved accent %q, want #af52de", got)
++	}
++	save(t, tt, "settings-accent-purple")
++
++	// The dialog refuses what is not a color, and keeps one that is, in the
++	// one shape it is written in.
++	if err := tt.Click("自定义…"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if !a.accentEditing {
++		t.Fatal("自定义… did not open the dialog")
++	}
++	a.accentDraft = "red"
++	tt.Advance(100 * time.Millisecond)
++	if err := tt.Click("保存"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if !a.accentEditing || a.accentErr == "" {
++		t.Fatalf("an unreadable color left editing %v with error %q", a.accentEditing, a.accentErr)
++	}
++	save(t, tt, "settings-accent-dialog")
++	a.accentDraft = "#F90"
++	tt.Advance(100 * time.Millisecond)
++	if err := tt.Click("保存"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(200 * time.Millisecond)
++	if a.accentEditing || a.accentErr != "" {
++		t.Fatalf("a readable color left editing %v with error %q", a.accentEditing, a.accentErr)
++	}
++	if a.settings.AccentColor != "#ff9900" {
++		t.Errorf("accent %q after saving #F90, want #ff9900", a.settings.AccentColor)
++	}
++	if got := savedAccent(t, dir); got != "#ff9900" {
++		t.Errorf("saved accent %q, want #ff9900", got)
++	}
++
++	// 默认 goes back to the theme's own blue.
++	if err := tt.Click("默认"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(200 * time.Millisecond)
++	if a.settings.AccentColor != "" {
++		t.Errorf("accent %q after 默认, want none", a.settings.AccentColor)
++	}
++	if lightTheme.Accent != ui.Hex("#007aff") {
++		t.Errorf("theme accent %v after 默认, want the default", lightTheme.Accent)
++	}
++	if got := savedAccent(t, dir); got != "" {
++		t.Errorf("saved accent %q after 默认, want none", got)
++	}
++}
++
++// savedAccent reads the accent out of the settings file this test had the
++// app save.
++func savedAccent(t *testing.T, dir string) string {
++	t.Helper()
++	data, err := os.ReadFile(filepath.Join(dir, "settings.json"))
++	if err != nil {
++		t.Fatalf("read the settings: %v", err)
++	}
++	var saved struct {
++		AccentColor string `json:"accent_color"`
++	}
++	if err := json.Unmarshal(data, &saved); err != nil {
++		t.Fatalf("read the settings: %v", err)
++	}
++	return saved.AccentColor
++}
