@@ -203,6 +203,12 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 两个地址提供的是同一份签名索引。索引里始终写正式 Pages 地址，因此用 raw 地址添加
 仓库时，部分客户端会提示地址不一致；内容完全相同。
 
+每个已发布应用的 512×512 图标源在 `fdroid/icons-src/<package>.png`。发布脚本会把它
+复制到 `fdroid/repo/<package>/en-US/icon.png`（index-v2）和
+`fdroid/repo/icons/<package>.<versionCode>.png`（旧 index-v1），随后给 index-v1 补
+`icon` 字段并重新签名——这些 APK 用的是自适应 XML 图标，`fdroid update` 无法直接
+提取，所以图标由仓库提供。新增 app 时记得添加对应的图标源文件。
+
 ## 自动化流程
 
 每个 app 都有自己的流水线工作流——`expenses.yml`、`screentime.yml`、`fcitx5.yml`、

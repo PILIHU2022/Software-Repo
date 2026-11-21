@@ -19,7 +19,7 @@
 #
 # Environment:
 #   FDROID_BIN         fdroid executable (default: fdroid from PATH)
-#   ANDROID_HOME       Android SDK (default: ../.toolchain/android-sdk if present)
+#   ANDROID_HOME       Android SDK (default: <repo>/.toolchain/android-sdk if present)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,8 +34,8 @@ APK="$1"
 [[ -f "$APK" ]] || die "APK not found: $APK"
 APK="$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")"
 
-if [[ -z "${ANDROID_HOME:-}" && -d "$ROOT/../.toolchain/android-sdk" ]]; then
-    export ANDROID_HOME="$ROOT/../.toolchain/android-sdk"
+if [[ -z "${ANDROID_HOME:-}" && -d "$ROOT/.toolchain/android-sdk" ]]; then
+    export ANDROID_HOME="$ROOT/.toolchain/android-sdk"
 fi
 FDROID_BIN="${FDROID_BIN:-fdroid}"
 command -v jq >/dev/null 2>&1 || die "jq is required"
@@ -72,9 +72,11 @@ trap 'rm -rf "$TMP"' EXIT
 TESTROOT="$TMP/repo-root"
 mkdir -p "$TESTROOT/scripts" "$TESTROOT/signing" "$TESTROOT/fdroid/repo"
 cp "$ROOT/scripts/publish-fdroid.sh" "$TESTROOT/scripts/"
+cp "$ROOT/scripts/fdroid-icons.py" "$TESTROOT/scripts/"
 cp "$ROOT/signing/patchwork-test.jks" "$TESTROOT/signing/"
 cp "$ROOT/fdroid/config.yml" "$TESTROOT/fdroid/"
 cp -r "$ROOT/fdroid/metadata" "$TESTROOT/fdroid/"
+cp -r "$ROOT/fdroid/icons-src" "$TESTROOT/fdroid/"
 touch "$TESTROOT/fdroid/repo/.gitkeep"
 chmod +x "$TESTROOT/scripts/publish-fdroid.sh"
 

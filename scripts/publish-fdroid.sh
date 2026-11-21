@@ -13,6 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_DIR="$ROOT/fdroid/repo"
 STATE_FILE="$ROOT/fdroid/.build-state.json"
+ICON_SRC_DIR="$ROOT/fdroid/icons-src"
 
 usage() {
     cat <<'EOF'
@@ -25,7 +26,7 @@ Options:
 
 Environment:
   FDROID_BIN         fdroid executable (default: fdroid from PATH)
-  ANDROID_HOME       Android SDK (default: ../.toolchain/android-sdk if present)
+  ANDROID_HOME       Android SDK (default: <repo>/.toolchain/android-sdk if present)
 
 Incoming APKs are discovered recursively. For each (package, versionCode)
 pair only one APK is published: an incoming build replaces any older file with
@@ -79,8 +80,8 @@ if [[ -n "$STATE_JSON" ]]; then
         || die "--state-json is not a JSON object"
 fi
 
-if [[ -z "${ANDROID_HOME:-}" && -d "$ROOT/../.toolchain/android-sdk" ]]; then
-    export ANDROID_HOME="$ROOT/../.toolchain/android-sdk"
+if [[ -z "${ANDROID_HOME:-}" && -d "$ROOT/.toolchain/android-sdk" ]]; then
+    export ANDROID_HOME="$ROOT/.toolchain/android-sdk"
 fi
 
 find_build_tool() {
@@ -150,8 +151,12 @@ for key in "${INCOMING_ORDER[@]}"; do
             echo "    replaced $(basename "$stale") ($pkg $code)"
         fi
     done < <(find "$REPO_DIR" -maxdepth 1 -type f -name '*.apk')
-    cp -f "$apk" "$REPO_DIR/$(basename "$apk")"
-    echo "    $(basename "$apk") ($pkg $code)"
+    if [[ "$apk" -ef "$REPO_DIR/$(basename "$apk")" ]]; then
+        echo "    $(basename "$apk") ($pkg $code) already in fdroid/repo"
+    else
+        cp -f "$apk" "$REPO_DIR/$(basename "$apk")"
+        echo "    $(basename "$apk") ($pkg $code)"
+    fi
 done
 
 # Keep only the three newest APKs per package. fdroid update would otherwise
@@ -192,6 +197,32 @@ else
     command -v "$FDROID_BIN" >/dev/null 2>&1 || die "fdroid not found (set FDROID_BIN)"
 fi
 
+# fdroid update cannot read the adaptive XML icons these APKs use, so it never
+# writes an icon for them.  Put the 512x512 source icon in both places it looks:
+# repo/<package>/<locale>/icon.png (index-v2) and repo/icons/<package>.<code>.png
+# (legacy index-v1, patched below).  See fdroid/icons-src/ for the sources.
+echo "==> Installing app icons"
+declare -A BEST_CODE=()
+while IFS=$'\t' read -r pkg code _; do
+    [[ -n "$pkg" ]] || continue
+    if [[ -z "${BEST_CODE[$pkg]:-}" || "$code" -gt "${BEST_CODE[$pkg]}" ]]; then
+        BEST_CODE[$pkg]="$code"
+    fi
+done <"$TMP"
+for pkg in "${PACKAGES[@]}"; do
+    code="${BEST_CODE[$pkg]:-}"
+    src="$ICON_SRC_DIR/$pkg.png"
+    [[ -n "$code" ]] || continue
+    if [[ ! -f "$src" ]]; then
+        echo "::warning::No icon source for $pkg (expected fdroid/icons-src/$pkg.png)"
+        continue
+    fi
+    mkdir -p "$REPO_DIR/$pkg/en-US" "$REPO_DIR/icons"
+    cp -f "$src" "$REPO_DIR/$pkg/en-US/icon.png"
+    cp -f "$src" "$REPO_DIR/icons/$pkg.$code.png"
+    echo "    $pkg ($code)"
+done
+
 echo "==> Running fdroid update --verbose"
 # fdroid update treats every non-index file in repo/ as a repository file and
 # rejects zero-size ones, so hide the .gitkeep placeholder while it runs.
@@ -207,6 +238,17 @@ if [[ -n "$GITKEEP_BACKUP" ]]; then
     mv -f "$GITKEEP_BACKUP" "$REPO_DIR/.gitkeep"
     GITKEEP_BACKUP=""
 fi
+
+# `fdroid update` only fills the icon field from APK raster icons, so patch the
+# legacy index-v1 after it wrote the JSON, then re-sign both index-v1.jar and
+# entry.jar.  index-v2 already points at repo/<package>/<locale>/icon.png.
+echo "==> Patching legacy index-v1 icons"
+python3 "$ROOT/scripts/fdroid-icons.py" --repo "$REPO_DIR"
+echo "==> Re-signing index-v1 and entry"
+(
+    cd "$ROOT/fdroid"
+    "$FDROID_BIN" signindex </dev/null
+)
 
 if [[ -n "$STATE_JSON" ]]; then
     base='{}'
@@ -226,4 +268,6 @@ done < <(find "$REPO_DIR" -maxdepth 1 -type f \( -name 'index-*' -o -name 'entry
 
 [[ -f "$REPO_DIR/index-v2.json" ]] \
     || die "fdroid update did not produce fdroid/repo/index-v2.json"
+python3 "$ROOT/scripts/fdroid-icons.py" --repo "$REPO_DIR" --check \
+    || die "F-Droid indexes have missing or inconsistent icons"
 echo "==> Published repository index: $REPO_DIR/index-v2.json"

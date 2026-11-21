@@ -272,6 +272,14 @@ Both addresses serve the same signed index. The index advertises the canonical
 repository address (the custom domain), so some clients warn about an address
 mismatch when the raw URL is used; the content is identical.
 
+Every published app has a 512x512 source icon at
+`fdroid/icons-src/<package>.png`. The publish script copies it to
+`fdroid/repo/<package>/en-US/icon.png` (index-v2) and
+`fdroid/repo/icons/<package>.<versionCode>.png` (legacy index-v1), then adds the
+`icon` field to index-v1 and re-signs it. These APKs use adaptive XML launcher
+icons, which `fdroid update` cannot extract, so the repository ships the icons
+itself. Add the matching icon source when adding an app.
+
 ## How automation works
 
 Every app has its own pipeline workflow — `expenses.yml`, `screentime.yml`,
