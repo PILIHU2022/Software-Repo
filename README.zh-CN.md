@@ -243,7 +243,8 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 不再有“一次构建所有 app”的工作流：`app-build.yml` 可复用、只接收 app id，手动
 构建就派发对应 app 的工作流（或本地跑 `scripts/build-app.sh <app>`）。
 
-`baidunetgo.yml` 是桌面版对应的工作流：每天（`43 4 * * *`）运行，按
+`baidunetgo.yml` 是桌面版对应的工作流，触发形状与其它 app 一致：`desktop/baidunetgo/**`
+（或该工作流文件）的 push 立即构建，手动 dispatch 也总是构建；每天（`43 4 * * *`）运行，按
 `.watch-state.json` 的 `baidunetgo` 时间戳过 10 天闸门，用 `git ls-remote` 解析
 `pengstem/baidunetgo` 的 `main`；SHA 与 `desktop/.build-state.json` 不同时，把
 `desktop/baidunetgo/patches` 用 `git am -3 --keep-cr` 重放到新 head（不适用时回退到上次成功
@@ -260,7 +261,8 @@ SDK/JDK/keystore 步骤），用 patchwork 密钥签名，发布到
 `baidunetgo-android-<version>-<short_sha>` Release 与 F-Droid 仓库，并提交
 Android 更新 feed `fdroid/baidunetgo/update.json`
 （<https://software.sparkzh.top/baidunetgo/update.json>，由 `deploy-pages.yml`
-部署）。10 天窗口只在两个构建都完成之后才推进。
+部署）。10 天窗口在检查完成且无需构建、或两个构建都成功后推进；构建失败不推进，
+下一天的定时运行会重试。
 
 最近一次完整构建
 （[run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167)）
@@ -349,7 +351,7 @@ versionName = "<上游 versionName>-patchwork"   （0.8.3 -> "0.8.3-patchwork"�
 ├── desktop/
 │   ├── baidunetgo/{app.conf,patches/}   # 0001..0041，桌面版 + Android 客户端
 │   └── .build-state.json                # 上次成功构建的上游提交
-├── .watch-state.json          # android / baidunetgo 的上次 10 天检查时间
+├── .watch-state.json          # 每个 app 的上次 10 天窗口
 ├── scripts/
 │   ├── build-app.sh           # 拉上游、打补丁、改版本、构建、校验
 │   ├── baidunetgo-feed.py     # 生成更新 feed（update.json）
@@ -498,7 +500,7 @@ CRLF 格式的邮件处理），因此 `build-baidunetgo.sh` 用
 `git am -3 --keep-cr` 重放队列：重放出的树与作者 clone 的 `main` 树逐字节一致。
 
 `sync-patches.sh` 只认识三个 Android clone；桌面队列按上面的命令手动导出（工作流
-会在 10 天内重建，也可以手动运行 `baidunetgo.yml` 并勾选 `force`）。
+会在 10 天内重建，也可以手动运行 `baidunetgo.yml`）。
 
 `./scripts/sync-patches.sh --check` 只报告差异（不同步时退出码为 1），适合 CI 或
 本地提交前检查。对 expenses / screentime，如果 clone 不在 `patchwork` 分支，脚本

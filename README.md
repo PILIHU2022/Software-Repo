@@ -321,18 +321,21 @@ There is no workflow that builds every app anymore: `app-build.yml` is reusable
 and takes the app id as its only input, so a manual run means dispatching that
 app's workflow (or `scripts/build-app.sh <app>` locally).
 
-`baidunetgo.yml` is the desktop counterpart: it runs daily (`43 4 * * *`), gates
-on `.watch-state.json`'s `baidunetgo` timestamp, resolves `pengstem/baidunetgo`
-`main` with `git ls-remote`, and when the SHA differs from
-`desktop/.build-state.json` replays `desktop/baidunetgo/patches` onto it
-(`git am -3 --keep-cr`, with one retry on the last built commit when the queue
-no longer applies), builds `linux/amd64,windows/amd64` with `go tool mygo build`, and
-uploads the installers as the `baidunetgo-x86-<sha>` artifact. It also publishes
-them to a Release tagged `baidunetgo-desktop-<version>-<short_sha>` (assets:
-`.deb`, `.tar.gz`, the Arch `.pkg.tar.zst` that a makepkg step builds in an
-`archlinux:base-devel` container, Windows setup `.exe` and portable `.zip`; never
-marked `latest`) and commits `desktop/baidunetgo/update.json`, the feed the
-patched binary checks from Settings → Updates at
+`baidunetgo.yml` is the desktop counterpart: a push touching
+`desktop/baidunetgo/**` (or the workflow file) builds immediately, a manual
+dispatch always builds, and a daily schedule (`43 4 * * *`) gates on
+`.watch-state.json`'s `baidunetgo` timestamp,
+resolves `pengstem/baidunetgo` `main` with `git ls-remote`, and when the SHA
+differs from `desktop/.build-state.json` replays `desktop/baidunetgo/patches`
+onto it (`git am -3 --keep-cr`, with one retry on the last built commit when the
+queue no longer applies), builds `linux/amd64,windows/amd64` with
+`go tool mygo build`, and uploads the installers as the `baidunetgo-x86-<sha>`
+artifact. It also publishes them to a Release tagged
+`baidunetgo-desktop-<version>-<short_sha>` (assets: `.deb`, `.tar.gz`, the Arch
+`.pkg.tar.zst` that a makepkg step builds in an `archlinux:base-devel`
+container, Windows setup `.exe` and portable `.zip`; never marked `latest`) and
+commits `desktop/baidunetgo/update.json`, the feed the patched binary checks
+from Settings → Updates at
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 (the URL is baked in at build time). A fallback build keeps the recorded head, so
 the next 10-day window retries the new upstream. A second job in the same
@@ -341,7 +344,9 @@ app-build.yml uses, signs it with the patchwork keystore, publishes it to a
 `baidunetgo-android-<version>-<short_sha>` Release and the F-Droid repository,
 and commits the Android update feed `fdroid/baidunetgo/update.json`
 (<https://software.sparkzh.top/baidunetgo/update.json> — deployed by
-`deploy-pages.yml`). The 10-day window advances only when both builds finished.
+`deploy-pages.yml`). The 10-day window advances after a completed check with
+nothing to build, or when both builds finish; a failed build leaves it alone so
+the next daily run retries.
 
 The last full build
 ([run 40076793167](https://github.com/PILIHU2022/Software-Repo/actions/runs/40076793167))
@@ -439,7 +444,7 @@ is unchanged.
 ├── desktop/
 │   ├── baidunetgo/{app.conf,patches/}   # 0001..0041, desktop + Android client
 │   └── .build-state.json                # last upstream commit built
-├── .watch-state.json          # last android/baidunetgo 10-day check
+├── .watch-state.json          # last per-app 10-day window
 ├── scripts/
 │   ├── baidunetgo-feed.py       # write the update feed (update.json)
 │   ├── baidunetgo-android-feed.py # write the Android update feed
@@ -599,7 +604,7 @@ the authoring clone's `main` tree byte for byte.
 
 `sync-patches.sh` only knows the three Android clones; the desktop queue is
 exported by hand as above (the workflow rebuilds it within 10 days, or run
-`baidunetgo.yml` manually with `force`).
+`baidunetgo.yml` manually).
 
 `./scripts/sync-patches.sh --check` reports differences only (exit code 1 when
 out of sync) and is suitable for CI or a local pre-commit check. For expenses

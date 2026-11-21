@@ -20,6 +20,18 @@ on:
         description: App id, i.e. the directory name under apps/
         required: true
         type: string
+    # Optional: without `secrets: inherit` in the caller these resolve to an
+    # empty string (no error), which would silently fall back to the committed
+    # test keystore. Every caller passes `secrets: inherit`.
+    secrets:
+      PATCHWORK_KEYSTORE_BASE64:
+        required: false
+      PATCHWORK_STORE_PASSWORD:
+        required: false
+      PATCHWORK_KEY_ALIAS:
+        required: false
+      PATCHWORK_KEY_PASSWORD:
+        required: false
 
 env:
   WATCH_INTERVAL_DAYS: '10'
@@ -39,6 +51,7 @@ jobs:
     outputs:
       build: ${{ steps.decide.outputs.build }}
       upstream: ${{ steps.decide.outputs.upstream }}
+      revision: ${{ steps.revision.outputs.revision }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -54,6 +67,13 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # The publish/record jobs push their commits to main. A manual
+          # dispatch from a feature branch would therefore push that branch's
+          # tree to main, so refuse anything that is not main up front.
+          if [[ "${GITHUB_REF_NAME:-}" != "main" ]]; then
+            echo "::error::This pipeline only runs from main (got '${GITHUB_REF_NAME:-<unset>}')"
+            exit 1
+          fi
           conf="apps/$APP/app.conf"
           [[ -f "$conf" ]] || { echo "::error::missing $conf"; exit 1; }
           # shellcheck source=/dev/null
@@ -132,19 +152,43 @@ jobs:
           git config user.name "DeepSeek Harness"
           git config user.email "noreply@deepseek.com"
           git commit -m "chore($APP): rebase the queue onto $(cut -c1-7 "apps/$APP/upstream.txt") [skip ci]"
-          git pull --rebase origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
+          # Several app pipelines run within minutes of each other, so a
+          # non-fast-forward push is expected. Rebase onto the new head and
+          # retry instead of failing the watch job (which would skip the build).
+          for attempt in 1 2 3; do
+            if git pull --rebase origin "${{ github.ref_name }}" \
+               && git push origin "HEAD:${{ github.ref_name }}"; then
+              echo "::notice::Rebased queue pushed"
+              exit 0
+            fi
+            echo "    push attempt ${attempt}/3 failed; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::error::Could not push the rebased queue for $APP"
+          exit 1
+
+      # A fresh job checks out github.sha, which is the commit that triggered
+      # this run — not the re-anchored queue the step above just pushed. Hand
+      # the build job the exact commit it must check out.
+      - name: Record the revision to build
+        id: revision
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ inputs.app }}
     needs: watch
-    if: needs.watch.outputs.build == 'true'
+    # The watch job sets build=true before it re-anchors the queue, so also
+    # require the job result: a failed rebase must not fall through to a build.
+    if: needs.watch.result == 'success' && needs.watch.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          # The watch job may have pushed a re-anchored queue; github.sha still
+          # points at the pre-rebase commit, so check out that exact revision.
+          ref: ${{ needs.watch.outputs.revision }}
           fetch-depth: 0
 
       - name: Set up Java
@@ -337,10 +381,15 @@ jobs:
       - build
     if: >-
       always() &&
+      needs.watch.result == 'success' &&
       needs.watch.outputs.build == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'failure')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      # True only when this run really had an APK to publish. The download is
+      # allowed to fail, so "the publish job succeeded" alone is not enough.
+      published: ${{ steps.apks.outputs.found }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -570,7 +619,8 @@ jobs:
       success() &&
       needs.watch.outputs.build == 'true' &&
       needs.build.result == 'success' &&
-      needs.publish.result == 'success'
+      needs.publish.result == 'success' &&
+      needs.publish.outputs.published == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -738,11 +788,13 @@ jobs:
       - watch
       - build
       - publish
-    # Only a run that actually built something is a recovery. Skipped runs
-    # (upstream unchanged) must not close an issue about a real failure.
+    # Only a run that actually built and published something is a recovery.
+    # Skipped runs (upstream unchanged) must not close an issue about a real
+    # failure.
     if: >-
       success() &&
-      needs.watch.outputs.build == 'true'
+      needs.watch.outputs.build == 'true' &&
+      needs.publish.outputs.published == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read

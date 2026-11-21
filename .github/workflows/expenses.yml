@@ -29,5 +29,6 @@ concurrency:
 jobs:
   pipeline:
     uses: ./.github/workflows/app-build.yml
+    secrets: inherit
     with:
       app: expenses

@@ -32,6 +32,12 @@ name: BaiduNetGo build
 # finishes (even with a fallback build) advances that timestamp; only a hard
 # failure leaves it in place, so the next daily run retries.
 #
+# Trigger shape matches the Android app pipelines: a push touching
+# desktop/baidunetgo/** (or this workflow file) builds immediately, a daily
+# schedule builds only after the 10-day window and an upstream move, and a
+# manual dispatch always builds. A successful push/dispatch build also advances
+# the 10-day timestamp, so the next automatic build is at least 10 days later.
+#
 # The queue in desktop/baidunetgo/patches is replayed onto the upstream head
 # with `git am -3` (the exported-commit form of rebasing the authoring branch).
 # When it no longer applies, the build retries once on the last successful
@@ -53,14 +59,15 @@ name: BaiduNetGo build
 # upstream tree is never used.
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'desktop/baidunetgo/**'
+      - '.github/workflows/baidunetgo.yml'
   schedule:
     - cron: '43 4 * * *'
   workflow_dispatch:
-    inputs:
-      force:
-        description: Build even when upstream has not changed
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -81,6 +88,7 @@ jobs:
       due: ${{ steps.gate.outputs.due }}
       changed: ${{ steps.check.outputs.changed }}
       force: ${{ steps.check.outputs.force }}
+      build: ${{ steps.check.outputs.build }}
       sha: ${{ steps.check.outputs.sha }}
       short_sha: ${{ steps.check.outputs.short_sha }}
     steps:
@@ -95,6 +103,12 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # Same rule as the app pipelines: the state commits below push to
+          # main, so a manual dispatch from another branch must not run.
+          if [[ "${GITHUB_REF_NAME:-}" != "main" ]]; then
+            echo "::error::This pipeline only runs from main (got '${GITHUB_REF_NAME:-<unset>}')"
+            exit 1
+          fi
           days="${WATCH_INTERVAL_DAYS:-10}"
           due=true
           if [[ "$EVENT" == "schedule" ]]; then
@@ -117,7 +131,7 @@ jobs:
         id: check
         if: steps.gate.outputs.due == 'true'
         env:
-          FORCE_INPUT: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           upstream_url="https://github.com/pengstem/baidunetgo.git"
@@ -134,22 +148,36 @@ jobs:
           changed=false
           [[ "$sha" != "$previous" ]] && changed=true
 
+          # A push that touches desktop/baidunetgo/** is an explicit queue
+          # change, and a manual dispatch is an explicit request; both build
+          # immediately exactly like the other apps' pipelines, even when the
+          # upstream SHA has not moved.
+          force=false
+          if [[ "$EVENT" == "push" || "$EVENT" == "workflow_dispatch" ]]; then
+            force=true
+          fi
+          build=false
+          if [[ "$changed" == "true" || "$force" == "true" ]]; then
+            build=true
+          fi
+
           echo "    upstream:  $sha"
           echo "    last built: ${previous:-none}"
           echo "    changed:   $changed"
+          echo "    force:     $force"
+          echo "    build:     $build"
           {
             echo "sha=$sha"
             echo "short_sha=${sha:0:7}"
             echo "changed=$changed"
-            echo "force=${FORCE_INPUT:-false}"
+            echo "force=$force"
+            echo "build=$build"
           } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build x86
     needs: check
-    if: >-
-      needs.check.outputs.due == 'true' &&
-      (needs.check.outputs.changed == 'true' || needs.check.outputs.force == 'true')
+    if: needs.check.result == 'success' && needs.check.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -326,9 +354,7 @@ jobs:
     needs: check
     # Same window and same queue replay as the desktop job: one 10-day check
     # covers both halves of the app (they share desktop/baidunetgo/patches).
-    if: >-
-      needs.check.outputs.due == 'true' &&
-      (needs.check.outputs.changed == 'true' || needs.check.outputs.force == 'true')
+    if: needs.check.result == 'success' && needs.check.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -601,18 +627,21 @@ jobs:
   record:
     name: Record the watch time
     needs: [check, build, android]
-    # A scheduled run that really checked advances the 10-day window: nothing
-    # changed, or both builds finished (a fallback build counts — it keeps the
-    # old recorded head below, so the next window retries the new upstream).
+    # Advance the window after a successful build (schedule, push or a
+    # dispatch), or after a scheduled check that found nothing to build.
     # A failed build leaves the timestamp alone, so the next daily run retries
-    # instead of waiting 10 days. Pushes and dispatches never move the window.
+    # instead of waiting 10 days. A successful push/dispatch build also advances
+    # it, so the next automatic build is at least 10 days later.
     if: >-
       always() &&
-      github.event_name == 'schedule' &&
       needs.check.result == 'success' &&
       needs.check.outputs.due == 'true' &&
-      (needs.check.outputs.changed != 'true' ||
-       (needs.build.result == 'success' && needs.android.result == 'success'))
+      (
+        (github.event_name == 'schedule' && needs.check.outputs.build != 'true') ||
+        (needs.check.outputs.build == 'true' &&
+         needs.build.result == 'success' &&
+         needs.android.result == 'success')
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

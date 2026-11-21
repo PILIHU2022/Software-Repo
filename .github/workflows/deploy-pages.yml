@@ -9,6 +9,8 @@ name: Deploy Pages
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'fdroid/**'
       - '.github/workflows/deploy-pages.yml'
@@ -27,6 +29,9 @@ concurrency:
 
 jobs:
   deploy:
+    # Pages always serves main; a dispatch from a feature branch must not
+    # replace the live repository with that branch's fdroid/ tree.
+    if: github.ref_name == 'main'
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
