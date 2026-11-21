@@ -1,0 +1,76 @@
+From 8cedbc8eaf3cdac2c4ed39da8ce621c2db79e33d Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 15:15:01 +0800
+Subject: [PATCH 1/4] Allow the patchwork overlay to pin the version and build
+ one ABI
+
+BasicSync derives versionCode/versionName from git describe, which packs the
+commit count into 5 bits and the ABI into 3 bits. A long-lived patch queue would
+eventually overflow that field, and building all four ABIs compiles the
+Go/Syncthing runtime four times.
+
+Honor PATCHWORK_VERSION_CODE, PATCHWORK_VERSION_NAME and PATCHWORK_ABI when they
+are set, so the overlay build can pin the version derived from the upstream tag
+and build a single architecture. All three variables are unset in upstream
+builds, which keep their existing behavior.
+---
+ app/build.gradle.kts | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 6356171..2d184e8 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -109,8 +109,16 @@ fun getVersionName(git: Git, triple: VersionTriple): String {
+ 
+ val git = Git.open(File(rootDir, ".git"))!!
+ val gitVersionTriple = describeVersion(git)
+-val gitVersionCode = getVersionCode(gitVersionTriple)
+-val gitVersionName = getVersionName(git, gitVersionTriple)
++
++// Patchwork overlay builds pin the version explicitly. The git-describe
++// versionCode packs the commit count into 5 bits, so a long-lived patch queue
++// would eventually overflow it; the overlay build instead passes a stable
++// versionCode/versionName and narrows the ABI splits to the one it builds.
++val patchworkVersionCode = System.getenv("PATCHWORK_VERSION_CODE")?.toIntOrNull()
++val patchworkVersionName = System.getenv("PATCHWORK_VERSION_NAME")
++
++val gitVersionCode = patchworkVersionCode ?: getVersionCode(gitVersionTriple)
++val gitVersionName = patchworkVersionName ?: getVersionName(git, gitVersionTriple)
+ 
+ val projectUrl = "https://github.com/chenxiaolong/BasicSync"
+ 
+@@ -129,6 +137,10 @@ val goBinDir = File(goDir, "bin")
+ 
+ val abis = arrayOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+ 
++// The overlay build compiles exactly one architecture per invocation to keep
++// the Go/Syncthing compilation (and the APK) small.
++val buildAbis = System.getenv("PATCHWORK_ABI")?.let { arrayOf(it) } ?: abis
++
+ val isWindows = DefaultNativePlatform.getCurrentOperatingSystem().isWindows
+ val exeExt = if (isWindows) ".exe" else ""
+ 
+@@ -197,7 +209,7 @@ android {
+             isEnable = true
+             isUniversalApk = false
+             reset()
+-            include(*abis)
++            include(*buildAbis)
+         }
+     }
+     lint {
+@@ -217,7 +229,9 @@ androidComponents.onVariants { variant ->
+             .find { it.filterType == FilterConfiguration.FilterType.ABI }!!
+             .identifier
+ 
+-        output.versionCode.set(output.versionCode.get() + abis.indexOf(abi) + 1)
++        output.versionCode.set(
++            patchworkVersionCode ?: (output.versionCode.get() + buildAbis.indexOf(abi) + 1),
++        )
+     }
+ 
+     variant.sources.assets!!.addGeneratedSourceDirectory(archive) {
+-- 
+2.56.1
+

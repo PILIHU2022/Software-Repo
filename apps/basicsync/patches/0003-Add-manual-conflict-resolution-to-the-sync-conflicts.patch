@@ -1,0 +1,1406 @@
+From 60627e854bb6f160004873322a5dc6b9da8e3e95 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 15:15:09 +0800
+Subject: [PATCH 3/4] Add manual conflict resolution to the sync conflicts page
+
+The conflicts page used to be a read-only list that could only open the parent
+directory in DocumentsUI, so conflicts always had to be resolved with a file
+manager and it was easy to leave the stale copy behind.
+
+* ConflictItem now carries the conflict path or SAF document URI, the derived
+  original file name, the original file and the timestamp from the file name;
+* ConflictResolver deletes a conflict copy ("Keep original") or replaces the
+  original with it and removes the copy ("Use conflict version"), for direct
+  storage folders and for SAF folders alike, reporting readable errors instead
+  of throwing;
+* the redesigned page shows one card per conflict with its folder, timestamp
+  and the three actions, asks for confirmation before destroying data, shows
+  progress per item and an empty state instead of closing itself.
+---
+ .../basicsync/settings/ConflictsScreen.kt     | 500 ++++++++++++++++--
+ .../basicsync/syncthing/ConflictResolver.kt   | 414 +++++++++++++++
+ .../basicsync/syncthing/SyncthingService.kt   |  97 +++-
+ .../res/values-zh-rCN/strings_conflicts.xml   | 103 ++++
+ app/src/main/res/values/strings_conflicts.xml | 103 ++++
+ 5 files changed, 1155 insertions(+), 62 deletions(-)
+ create mode 100644 app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_conflicts.xml
+ create mode 100644 app/src/main/res/values/strings_conflicts.xml
+
+diff --git a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
+index 5ec258e..2f2bb94 100644
+--- a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
++++ b/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
+@@ -1,5 +1,5 @@
+ /*
+- * SPDX-FileCopyrightText: 2026 Andrew Gunnerson
++ * SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
+  * SPDX-License-Identifier: GPL-3.0-only
+  */
+ 
+@@ -7,42 +7,125 @@ package com.chiller3.basicsync.settings
+ 
+ import android.content.ActivityNotFoundException
+ import android.content.Intent
++import android.content.pm.PackageManager
+ import android.content.res.Configuration
+ import android.net.Uri
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.PaddingValues
+-import androidx.compose.foundation.lazy.itemsIndexed
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.widthIn
++import androidx.compose.foundation.lazy.items
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Button
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.OutlinedButton
++import androidx.compose.material3.SnackbarResult
+ import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
+ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.platform.LocalResources
++import androidx.compose.ui.res.pluralStringResource
+ import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.tooling.preview.Preview
++import androidx.compose.ui.unit.dp
+ import com.chiller3.basicsync.R
++import com.chiller3.basicsync.syncthing.ConflictResolver
++import com.chiller3.basicsync.syncthing.ConflictResult
+ import com.chiller3.basicsync.syncthing.SyncthingService
+ import com.chiller3.basicsync.ui.AppScreen
+-import com.chiller3.basicsync.ui.BetterSegmentedShapes
+-import com.chiller3.basicsync.ui.Preference
+ import com.chiller3.basicsync.ui.PreferenceColumn
+ import com.chiller3.basicsync.ui.PreferenceDefaults
+-import com.chiller3.basicsync.ui.betterSegmentedShapes
+ import com.chiller3.basicsync.ui.theme.AppTheme
++import com.chiller3.basicsync.ui.theme.Icons
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import java.text.DateFormat
++import java.util.Date
+ 
++private enum class ConflictAction {
++    UseConflict,
++    KeepOriginal,
++}
++
++private data class PendingConfirmation(
++    val action: ConflictAction,
++    val item: SyncthingService.ConflictItem,
++)
++
++private data class UiMessage(
++    val text: String,
++    val details: String? = null,
++)
++
++// Sort by path first so that conflicts in the same folder stay together, then by conflict time.
++private val CONFLICT_ORDER = compareBy<SyncthingService.ConflictItem>(
++    { it.displayName },
++    { it.timestamp ?: Long.MAX_VALUE },
++    { it.key },
++)
++
++/**
++ * Conflict management screen.
++ *
++ * Each conflict can either be resolved by keeping the original file (the conflict copy is deleted)
++ * or by replacing the original with the conflict version.
++ *
++ * @param onBack invoked when the screen is dismissed (back arrow)
++ * @param onExit invoked when Syncthing asks the app to exit
++ * @param onOpenDrawer when non-null, the screen is hosted inside the drawer layout and the
++ * navigation icon opens the drawer instead of navigating back
++ */
+ @Composable
+ fun ConflictsScreen(
+     onBack: () -> Unit,
+     onExit: () -> Unit,
++    onOpenDrawer: (() -> Unit)? = null,
+ ) {
+     val context = LocalContext.current
++    val resources = LocalResources.current
++    val resolver = remember(context) { ConflictResolver(context) }
++    val scope = rememberCoroutineScope()
++    val isTv = remember(context) {
++        context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
++    }
++    val dateTimeFormatter = remember {
++        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
++    }
+ 
+-    var syncConflicts by rememberSaveable {
++    var conflicts by rememberSaveable {
+         mutableStateOf(emptyList<SyncthingService.ConflictItem>())
+     }
+-    var showDocumentsUIAlert by rememberSaveable { mutableStateOf(false) }
++    // Avoid briefly claiming that there are no conflicts before the service has reported its state.
++    var loaded by rememberSaveable { mutableStateOf(false) }
++    // Conflicts that were resolved while this screen was open. Syncthing re-reports the list until
++    // it has processed the filesystem change, so these are hidden immediately.
++    var resolvedKeys by rememberSaveable { mutableStateOf(emptyList<String>()) }
++    var busyKey by remember { mutableStateOf<String?>(null) }
++    var confirmation by remember { mutableStateOf<PendingConfirmation?>(null) }
++    var showErrorDialog by rememberSaveable { mutableStateOf<String?>(null) }
++    var message by remember { mutableStateOf<UiMessage?>(null) }
+ 
+     rememberServiceEventWatcher(
+         listener = object : SyncthingService.ServiceListener {
+@@ -61,23 +144,103 @@ fun ConflictsScreen(
+             ) {}
+ 
+             override fun onConflictsUpdated(conflictsInfo: SyncthingService.ConflictsInfo) {
+-                val conflicts = conflictsInfo.items(context)
+-                if (conflicts.isEmpty()) {
+-                    onBack()
+-                } else {
+-                    syncConflicts = conflicts
+-                }
++                conflicts = conflictsInfo.items(context)
++                loaded = true
+             }
+         },
+     )
+ 
++    val visibleConflicts = remember(conflicts, resolvedKeys) {
++        conflicts
++            .filter { it.key !in resolvedKeys }
++            .sortedWith(CONFLICT_ORDER)
++    }
++
+     AppScreen(
+-        title = { Text(text = stringResource(R.string.pref_conflicts_name)) },
++        title = { Text(text = stringResource(R.string.conflicts_title)) },
+         onBack = onBack,
++        onOpenDrawer = onOpenDrawer,
+     ) { params ->
++        LaunchedEffect(message) {
++            val msg = message ?: return@LaunchedEffect
++
++            // Snack bars are not focusable on TVs, so just show the dialog directly.
++            if (isTv && msg.details != null) {
++                showErrorDialog = msg.details
++            }
++
++            val result = params.snackbarHostState.showSnackbar(
++                message = msg.text,
++                actionLabel = if (isTv) {
++                    null
++                } else {
++                    msg.details?.let { resources.getString(R.string.action_details) }
++                },
++                withDismissAction = !isTv,
++            )
++
++            if (result == SnackbarResult.ActionPerformed) {
++                showErrorDialog = msg.details
++            }
++
++            if (message === msg) {
++                message = null
++            }
++        }
++
++        fun startResolve(action: ConflictAction, item: SyncthingService.ConflictItem) {
++            if (busyKey != null) {
++                return
++            }
++
++            busyKey = item.key
++            scope.launch {
++                val result = withContext(Dispatchers.IO) {
++                    when (action) {
++                        ConflictAction.UseConflict -> resolver.overwriteOriginal(item)
++                        ConflictAction.KeepOriginal -> resolver.discardConflict(item)
++                    }
++                }
++                busyKey = null
++
++                when (result) {
++                    is ConflictResult.Success -> {
++                        resolvedKeys = resolvedKeys + item.key
++                        message = UiMessage(
++                            text = resources.getString(
++                                when (action) {
++                                    ConflictAction.UseConflict ->
++                                        R.string.conflicts_success_overwritten
++                                    ConflictAction.KeepOriginal ->
++                                        R.string.conflicts_success_discarded
++                                },
++                                item.fileName,
++                            ),
++                        )
++                    }
++
++                    is ConflictResult.Failure -> {
++                        message = UiMessage(
++                            text = resources.getString(R.string.conflicts_error),
++                            details = result.message,
++                        )
++                    }
++                }
++            }
++        }
++
+         ConflictsContent(
+-            conflicts = syncConflicts,
+-            onConflictOpen = { uri ->
++            conflicts = visibleConflicts,
++            loaded = loaded,
++            busyKey = busyKey,
++            dateTimeFormatter = dateTimeFormatter,
++            onUseConflict = { item ->
++                confirmation = PendingConfirmation(ConflictAction.UseConflict, item)
++            },
++            onKeepOriginal = { item ->
++                confirmation = PendingConfirmation(ConflictAction.KeepOriginal, item)
++            },
++            onOpenFolder = { uri ->
+                 try {
+                     val intent = Intent(Intent.ACTION_VIEW).apply {
+                         setDataAndType(uri, "vnd.android.document/directory")
+@@ -85,22 +248,61 @@ fun ConflictsScreen(
+ 
+                     context.startActivity(intent)
+                 } catch (_: ActivityNotFoundException) {
+-                    showDocumentsUIAlert = true
++                    message = UiMessage(
++                        text = resources.getString(R.string.alert_documentsui_not_found),
++                    )
+                 }
+             },
+             contentPadding = params.contentPadding,
+         )
+ 
+-        if (showDocumentsUIAlert) {
+-            val message = stringResource(R.string.alert_documentsui_not_found)
++        confirmation?.let { pending ->
++            val (titleRes, messageRes, confirmRes) = when (pending.action) {
++                ConflictAction.UseConflict -> Triple(
++                    R.string.dialog_use_conflict_title,
++                    R.string.dialog_use_conflict_message,
++                    R.string.dialog_use_conflict_confirm,
++                )
+ 
+-            LaunchedEffect(Unit) {
+-                params.snackbarHostState.showSnackbar(
+-                    message = message,
+-                    withDismissAction = true,
++                ConflictAction.KeepOriginal -> Triple(
++                    R.string.dialog_keep_original_title,
++                    R.string.dialog_keep_original_message,
++                    R.string.dialog_keep_original_confirm,
+                 )
+-                showDocumentsUIAlert = false
+             }
++
++            AlertDialog(
++                onDismissRequest = { confirmation = null },
++                title = {
++                    Text(text = stringResource(titleRes))
++                },
++                text = {
++                    Text(text = stringResource(messageRes, pending.item.fileName))
++                },
++                confirmButton = {
++                    TextButton(
++                        onClick = {
++                            confirmation = null
++                            startResolve(pending.action, pending.item)
++                        },
++                    ) {
++                        Text(text = stringResource(confirmRes))
++                    }
++                },
++                dismissButton = {
++                    TextButton(onClick = { confirmation = null }) {
++                        Text(text = stringResource(android.R.string.cancel))
++                    }
++                },
++            )
++        }
++
++        showErrorDialog?.let { details ->
++            ErrorDetailsDialog(
++                message = details,
++                onDismiss = { showErrorDialog = null },
++                showCopy = !isTv,
++            )
+         }
+     }
+ }
+@@ -108,28 +310,211 @@ fun ConflictsScreen(
+ @Composable
+ fun ConflictsContent(
+     conflicts: List<SyncthingService.ConflictItem>,
+-    onConflictOpen: (Uri) -> Unit,
++    busyKey: String?,
++    dateTimeFormatter: DateFormat,
++    onUseConflict: (SyncthingService.ConflictItem) -> Unit,
++    onKeepOriginal: (SyncthingService.ConflictItem) -> Unit,
++    onOpenFolder: (Uri) -> Unit,
+     contentPadding: PaddingValues = PaddingValues(),
++    loaded: Boolean = true,
+ ) {
+     PreferenceColumn(contentPadding = contentPadding) {
+-        item(key = "info_conflicts") {
+-            Preference(
+-                onClick = {},
+-                shapes = BetterSegmentedShapes.single(),
+-                title = {},
+-                summary = { Text(text = stringResource(R.string.pref_conflicts_info)) },
+-                colors = PreferenceDefaults.preferenceInfoColors(),
+-                modifier = Modifier.animateItem(),
++        if (!loaded) {
++            // Waiting for the first update from the service.
++        } else if (conflicts.isEmpty()) {
++            item(key = "conflicts_empty") {
++                ConflictsEmptyInfo(modifier = Modifier.animateItem())
++            }
++        } else {
++            item(key = "conflicts_summary") {
++                ConflictsSummary(
++                    count = conflicts.size,
++                    modifier = Modifier.animateItem(),
++                )
++            }
++
++            items(items = conflicts, key = { it.key }) { conflict ->
++                val openFolder: (() -> Unit)? = conflict.parentUri?.let { uri ->
++                    { onOpenFolder(uri) }
++                }
++
++                ConflictCard(
++                    conflict = conflict,
++                    busy = busyKey == conflict.key,
++                    enabled = busyKey == null,
++                    dateTimeFormatter = dateTimeFormatter,
++                    onUseConflict = { onUseConflict(conflict) },
++                    onKeepOriginal = { onKeepOriginal(conflict) },
++                    onOpenFolder = openFolder,
++                    modifier = Modifier.animateItem(),
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun ConflictsSummary(count: Int, modifier: Modifier = Modifier) {
++    Card(
++        modifier = Modifier
++            .widthIn(max = PreferenceDefaults.MaxWidth)
++            .fillMaxWidth()
++            .then(modifier),
++        colors = CardDefaults.cardColors(
++            containerColor = PreferenceDefaults.containerColor,
++        ),
++    ) {
++        Column(
++            modifier = Modifier.padding(16.dp),
++            verticalArrangement = Arrangement.spacedBy(4.dp),
++        ) {
++            Text(
++                text = pluralStringResource(R.plurals.conflicts_summary_title, count, count),
++                style = MaterialTheme.typography.titleMedium,
++            )
++            Text(
++                text = stringResource(R.string.conflicts_summary_message),
++                style = MaterialTheme.typography.bodyMedium,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
+             )
+         }
++    }
++}
++
++@Composable
++private fun ConflictsEmptyInfo(modifier: Modifier = Modifier) {
++    Column(
++        modifier = modifier
++            .widthIn(max = PreferenceDefaults.MaxWidth)
++            .fillMaxWidth()
++            .padding(horizontal = 24.dp, vertical = 48.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++        verticalArrangement = Arrangement.spacedBy(12.dp),
++    ) {
++        Icon(
++            imageVector = Icons.Check,
++            contentDescription = null,
++            tint = MaterialTheme.colorScheme.primary,
++            modifier = Modifier.size(48.dp),
++        )
++        Text(
++            text = stringResource(R.string.conflicts_empty_title),
++            style = MaterialTheme.typography.titleLarge,
++            textAlign = TextAlign.Center,
++        )
++        Text(
++            text = stringResource(R.string.conflicts_empty_message),
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            textAlign = TextAlign.Center,
++        )
++    }
++}
++
++@Composable
++private fun ConflictCard(
++    conflict: SyncthingService.ConflictItem,
++    busy: Boolean,
++    enabled: Boolean,
++    dateTimeFormatter: DateFormat,
++    onUseConflict: () -> Unit,
++    onKeepOriginal: () -> Unit,
++    onOpenFolder: (() -> Unit)?,
++    modifier: Modifier = Modifier,
++) {
++    Card(
++        modifier = Modifier
++            .widthIn(max = PreferenceDefaults.MaxWidth)
++            .fillMaxWidth()
++            .then(modifier),
++        colors = CardDefaults.cardColors(
++            containerColor = MaterialTheme.colorScheme.surfaceBright,
++        ),
++    ) {
++        Column(
++            modifier = Modifier.padding(16.dp),
++            verticalArrangement = Arrangement.spacedBy(8.dp),
++        ) {
++            Row(
++                modifier = Modifier.fillMaxWidth(),
++                horizontalArrangement = Arrangement.spacedBy(8.dp),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Text(
++                    text = conflict.fileName,
++                    style = MaterialTheme.typography.titleMedium,
++                    fontWeight = FontWeight.Bold,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                    modifier = Modifier.weight(1f),
++                )
++
++                if (busy) {
++                    CircularProgressIndicator(
++                        modifier = Modifier.size(20.dp),
++                        strokeWidth = 2.dp,
++                    )
++                }
++            }
+ 
+-        itemsIndexed(conflicts, key = { _, c -> "conflict_${c.displayName}" }) { index, conflict ->
+-            Preference(
+-                onClick = { conflict.parentUri?.let(onConflictOpen) },
+-                shapes = betterSegmentedShapes(index, conflicts.size),
+-                title = { Text(text = conflict.displayName) },
+-                modifier = Modifier.animateItem(),
++            Text(
++                text = conflict.folderName,
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
+             )
++
++            conflict.timestamp?.let { timestamp ->
++                Text(
++                    text = stringResource(
++                        R.string.conflicts_conflict_timestamp,
++                        dateTimeFormatter.format(Date(timestamp)),
++                    ),
++                    style = MaterialTheme.typography.bodySmall,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            }
++
++            Row(
++                modifier = Modifier.fillMaxWidth(),
++                horizontalArrangement = Arrangement.spacedBy(8.dp),
++            ) {
++                Button(
++                    onClick = onUseConflict,
++                    enabled = enabled,
++                    modifier = Modifier.weight(1f),
++                ) {
++                    Text(
++                        text = stringResource(R.string.conflicts_action_use_conflict),
++                        textAlign = TextAlign.Center,
++                        maxLines = 2,
++                        overflow = TextOverflow.Ellipsis,
++                    )
++                }
++
++                OutlinedButton(
++                    onClick = onKeepOriginal,
++                    enabled = enabled,
++                    modifier = Modifier.weight(1f),
++                ) {
++                    Text(
++                        text = stringResource(R.string.conflicts_action_keep_original),
++                        textAlign = TextAlign.Center,
++                        maxLines = 2,
++                        overflow = TextOverflow.Ellipsis,
++                    )
++                }
++            }
++
++            onOpenFolder?.let { onOpenFolder ->
++                TextButton(
++                    onClick = onOpenFolder,
++                    enabled = enabled,
++                ) {
++                    Text(text = stringResource(R.string.conflicts_action_open_folder))
++                }
++            }
+         }
+     }
+ }
+@@ -146,19 +531,46 @@ fun ConflictsContent(
+ @Composable
+ private fun PreviewConflictsScreen() {
+     val conflicts = listOf(
+-        SyncthingService.ConflictItem("~/Sync/test.sync-conflict-20260101-000000-ABCDEFG.txt", null),
+-        SyncthingService.ConflictItem("/storage/0000-0000/Sync/test.sync-conflict-20260101-000000-ABCDEFG.txt", null),
+-        SyncthingService.ConflictItem("0000-0000:test.sync-conflict-20260101-000000-ABCDEFG.txt", null),
++        SyncthingService.ConflictItem(
++            displayName = "~/Sync/document.sync-conflict-20260101-000000-ABCDEFG.txt",
++            parentUri = null,
++            conflictFile = "/storage/emulated/0/Sync/document.sync-conflict-20260101-000000-ABCDEFG.txt",
++            originalName = "document.txt",
++            originalFile = "/storage/emulated/0/Sync/document.txt",
++            timestamp = 0,
++        ),
++        SyncthingService.ConflictItem(
++            displayName = "/storage/0000-0000/Sync/image.sync-conflict-20260102-123456-GHIJKLM.jpg",
++            parentUri = null,
++            conflictFile = "/storage/0000-0000/Sync/image.sync-conflict-20260102-123456-GHIJKLM.jpg",
++            originalName = "image.jpg",
++            originalFile = "/storage/0000-0000/Sync/image.jpg",
++            timestamp = 0,
++        ),
++        SyncthingService.ConflictItem(
++            displayName = "[SomeProvider] 0000-0000:Sync/notes.sync-conflict-20260103-080000-NOPQRST",
++            parentUri = null,
++            conflictUri = null,
++            originalName = "notes",
++            timestamp = null,
++        ),
+     )
+ 
+     AppTheme {
+         AppScreen(
+-            title = { Text(text = stringResource(R.string.pref_conflicts_name)) },
++            title = { Text(text = stringResource(R.string.conflicts_title)) },
+             onBack = {},
+         ) { params ->
+             ConflictsContent(
+                 conflicts = conflicts,
+-                onConflictOpen = {},
++                busyKey = null,
++                dateTimeFormatter = DateFormat.getDateTimeInstance(
++                    DateFormat.MEDIUM,
++                    DateFormat.SHORT,
++                ),
++                onUseConflict = {},
++                onKeepOriginal = {},
++                onOpenFolder = {},
+                 contentPadding = params.contentPadding,
+             )
+         }
+diff --git a/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt b/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
+new file mode 100644
+index 0000000..b495f69
+--- /dev/null
++++ b/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
+@@ -0,0 +1,414 @@
++/*
++ * SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
++ * SPDX-License-Identifier: GPL-3.0-only
++ */
++
++package com.chiller3.basicsync.syncthing
++
++import android.content.Context
++import android.media.MediaScannerConnection
++import android.net.Uri
++import android.provider.DocumentsContract
++import android.util.Log
++import androidx.annotation.StringRes
++import androidx.annotation.WorkerThread
++import com.chiller3.basicsync.R
++import java.io.File
++import java.io.FileInputStream
++import java.io.FileOutputStream
++import java.io.IOException
++import java.time.DateTimeException
++import java.time.LocalDateTime
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++
++/** Result of a conflict resolution operation. */
++sealed interface ConflictResult {
++    /** The conflict was resolved. */
++    data object Success : ConflictResult
++
++    /**
++     * The conflict could not be resolved.
++     *
++     * @property message human-readable description suitable for showing in the UI
++     */
++    data class Failure(val message: String) : ConflictResult
++}
++
++/**
++ * Resolves sync conflicts by either discarding the conflict copy or by replacing the original file
++ * with the conflict version.
++ *
++ * These operations do blocking file and ContentResolver I/O, so they must be called from a
++ * background thread (e.g. inside `withContext(Dispatchers.IO)`). They never throw: all failures are
++ * reported as [ConflictResult.Failure] with a readable message.
++ */
++class ConflictResolver(private val context: Context) {
++    companion object {
++        private val TAG = ConflictResolver::class.java.simpleName
++
++        private const val COPY_BUFFER_SIZE = 64 * 1024
++
++        /**
++         * The conflict segment that Syncthing inserts before the file extension:
++         * `.sync-conflict-YYYYMMDD-HHMMSS-XXXXXXX`.
++         */
++        private val CONFLICT_SEGMENT = Regex("""\.sync-conflict-(\d{8})-(\d{6})-([A-Za-z0-9]+)""")
++
++        private val CONFLICT_TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
++
++        /** Returns whether [name] contains a sync conflict segment. */
++        fun isConflictFileName(name: String): Boolean = CONFLICT_SEGMENT.containsMatchIn(name)
++
++        /**
++         * Returns [name] with the conflict segment removed.
++         *
++         * @return the original file name, or null if [name] is not a conflict file name or if
++         * nothing would be left after removing the conflict segment
++         */
++        fun stripConflictSegment(name: String): String? {
++            val match = CONFLICT_SEGMENT.find(name) ?: return null
++            val originalName = name.removeRange(match.range)
++
++            return originalName.ifEmpty { null }
++        }
++
++        /**
++         * Parses the conflict creation time encoded in [name].
++         *
++         * Syncthing writes the timestamp in the local time of the device that detected the
++         * conflict, so it is interpreted in the current time zone.
++         *
++         * @return milliseconds since the epoch, or null if [name] is not a conflict file name or
++         * the timestamp is invalid
++         */
++        fun parseConflictTimestamp(name: String): Long? {
++            val match = CONFLICT_SEGMENT.find(name) ?: return null
++            val date = match.groupValues[1]
++            val time = match.groupValues[2]
++
++            return try {
++                LocalDateTime.parse("$date-$time", CONFLICT_TIMESTAMP_FORMAT)
++                    .atZone(ZoneId.systemDefault())
++                    .toInstant()
++                    .toEpochMilli()
++            } catch (_: DateTimeException) {
++                null
++            }
++        }
++
++        /**
++         * Best-effort conversion of a SAF document ID into a file name.
++         *
++         * DocumentsUI uses `<volume>:<relative path>` document IDs, but other providers are free to
++         * use opaque IDs. For those, the file name has to be queried from the provider and null is
++         * returned here.
++         */
++        fun nameFromDocumentId(documentId: String): String? {
++            val separator = documentId.indexOf(':')
++            if (separator < 0) {
++                return null
++            }
++
++            return documentId.substring(separator + 1)
++                .substringAfterLast('/')
++                .ifEmpty { null }
++        }
++    }
++
++    /**
++     * Deletes the conflict copy and leaves the original file untouched.
++     *
++     * If the conflict copy is already gone, this is treated as success.
++     */
++    @WorkerThread
++    fun discardConflict(item: SyncthingService.ConflictItem): ConflictResult =
++        try {
++            when {
++                item.conflictFile != null -> discardLocal(File(item.conflictFile))
++                item.conflictUri != null -> discardSaf(item)
++                else -> failure(R.string.conflict_error_unknown)
++            }
++        } catch (e: Exception) {
++            failure(e)
++        }
++
++    /**
++     * Replaces the original file with the conflict copy and then deletes the conflict copy.
++     *
++     * If the original file no longer exists, the conflict copy is restored under the original name
++     * instead.
++     */
++    @WorkerThread
++    fun overwriteOriginal(item: SyncthingService.ConflictItem): ConflictResult =
++        try {
++            when {
++                item.conflictFile != null -> overwriteLocal(item, File(item.conflictFile))
++                item.conflictUri != null -> overwriteSaf(item)
++                else -> failure(R.string.conflict_error_unknown)
++            }
++        } catch (e: Exception) {
++            failure(e)
++        }
++
++    private fun discardLocal(conflict: File): ConflictResult {
++        if (!isConflictFileName(conflict.name)) {
++            return failure(R.string.conflict_error_not_conflict, conflict.name)
++        }
++        if (conflict.isDirectory) {
++            return failure(R.string.conflict_error_directory, conflict.name)
++        }
++        if (!conflict.exists()) {
++            // The conflict was already resolved, e.g. by Syncthing itself or by another app.
++            return ConflictResult.Success
++        }
++        if (!conflict.delete()) {
++            return failure(R.string.conflict_error_delete_failed, conflict.name)
++        }
++
++        return ConflictResult.Success
++    }
++
++    private fun discardSaf(item: SyncthingService.ConflictItem): ConflictResult {
++        val parentUri = item.parentTreeUri ?: return failure(R.string.conflict_error_unknown)
++        val conflictUri = item.conflictUri ?: return failure(R.string.conflict_error_unknown)
++        val conflictDocumentId = SyncthingSafClient.getNarrowestDocumentId(conflictUri)
++
++        val children = queryChildren(parentUri)
++        val conflict = children.find { it.documentId == conflictDocumentId }
++            ?: return failure(R.string.conflict_error_not_found, item.fileName)
++
++        if (!isConflictFileName(conflict.displayName)) {
++            return failure(R.string.conflict_error_not_conflict, conflict.displayName)
++        }
++        if (conflict.isDirectory) {
++            return failure(R.string.conflict_error_directory, conflict.displayName)
++        }
++
++        val documentUri = DocumentsContract.buildDocumentUriUsingTree(
++            parentUri,
++            conflict.documentId,
++        )
++        if (!DocumentsContract.deleteDocument(context.contentResolver, documentUri)) {
++            return failure(R.string.conflict_error_delete_failed, conflict.displayName)
++        }
++
++        return ConflictResult.Success
++    }
++
++    private fun overwriteLocal(
++        item: SyncthingService.ConflictItem,
++        conflict: File,
++    ): ConflictResult {
++        if (conflict.isDirectory) {
++            return failure(R.string.conflict_error_directory, conflict.name)
++        }
++        if (!isConflictFileName(conflict.name)) {
++            return failure(R.string.conflict_error_not_conflict, conflict.name)
++        }
++        if (!conflict.exists()) {
++            return failure(R.string.conflict_error_missing, conflict.name)
++        }
++
++        val parentDir = conflict.parentFile
++        if (parentDir == null) {
++            return failure(R.string.conflict_error_invalid, conflict.name)
++        }
++
++        val originalName = stripConflictSegment(conflict.name)
++            ?: return failure(R.string.conflict_error_not_conflict, conflict.name)
++        if (originalName.contains('/')) {
++            return failure(R.string.conflict_error_invalid, conflict.name)
++        }
++
++        val original = item.originalFile?.let(::File) ?: File(parentDir, originalName)
++
++        if (!original.exists()) {
++            // The original is gone, so just restore the conflict copy under its original name.
++            return if (conflict.renameTo(original)) {
++                scanFile(original)
++                ConflictResult.Success
++            } else {
++                failure(R.string.conflict_error_restore_failed, conflict.name)
++            }
++        }
++        if (original.isDirectory) {
++            return failure(R.string.conflict_error_directory, original.name)
++        }
++
++        // Write to a temporary file next to the original first so that a failed copy does not
++        // destroy the original file.
++        val temp = try {
++            File.createTempFile(".basicsync-", ".tmp", parentDir)
++        } catch (e: IOException) {
++            return failure(e)
++        }
++
++        try {
++            FileInputStream(conflict).use { input ->
++                FileOutputStream(temp).use { output ->
++                    input.copyTo(output, COPY_BUFFER_SIZE)
++                    output.flush()
++                    output.fd.sync()
++                }
++            }
++
++            if (!temp.renameTo(original)) {
++                return failure(R.string.conflict_error_replace_failed, original.name)
++            }
++        } finally {
++            if (temp.exists()) {
++                temp.delete()
++            }
++        }
++
++        if (!conflict.delete()) {
++            return failure(R.string.conflict_error_remove_after_copy, original.name)
++        }
++
++        scanFile(original)
++        return ConflictResult.Success
++    }
++
++    private fun overwriteSaf(item: SyncthingService.ConflictItem): ConflictResult {
++        val parentUri = item.parentTreeUri ?: return failure(R.string.conflict_error_unknown)
++        val conflictUri = item.conflictUri ?: return failure(R.string.conflict_error_unknown)
++        val conflictDocumentId = SyncthingSafClient.getNarrowestDocumentId(conflictUri)
++
++        val children = queryChildren(parentUri)
++        val conflict = children.find { it.documentId == conflictDocumentId }
++            ?: return failure(R.string.conflict_error_not_found, item.fileName)
++
++        if (conflict.isDirectory) {
++            return failure(R.string.conflict_error_directory, conflict.displayName)
++        }
++
++        val originalName = stripConflictSegment(conflict.displayName)
++            ?: item.originalName
++            ?: return failure(R.string.conflict_error_not_conflict, conflict.displayName)
++        if (originalName.contains('/')) {
++            return failure(R.string.conflict_error_invalid, conflict.displayName)
++        }
++
++        val conflictDocumentUri = DocumentsContract.buildDocumentUriUsingTree(
++            parentUri,
++            conflict.documentId,
++        )
++        val original = children.find { it.displayName == originalName && !it.isDirectory }
++
++        if (original == null) {
++            // The original is gone, so just rename the conflict copy back to the original name.
++            if (DocumentsContract.renameDocument(
++                    context.contentResolver,
++                    conflictDocumentUri,
++                    originalName,
++                ) == null
++            ) {
++                return failure(R.string.conflict_error_restore_failed, conflict.displayName)
++            }
++
++            return ConflictResult.Success
++        }
++
++        val originalUri = DocumentsContract.buildDocumentUriUsingTree(
++            parentUri,
++            original.documentId,
++        )
++
++        copyDocument(conflictDocumentUri, originalUri)
++
++        if (!DocumentsContract.deleteDocument(context.contentResolver, conflictDocumentUri)) {
++            return failure(R.string.conflict_error_remove_after_copy, originalName)
++        }
++
++        return ConflictResult.Success
++    }
++
++    private fun copyDocument(source: Uri, destination: Uri) {
++        val input = context.contentResolver.openInputStream(source)
++            ?: throw IOException("Failed to open for reading: $source")
++
++        input.use {
++            val output = context.contentResolver.openOutputStream(destination, "wt")
++                ?: throw IOException("Failed to open for writing: $destination")
++
++            output.use {
++                input.copyTo(output, COPY_BUFFER_SIZE)
++            }
++        }
++    }
++
++    private fun queryChildren(parentTreeUri: Uri): List<SafChild> {
++        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
++            parentTreeUri,
++            SyncthingSafClient.getNarrowestDocumentId(parentTreeUri),
++        )
++        val cursor = context.contentResolver.query(
++            childrenUri,
++            arrayOf(
++                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
++                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
++                DocumentsContract.Document.COLUMN_MIME_TYPE,
++            ),
++            null,
++            null,
++            null,
++        ) ?: throw IOException("Query returned null cursor: $childrenUri")
++
++        return cursor.use {
++            val indexDocumentId =
++                it.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
++            val indexDisplayName =
++                it.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
++            val indexMimeType =
++                it.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
++
++            val children = mutableListOf<SafChild>()
++
++            while (it.moveToNext()) {
++                children.add(SafChild(
++                    documentId = it.getString(indexDocumentId),
++                    displayName = it.getString(indexDisplayName),
++                    isDirectory = it.getString(indexMimeType) ==
++                            DocumentsContract.Document.MIME_TYPE_DIR,
++                ))
++            }
++
++            children
++        }
++    }
++
++    private fun scanFile(file: File) {
++        try {
++            MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
++        } catch (e: Exception) {
++            // MediaStore is only updated for the benefit of other apps, so this is not fatal.
++            Log.w(TAG, "Failed to scan: ${file.absolutePath}", e)
++        }
++    }
++
++    private fun failure(@StringRes resId: Int, vararg args: Any): ConflictResult.Failure =
++        ConflictResult.Failure(context.getString(resId, *args))
++
++    private fun failure(e: Exception): ConflictResult.Failure {
++        Log.w(TAG, "Failed to resolve sync conflict", e)
++
++        val details = e.message ?: e.javaClass.simpleName
++        val message = when (e) {
++            is SecurityException -> context.getString(R.string.conflict_error_security)
++            is UnsupportedOperationException ->
++                context.getString(R.string.conflict_error_unsupported)
++            is IllegalArgumentException ->
++                context.getString(R.string.conflict_error_invalid, details)
++            else -> context.getString(R.string.conflict_error_io, details)
++        }
++
++        return ConflictResult.Failure(message)
++    }
++
++    private data class SafChild(
++        val documentId: String,
++        val displayName: String,
++        val isDirectory: Boolean,
++    )
++}
+diff --git a/app/src/main/java/com/chiller3/basicsync/syncthing/SyncthingService.kt b/app/src/main/java/com/chiller3/basicsync/syncthing/SyncthingService.kt
+index 4b64a89..c0a76a6 100644
+--- a/app/src/main/java/com/chiller3/basicsync/syncthing/SyncthingService.kt
++++ b/app/src/main/java/com/chiller3/basicsync/syncthing/SyncthingService.kt
+@@ -329,11 +329,44 @@ class SyncthingService : Service(), SyncthingStatusReceiver, DeviceStateListener
+         }
+     }
+ 
++    /**
++     * A sync conflict that needs to be resolved manually.
++     *
++     * Conflicts are either in a direct storage folder, in which case [conflictFile] is set, or in a
++     * SAF folder, in which case [conflictUri] is set.
++     */
+     @Parcelize
+     data class ConflictItem(
+         val displayName: String,
+         val parentUri: Uri?,
+-    ) : Parcelable
++        // Absolute path to the conflict copy (direct storage folders only).
++        val conflictFile: String? = null,
++        // Document URI of the conflict copy (SAF folders only).
++        val conflictUri: Uri? = null,
++        // Conflict file name with the conflict segment stripped.
++        val originalName: String? = null,
++        // Absolute path to the original file (direct storage folders only).
++        val originalFile: String? = null,
++        // Document URI of the original file, if it is already known.
++        val originalUri: Uri? = null,
++        // Raw tree-based URI of the conflict's parent directory (SAF folders only).
++        val parentTreeUri: Uri? = null,
++        // Conflict creation time in milliseconds since the epoch, parsed from the file name.
++        val timestamp: Long? = null,
++    ) : Parcelable {
++        /** Stable identifier for this conflict. */
++        val key: String
++            get() = conflictFile ?: conflictUri?.toString() ?: displayName
++
++        /** File name of the conflict copy, without any directory components. */
++        val fileName: String
++            get() = displayName.substringAfterLast('/').ifEmpty { displayName }
++
++        /** Parent directory of the conflict copy, as best as it can be shown without I/O. */
++        val folderName: String
++            get() = parentTreeUri?.formattedString
++                ?: displayName.substringBeforeLast('/', "").ifEmpty { displayName }
++    }
+ 
+     data class ConflictsInfo(
+         val local: List<File>,
+@@ -366,27 +399,42 @@ class SyncthingService : Service(), SyncthingStatusReceiver, DeviceStateListener
+                     val expandedPath = path.expandTilde()
+                     val shortenedPath = expandedPath.shortenTilde()
+ 
++                    // Everything below is pure string/path work. The items are built on the main
++                    // thread, so no ContentResolver queries are allowed here.
++                    val name = expandedPath.name
++                    val originalName = ConflictResolver.stripConflictSegment(name)
++                    val timestamp = ConflictResolver.parseConflictTimestamp(name)
+                     val parentDir = expandedPath.parentFile
+-                    if (parentDir == null) {
+-                        Log.w(TAG, "Skipping due to unknown parent directory: $parentDir")
+-                        add(ConflictItem(shortenedPath.toString(), null))
+-                        continue
++                    val originalFile = if (originalName != null && parentDir != null) {
++                        File(parentDir, originalName).absolutePath
++                    } else {
++                        null
+                     }
+ 
+-                    val volume = mountPoints.entries.find { parentDir.startsWith(it.value) }
+-                    if (volume == null) {
+-                        Log.w(TAG, "Skipping due to unknown mount point: $parentDir")
+-                        add(ConflictItem(shortenedPath.toString(), null))
+-                        continue
++                    var parentUri: Uri? = null
++                    if (parentDir == null) {
++                        Log.w(TAG, "Skipping due to unknown parent directory: $parentDir")
++                    } else {
++                        val volume = mountPoints.entries.find { parentDir.startsWith(it.value) }
++                        if (volume == null) {
++                            Log.w(TAG, "Skipping due to unknown mount point: $parentDir")
++                        } else {
++                            val relPath = parentDir.relativeTo(volume.value)
++                            parentUri = DocumentsContract.buildDocumentUri(
++                                DOCUMENTSUI_AUTHORITY,
++                                "${volume.key}:$relPath",
++                            )
++                        }
+                     }
+ 
+-                    val relPath = parentDir.relativeTo(volume.value)
+-                    val uri = DocumentsContract.buildDocumentUri(
+-                        DOCUMENTSUI_AUTHORITY,
+-                        "${volume.key}:$relPath",
+-                    )
+-
+-                    add(ConflictItem(shortenedPath.toString(), uri))
++                    add(ConflictItem(
++                        displayName = shortenedPath.toString(),
++                        parentUri = parentUri,
++                        conflictFile = expandedPath.absolutePath,
++                        originalName = originalName,
++                        originalFile = originalFile,
++                        timestamp = timestamp,
++                    ))
+                 }
+ 
+                 for ((child, parent) in saf) {
+@@ -397,7 +445,20 @@ class SyncthingService : Service(), SyncthingStatusReceiver, DeviceStateListener
+                         SyncthingSafClient.getNarrowestDocumentId(parent),
+                     )
+ 
+-                    add(ConflictItem(child.formattedString, parentDocumentUri))
++                    // The conflict file name can only be derived without I/O for DocumentsUI-style
++                    // document IDs. For other providers, the display name is resolved by the
++                    // ConflictResolver with a ContentResolver query on a background thread.
++                    val documentId = SyncthingSafClient.getNarrowestDocumentId(child)
++                    val name = ConflictResolver.nameFromDocumentId(documentId)
++
++                    add(ConflictItem(
++                        displayName = child.formattedString,
++                        parentUri = parentDocumentUri,
++                        conflictUri = child,
++                        originalName = name?.let { ConflictResolver.stripConflictSegment(it) },
++                        parentTreeUri = parent,
++                        timestamp = name?.let { ConflictResolver.parseConflictTimestamp(it) },
++                    ))
+                 }
+             }
+         }
+diff --git a/app/src/main/res/values-zh-rCN/strings_conflicts.xml b/app/src/main/res/values-zh-rCN/strings_conflicts.xml
+new file mode 100644
+index 0000000..a83344e
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_conflicts.xml
+@@ -0,0 +1,103 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
++    SPDX-License-Identifier: GPL-3.0-only
++-->
++<resources>
++    <!-- Title of the conflict management screen. -->
++    <string name="conflicts_title">同步冲突</string>
++
++    <!-- Header summary for the conflict management screen. -->
++    <plurals name="conflicts_summary_title">
++        <item quantity="one">%d 个同步冲突</item>
++        <item quantity="other">%d 个同步冲突</item>
++    </plurals>
++
++    <!-- Explanation shown in the header of the conflict management screen. -->
++    <string name="conflicts_summary_message">请为每个文件选择要保留的版本。来自其他设备的版本已作为副本保存在原文件旁边。</string>
++
++    <!-- Title of the empty state shown when there are no sync conflicts. -->
++    <string name="conflicts_empty_title">没有冲突</string>
++
++    <!-- Explanation shown when there are no sync conflicts. -->
++    <string name="conflicts_empty_message">所有文件均已同步。Syncthing 运行期间，新的冲突会自动显示在这里。</string>
++
++    <!-- Creation time of a conflict, shown below the conflict file name. %1$s is a localized date and time. -->
++    <string name="conflicts_conflict_timestamp">冲突创建于 %1$s</string>
++
++    <!-- Button that replaces the original file with the conflict copy. -->
++    <string name="conflicts_action_use_conflict">使用冲突版本</string>
++
++    <!-- Button that deletes the conflict copy and keeps the original file. -->
++    <string name="conflicts_action_keep_original">保留原文件</string>
++
++    <!-- Button that opens the folder containing the conflict file. -->
++    <string name="conflicts_action_open_folder">打开文件夹</string>
++
++    <!-- Title of the confirmation dialog for replacing the original file with the conflict copy. -->
++    <string name="dialog_use_conflict_title">替换原文件？</string>
++
++    <!-- Message of the confirmation dialog for replacing the original file. %1$s is a file name. -->
++    <string name="dialog_use_conflict_message">“%1$s”将被冲突版本覆盖，随后冲突副本会被删除。此操作无法撤销。</string>
++
++    <!-- Confirmation button for replacing the original file with the conflict copy. -->
++    <string name="dialog_use_conflict_confirm">替换</string>
++
++    <!-- Title of the confirmation dialog for deleting the conflict copy. -->
++    <string name="dialog_keep_original_title">删除冲突副本？</string>
++
++    <!-- Message of the confirmation dialog for deleting the conflict copy. %1$s is a file name. -->
++    <string name="dialog_keep_original_message">“%1$s”的冲突副本将被永久删除，原文件不会更改。此操作无法撤销。</string>
++
++    <!-- Confirmation button for deleting the conflict copy. -->
++    <string name="dialog_keep_original_confirm">删除副本</string>
++
++    <!-- Snackbar shown after the original file was replaced with the conflict copy. %1$s is a file name. -->
++    <string name="conflicts_success_overwritten">已用“%1$s”的冲突版本替换原文件。</string>
++
++    <!-- Snackbar shown after the conflict copy was deleted. %1$s is a file name. -->
++    <string name="conflicts_success_discarded">已删除“%1$s”的冲突副本。</string>
++
++    <!-- Snackbar shown when resolving a conflict failed. Error details are shown separately. -->
++    <string name="conflicts_error">无法解决该冲突。</string>
++
++    <!-- Error shown when the selected file is not a sync conflict and was not touched. %1$s is a file name. -->
++    <string name="conflict_error_not_conflict">该文件不是同步冲突，未做修改：%1$s</string>
++
++    <!-- Error shown when the conflict file no longer exists. %1$s is a file name. -->
++    <string name="conflict_error_missing">冲突文件已不存在：%1$s</string>
++
++    <!-- Error shown when a directory conflict cannot be resolved automatically. %1$s is a file name. -->
++    <string name="conflict_error_directory">无法自动解决目录冲突：%1$s</string>
++
++    <!-- Error shown when deleting the conflict file failed. %1$s is a file name. -->
++    <string name="conflict_error_delete_failed">删除冲突文件失败：%1$s</string>
++
++
++    <!-- Error shown when the conflict file could not be found in its folder. %1$s is a file name. -->
++    <string name="conflict_error_not_found">在文件夹中找不到冲突文件：%1$s</string>
++
++    <!-- Error shown when replacing the original file failed. %1$s is a file name. -->
++    <string name="conflict_error_replace_failed">替换原文件失败：%1$s</string>
++
++    <!-- Error shown when the conflict file could not be restored under its original name. %1$s is a file name. -->
++    <string name="conflict_error_restore_failed">无法将冲突文件恢复为原文件名：%1$s</string>
++
++    <!-- Error shown when the original was replaced but the conflict copy could not be deleted. %1$s is a file name. -->
++    <string name="conflict_error_remove_after_copy">原文件已替换，但无法删除冲突副本：%1$s</string>
++
++    <!-- Error shown when the document provider does not grant access to the folder. -->
++    <string name="conflict_error_security">权限被拒绝。请确认 BasicSync 有权访问此文件夹后重试。</string>
++
++    <!-- Error shown when the document provider does not support an operation. -->
++    <string name="conflict_error_unsupported">该文档提供程序不支持此操作。</string>
++
++    <!-- Error shown for storage failures. %1$s is the underlying error message. -->
++    <string name="conflict_error_io">存储错误：%1$s</string>
++
++    <!-- Error shown for invalid conflict files. %1$s is an error message. -->
++    <string name="conflict_error_invalid">无效的冲突文件：%1$s</string>
++
++    <!-- Error shown when the conflict entry does not contain enough information to resolve it. -->
++    <string name="conflict_error_unknown">无法自动解决此冲突。</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_conflicts.xml b/app/src/main/res/values/strings_conflicts.xml
+new file mode 100644
+index 0000000..6c3a9b5
+--- /dev/null
++++ b/app/src/main/res/values/strings_conflicts.xml
+@@ -0,0 +1,103 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
++    SPDX-License-Identifier: GPL-3.0-only
++-->
++<resources>
++    <!-- Title of the conflict management screen. -->
++    <string name="conflicts_title">Sync conflicts</string>
++
++    <!-- Header summary for the conflict management screen. -->
++    <plurals name="conflicts_summary_title">
++        <item quantity="one">%d sync conflict</item>
++        <item quantity="other">%d sync conflicts</item>
++    </plurals>
++
++    <!-- Explanation shown in the header of the conflict management screen. -->
++    <string name="conflicts_summary_message">Choose which version to keep for each file. The version from the other device was saved as a copy next to the original file.</string>
++
++    <!-- Title of the empty state shown when there are no sync conflicts. -->
++    <string name="conflicts_empty_title">No conflicts</string>
++
++    <!-- Explanation shown when there are no sync conflicts. -->
++    <string name="conflicts_empty_message">All files are in sync. New conflicts show up here automatically while Syncthing is running.</string>
++
++    <!-- Creation time of a conflict, shown below the conflict file name. %1$s is a localized date and time. -->
++    <string name="conflicts_conflict_timestamp">Conflict created %1$s</string>
++
++    <!-- Button that replaces the original file with the conflict copy. -->
++    <string name="conflicts_action_use_conflict">Use conflict version</string>
++
++    <!-- Button that deletes the conflict copy and keeps the original file. -->
++    <string name="conflicts_action_keep_original">Keep original</string>
++
++    <!-- Button that opens the folder containing the conflict file. -->
++    <string name="conflicts_action_open_folder">Open folder</string>
++
++    <!-- Title of the confirmation dialog for replacing the original file with the conflict copy. -->
++    <string name="dialog_use_conflict_title">Replace the original file?</string>
++
++    <!-- Message of the confirmation dialog for replacing the original file. %1$s is a file name. -->
++    <string name="dialog_use_conflict_message">“%1$s” will be overwritten with the conflict version and then the conflict copy will be deleted. This cannot be undone.</string>
++
++    <!-- Confirmation button for replacing the original file with the conflict copy. -->
++    <string name="dialog_use_conflict_confirm">Replace</string>
++
++    <!-- Title of the confirmation dialog for deleting the conflict copy. -->
++    <string name="dialog_keep_original_title">Delete the conflict copy?</string>
++
++    <!-- Message of the confirmation dialog for deleting the conflict copy. %1$s is a file name. -->
++    <string name="dialog_keep_original_message">The conflict copy of “%1$s” will be permanently deleted. The original file will not be changed. This cannot be undone.</string>
++
++    <!-- Confirmation button for deleting the conflict copy. -->
++    <string name="dialog_keep_original_confirm">Delete copy</string>
++
++    <!-- Snackbar shown after the original file was replaced with the conflict copy. %1$s is a file name. -->
++    <string name="conflicts_success_overwritten">Replaced the original with the conflict version of “%1$s”.</string>
++
++    <!-- Snackbar shown after the conflict copy was deleted. %1$s is a file name. -->
++    <string name="conflicts_success_discarded">Deleted the conflict copy of “%1$s”.</string>
++
++    <!-- Snackbar shown when resolving a conflict failed. Error details are shown separately. -->
++    <string name="conflicts_error">Could not resolve the conflict.</string>
++
++    <!-- Error shown when the selected file is not a sync conflict and was not touched. %1$s is a file name. -->
++    <string name="conflict_error_not_conflict">This file is not a sync conflict and was not modified: %1$s</string>
++
++    <!-- Error shown when the conflict file no longer exists. %1$s is a file name. -->
++    <string name="conflict_error_missing">The conflict file no longer exists: %1$s</string>
++
++    <!-- Error shown when a directory conflict cannot be resolved automatically. %1$s is a file name. -->
++    <string name="conflict_error_directory">Directories cannot be resolved automatically: %1$s</string>
++
++    <!-- Error shown when deleting the conflict file failed. %1$s is a file name. -->
++    <string name="conflict_error_delete_failed">Failed to delete the conflict file: %1$s</string>
++
++
++    <!-- Error shown when the conflict file could not be found in its folder. %1$s is a file name. -->
++    <string name="conflict_error_not_found">The conflict file could not be found in its folder: %1$s</string>
++
++    <!-- Error shown when replacing the original file failed. %1$s is a file name. -->
++    <string name="conflict_error_replace_failed">Failed to replace the original file: %1$s</string>
++
++    <!-- Error shown when the conflict file could not be restored under its original name. %1$s is a file name. -->
++    <string name="conflict_error_restore_failed">Failed to restore the conflict file under its original name: %1$s</string>
++
++    <!-- Error shown when the original was replaced but the conflict copy could not be deleted. %1$s is a file name. -->
++    <string name="conflict_error_remove_after_copy">The original was replaced, but the conflict copy could not be deleted: %1$s</string>
++
++    <!-- Error shown when the document provider does not grant access to the folder. -->
++    <string name="conflict_error_security">Permission denied. Make sure BasicSync has access to this folder and try again.</string>
++
++    <!-- Error shown when the document provider does not support an operation. -->
++    <string name="conflict_error_unsupported">The document provider does not support this operation.</string>
++
++    <!-- Error shown for storage failures. %1$s is the underlying error message. -->
++    <string name="conflict_error_io">Storage error: %1$s</string>
++
++    <!-- Error shown for invalid conflict files. %1$s is an error message. -->
++    <string name="conflict_error_invalid">Invalid conflict file: %1$s</string>
++
++    <!-- Error shown when the conflict entry does not contain enough information to resolve it. -->
++    <string name="conflict_error_unknown">This conflict cannot be resolved automatically.</string>
++</resources>
+-- 
+2.56.1
+

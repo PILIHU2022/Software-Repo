@@ -14,3 +14,38 @@ fdroid/repo/status/
 # Editor / OS noise
 .DS_Store
 *.log
+
+# Local authoring clones living inside the repo tree (never commit these:
+# a nested .git would turn the directory into a broken gitlink and hide
+# the patch queues from CI)
+/apps/ScreenTime/
+/apps/RecurringExpenseTracker/
+/apps/fcitx5-android/
+/apps/DataArk/
+/desktop/baidunetgo-clone/
+
+# Local workspace items outside the repository proper
+/gadgetbridge/
+/gadgetbridge-*-patch/
+/data-backup-ref/
+/evidence/
+/toolchain/
+/.android-home/
+/.cache-fcitx5/
+/.fontprofile/
+/.gocache/
+/.gomodcache/
+/.gopath/
+/.gradle-home/
+/.hlsp-test
+/.research/
+/.scratch/
+/.toolchain/
+/.dsh-tmp/
+/.watch-state.json
+/GADGETBRIDGE-FIXES-*.md
+/HANDOFF*.md
+/pref.txt
+
+# Local authoring clone for BasicSync (see /apps/basicsync/)
+/apps/BasicSync/

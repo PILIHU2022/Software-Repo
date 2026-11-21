@@ -1,0 +1,23 @@
+Categories:
+  - System
+License: GPL-3.0-only
+AuthorName: Andrew Gunnerson
+Name: BasicSync
+Summary: Run Syncthing on Android
+Description: |
+  A simple app for running Syncthing on Android.
+
+  The app is intentionally kept very basic so that the project is easy to
+  maintain and keep updated. BasicSync only controls when Syncthing runs. The
+  actual configuration is done through Syncthing's own web UI.
+
+  This patchwork build adds a navigation sidebar with the common pages (syncing,
+  conflict management, settings, network conditions and the sync schedule) and a
+  conflict management page where sync conflicts can be resolved manually by
+  keeping the original file or by replacing it with the conflict version.
+SourceCode: https://github.com/chenxiaolong/BasicSync
+IssueTracker: https://github.com/chenxiaolong/BasicSync/issues
+RepoType: git
+Repo: https://github.com/chenxiaolong/BasicSync.git
+UpdateCheckMode: None
+AutoUpdateMode: None

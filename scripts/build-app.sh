@@ -25,7 +25,7 @@
 #                             queue no longer applies to the upstream head
 #                             (default: fdroid/.build-state.json)
 #   ANDROID_HOME, ANDROID_USER_HOME, GRADLE_USER_HOME
-#                             default to ../.toolchain/* when unset
+#                             default to <repo>/.toolchain/* when unset
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -500,6 +500,49 @@ if [[ "${VERSION_STYLE:-gradle}" == "build-logic" ]]; then
     echo "    ABI:         $BUILD_ABI (id $ABI_ID)"
     echo "    versionCode: $UPSTREAM_CODE -> $NEW_CODE"
     echo "    versionName: $UPSTREAM_NAME -> $NEW_NAME"
+elif [[ "${VERSION_STYLE:-gradle}" == "pinned" ]]; then
+    # BasicSync derives versionCode/versionName from `git describe`: the code
+    # packs the commit count into five bits (and the ABI into three), so a
+    # patch queue that adds commits would eventually overflow that field and
+    # collide across ABIs. The queue carries a small patch that honors
+    # PATCHWORK_VERSION_CODE/PATCHWORK_VERSION_NAME/PATCHWORK_ABI instead, so
+    # the values are pinned from the upstream tag and commit count:
+    #   upstream code = major << 16 | minor << 11 | commit-count << 3
+    #   versionCode   = upstream code * 100 + queue revision
+    #   versionName   = <major>.<minor>-patchwork
+    # A single ABI is built per invocation (BUILD_ABI), so the versionCode has
+    # no ABI digit and each published APK is the one this leg built.
+    describe="$(git -C "$WORK" describe --tags --long 2>/dev/null || true)"
+    if [[ ! "$describe" =~ ^v([0-9]+)\.([0-9]+)-([0-9]+)-g([0-9a-f]+)$ ]]; then
+        die "VERSION_STYLE=pinned needs an upstream tag of the form v<major>.<minor> (git describe gave '$describe')"
+    fi
+    tag_major="${BASH_REMATCH[1]}"
+    tag_minor="${BASH_REMATCH[2]}"
+    tag_count="${BASH_REMATCH[3]}"
+    (( 10#$tag_major < 16 )) \
+        || die "upstream major version $tag_major does not fit the 4-bit field upstream reserves for it"
+    (( 10#$tag_minor < 256 )) \
+        || die "upstream minor version $tag_minor does not fit the 8-bit field upstream reserves for it"
+    (( 10#$tag_count < 32 )) \
+        || die "upstream is 10#$tag_count commits past v$tag_major.$tag_minor; the 5-bit count field would overflow (wait for the next upstream release)"
+    UPSTREAM_CODE=$(( (10#$tag_major << 16) | (10#$tag_minor << 11) | (10#$tag_count << 3) ))
+    UPSTREAM_NAME="$tag_major.$tag_minor"
+    NEW_CODE=$((10#$UPSTREAM_CODE * 100 + 10#$PATCHWORK_REVISION))
+    NEW_NAME="$(fallback_version_name "${UPSTREAM_NAME}-patchwork")"
+
+    export PATCHWORK_VERSION_CODE="$NEW_CODE"
+    export PATCHWORK_VERSION_NAME="$NEW_NAME"
+    if [[ -n "${BUILD_ABI:-}" ]]; then
+        # The version patch also narrows the ABI splits to the one being built,
+        # which keeps the Go/Syncthing compilation to a single architecture.
+        export PATCHWORK_ABI="$BUILD_ABI"
+    fi
+
+    echo "==> Version is pinned from the upstream tag (no file rewrite)"
+    echo "    tag:         v$tag_major.$tag_minor ($tag_count commits)"
+    echo "    ABI:         ${BUILD_ABI:-all}"
+    echo "    versionCode: $UPSTREAM_CODE * 100 + $PATCHWORK_REVISION -> $NEW_CODE"
+    echo "    versionName: $UPSTREAM_NAME -> $NEW_NAME"
 else
     CODE_RE='^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$'
     NAME_RE='^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]*)"[[:space:]]*$'
@@ -577,7 +620,7 @@ fi
 
 # --- Build -----------------------------------------------------------------
 
-DEFAULT_TOOLCHAIN="$(cd "$ROOT/.." && pwd)/.toolchain"
+DEFAULT_TOOLCHAIN="$ROOT/.toolchain"
 if [[ -z "${ANDROID_HOME:-}" && -d "$DEFAULT_TOOLCHAIN/android-sdk" ]]; then
     export ANDROID_HOME="$DEFAULT_TOOLCHAIN/android-sdk"
 fi
@@ -617,6 +660,13 @@ elif [[ "$SIGNING_STYLE" == "fcitx5" ]]; then
     export SIGN_KEY_FILE="$KEYSTORE"
     export SIGN_KEY_PWD="$STORE_PASSWORD"
     export SIGN_KEY_ALIAS="$KEY_ALIAS"
+elif [[ "$SIGNING_STYLE" == "basicsync" ]]; then
+    # BasicSync reads RELEASE_KEYSTORE and friends from the environment and
+    # only enables the release signing config when the keystore is set.
+    export RELEASE_KEYSTORE="$KEYSTORE"
+    export RELEASE_KEYSTORE_PASSPHRASE="$STORE_PASSWORD"
+    export RELEASE_KEY_ALIAS="$KEY_ALIAS"
+    export RELEASE_KEY_PASSPHRASE="$KEY_PASSWORD"
 else
     die "unknown SIGNING_STYLE '$SIGNING_STYLE' in $CONF"
 fi

@@ -1,0 +1,1434 @@
+From 8d8a268b5ccfdd2068c3e1f3e506b5b2aab8aeeb Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 15:15:06 +0800
+Subject: [PATCH 2/4] Add a navigation drawer and make the web UI the main page
+
+Syncthing's web UI is what the app is used for, but it used to be three taps
+deep in the settings list. Show it directly when the app starts and put the
+commonly used pages in a navigation drawer:
+
+* a new MainActivity hosts a Material 3 drawer (modal on phones, permanent on
+  tablets and TVs) with the sync page, sync conflicts, settings, network
+  conditions and the sync schedule, plus a header with the app version and the
+  live Syncthing run state, a conflict badge and an exit action;
+* the drawer's WebView is owned by the activity, so the web UI keeps its DOM
+  state when switching between pages instead of reloading;
+* AppScreen gains an onOpenDrawer hamburger; SettingsScreen and the other
+  screens keep their previous behavior and still open their own activities when
+  they are not hosted in the drawer, so the notification deep link and the
+  standalone activities keep working;
+* the drawer shell returns to the sync page when back is pressed on another
+  page.
+---
+ app/src/main/AndroidManifest.xml              |  13 +-
+ .../com/chiller3/basicsync/MainActivity.kt    | 144 +++++++
+ .../settings/NetworkConditionsScreen.kt       |   2 +
+ .../basicsync/settings/SettingsScreen.kt      |  42 ++-
+ .../basicsync/settings/SyncScheduleScreen.kt  |   6 +-
+ .../basicsync/settings/WebUiScreen.kt         | 275 ++++++++++----
+ .../com/chiller3/basicsync/ui/MainDrawer.kt   | 350 ++++++++++++++++++
+ .../java/com/chiller3/basicsync/ui/Screen.kt  |  60 ++-
+ app/src/main/res/drawable/ic_conflict_24.xml  |  14 +
+ app/src/main/res/drawable/ic_exit_24.xml      |  14 +
+ app/src/main/res/drawable/ic_menu_24.xml      |  14 +
+ app/src/main/res/drawable/ic_network_24.xml   |  14 +
+ app/src/main/res/drawable/ic_schedule_24.xml  |  14 +
+ app/src/main/res/drawable/ic_settings_24.xml  |  14 +
+ app/src/main/res/drawable/ic_sync_24.xml      |  14 +
+ .../main/res/values-zh-rCN/strings_nav.xml    |  24 ++
+ app/src/main/res/values/strings_nav.xml       |  49 +++
+ 17 files changed, 955 insertions(+), 108 deletions(-)
+ create mode 100644 app/src/main/java/com/chiller3/basicsync/MainActivity.kt
+ create mode 100644 app/src/main/java/com/chiller3/basicsync/ui/MainDrawer.kt
+ create mode 100644 app/src/main/res/drawable/ic_conflict_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_exit_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_menu_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_network_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_schedule_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_settings_24.xml
+ create mode 100644 app/src/main/res/drawable/ic_sync_24.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_nav.xml
+ create mode 100644 app/src/main/res/values/strings_nav.xml
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 88e2625..e38cdec 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -96,9 +96,14 @@
+         <meta-data android:name="com.google.android.backup.api_key"
+             android:value="unused" />
+ 
++        <!--
++            The main activity hosts Syncthing's web UI, so it ignores the same config changes as
++            WebUiActivity. See the comment on WebUiActivity below for why.
++        -->
+         <activity
+-            android:name=".settings.SettingsActivity"
+-            android:exported="true">
++            android:name=".MainActivity"
++            android:exported="true"
++            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+                 <category android:name="android.intent.category.LAUNCHER" />
+@@ -106,6 +111,10 @@
+             </intent-filter>
+         </activity>
+ 
++        <activity
++            android:name=".settings.SettingsActivity"
++            android:exported="false" />
++
+         <activity
+             android:name=".settings.ConflictsActivity"
+             android:exported="false" />
+diff --git a/app/src/main/java/com/chiller3/basicsync/MainActivity.kt b/app/src/main/java/com/chiller3/basicsync/MainActivity.kt
+new file mode 100644
+index 0000000..371fcad
+--- /dev/null
++++ b/app/src/main/java/com/chiller3/basicsync/MainActivity.kt
+@@ -0,0 +1,144 @@
++/*
++ * SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
++ * SPDX-License-Identifier: GPL-3.0-only
++ */
++
++package com.chiller3.basicsync
++
++import android.net.Uri
++import android.os.Bundle
++import android.webkit.WebView
++import androidx.activity.compose.BackHandler
++import androidx.activity.compose.setContent
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import com.chiller3.basicsync.settings.ConflictsScreen
++import com.chiller3.basicsync.settings.NetworkConditionsScreen
++import com.chiller3.basicsync.settings.SettingsScreen
++import com.chiller3.basicsync.settings.SyncScheduleScreen
++import com.chiller3.basicsync.settings.WebUiScreen
++import com.chiller3.basicsync.settings.rememberServiceEventWatcher
++import com.chiller3.basicsync.syncthing.SyncthingService
++import com.chiller3.basicsync.ui.MainDestination
++import com.chiller3.basicsync.ui.MainDrawer
++import com.chiller3.basicsync.ui.theme.AppTheme
++
++/**
++ * The app's main activity. It shows Syncthing's web UI as the main page and provides a navigation
++ * drawer for the other commonly used pages.
++ */
++class MainActivity : BaseActivity() {
++    // The WebView is owned by the activity (instead of by a composable) so that its DOM state
++    // survives switching between drawer destinations.
++    private lateinit var webView: WebView
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++
++        webView = WebView(this)
++
++        setContent {
++            AppTheme {
++                MainScreen(
++                    webView = webView,
++                    onExit = ::finishAffinity,
++                )
++            }
++        }
++    }
++
++    override fun onDestroy() {
++        super.onDestroy()
++
++        // The WebView is not managed by a composable, so it has to be destroyed explicitly when
++        // the activity goes away.
++        if (::webView.isInitialized) {
++            webView.destroy()
++        }
++    }
++}
++
++@Composable
++private fun MainScreen(
++    webView: WebView,
++    onExit: () -> Unit,
++) {
++    var destination by rememberSaveable { mutableStateOf(MainDestination.SYNC) }
++    var runState by remember { mutableStateOf<SyncthingService.RunState?>(null) }
++    var conflictCount by remember { mutableIntStateOf(0) }
++
++    rememberServiceEventWatcher(
++        listener = object : SyncthingService.ServiceListener {
++            override fun onMissingStoragePermissions(local: Boolean, saf: List<Uri>) {}
++
++            override fun onExitRequested() = onExit()
++
++            override fun onRunStateChanged(
++                state: SyncthingService.ServiceState,
++                guiInfo: SyncthingService.GuiInfo?,
++            ) {
++                runState = state.runState
++            }
++
++            override fun onPreRunActionResult(
++                preRunAction: SyncthingService.PreRunAction,
++                exception: Exception?,
++            ) {}
++
++            override fun onConflictsUpdated(conflictsInfo: SyncthingService.ConflictsInfo) {
++                conflictCount = conflictsInfo.local.size + conflictsInfo.saf.size
++            }
++        },
++    )
++
++    // Back from any other destination returns to the main page (the sync page). The modal drawer
++    // handles back itself while it is open because it registers its callback later.
++    BackHandler(enabled = destination != MainDestination.SYNC) {
++        destination = MainDestination.SYNC
++    }
++
++    MainDrawer(
++        selectedDestination = destination,
++        onDestinationSelected = { destination = it },
++        runState = runState,
++        conflictCount = conflictCount,
++        onExit = onExit,
++    ) { openDrawer ->
++        when (destination) {
++            MainDestination.SYNC -> WebUiScreen(
++                onClose = { destination = MainDestination.SETTINGS },
++                onExit = onExit,
++                onOpenDrawer = openDrawer,
++                webView = webView,
++            )
++            MainDestination.CONFLICTS -> ConflictsScreen(
++                onBack = {},
++                onExit = onExit,
++                onOpenDrawer = openDrawer,
++            )
++            MainDestination.SETTINGS -> SettingsScreen(
++                onExit = onExit,
++                onOpenDrawer = openDrawer,
++                onNavigateToWebUi = { destination = MainDestination.SYNC },
++                onNavigateToConflicts = { destination = MainDestination.CONFLICTS },
++                onNavigateToNetworkConditions = {
++                    destination = MainDestination.NETWORK_CONDITIONS
++                },
++                onNavigateToSyncSchedule = { destination = MainDestination.SYNC_SCHEDULE },
++            )
++            MainDestination.NETWORK_CONDITIONS -> NetworkConditionsScreen(
++                onBack = {},
++                onOpenDrawer = openDrawer,
++            )
++            MainDestination.SYNC_SCHEDULE -> SyncScheduleScreen(
++                onBack = {},
++                onOpenDrawer = openDrawer,
++            )
++        }
++    }
++}
+diff --git a/app/src/main/java/com/chiller3/basicsync/settings/NetworkConditionsScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/NetworkConditionsScreen.kt
+index 2adbabc..ca2b78b 100644
+--- a/app/src/main/java/com/chiller3/basicsync/settings/NetworkConditionsScreen.kt
++++ b/app/src/main/java/com/chiller3/basicsync/settings/NetworkConditionsScreen.kt
+@@ -42,6 +42,7 @@ import com.chiller3.basicsync.ui.theme.AppTheme
+ @Composable
+ fun NetworkConditionsScreen(
+     onBack: () -> Unit,
++    onOpenDrawer: (() -> Unit)? = null,
+     viewModel: NetworkConditionsViewModel = viewModel(),
+ ) {
+     val context = LocalContext.current
+@@ -92,6 +93,7 @@ fun NetworkConditionsScreen(
+     AppScreen(
+         title = { Text(text = stringResource(R.string.pref_network_conditions_name)) },
+         onBack = onBack,
++        onOpenDrawer = onOpenDrawer,
+     ) { params ->
+         NetworkConditionsContent(
+             requireUnmeteredNetwork = requireUnmeteredNetwork,
+diff --git a/app/src/main/java/com/chiller3/basicsync/settings/SettingsScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/SettingsScreen.kt
+index 4260738..8877fe2 100644
+--- a/app/src/main/java/com/chiller3/basicsync/settings/SettingsScreen.kt
++++ b/app/src/main/java/com/chiller3/basicsync/settings/SettingsScreen.kt
+@@ -93,6 +93,11 @@ private val BACKUP_DATE_FORMATTER = DateTimeFormatterBuilder()
+ @Composable
+ fun SettingsScreen(
+     onExit: () -> Unit,
++    onOpenDrawer: (() -> Unit)? = null,
++    onNavigateToWebUi: (() -> Unit)? = null,
++    onNavigateToConflicts: (() -> Unit)? = null,
++    onNavigateToNetworkConditions: (() -> Unit)? = null,
++    onNavigateToSyncSchedule: (() -> Unit)? = null,
+     viewModel: SettingsViewModel = viewModel(),
+ ) {
+     val context = LocalContext.current
+@@ -241,7 +246,18 @@ fun SettingsScreen(
+     var showErrorDialog by rememberSaveable { mutableStateOf<String?>(null) }
+ 
+     AppScreen(
+-        title = { Text(text = stringResource(R.string.app_name)) },
++        title = {
++            Text(
++                text = stringResource(
++                    if (onOpenDrawer != null) {
++                        R.string.main_destination_settings
++                    } else {
++                        R.string.app_name
++                    },
++                ),
++            )
++        },
++        onOpenDrawer = onOpenDrawer,
+     ) { params ->
+         LaunchedEffect(Unit) {
+             viewModel.alerts.collect { alerts ->
+@@ -388,10 +404,18 @@ fun SettingsScreen(
+                 requestSafTree.launch(documentUri)
+             },
+             onConflictsOpen = {
+-                context.startActivity(Intent(context, ConflictsActivity::class.java))
++                if (onNavigateToConflicts != null) {
++                    onNavigateToConflicts()
++                } else {
++                    context.startActivity(Intent(context, ConflictsActivity::class.java))
++                }
+             },
+             onWebUiOpen = {
+-                context.startActivity(Intent(context, WebUiActivity::class.java))
++                if (onNavigateToWebUi != null) {
++                    onNavigateToWebUi()
++                } else {
++                    context.startActivity(Intent(context, WebUiActivity::class.java))
++                }
+             },
+             onConfigurationImport = {
+                 requestSafImportConfiguration.launch(arrayOf(BACKUP_MIMETYPE))
+@@ -421,7 +445,11 @@ fun SettingsScreen(
+                 SyncthingService.start(context, action)
+             },
+             onNetworkConditionsOpen = {
+-                context.startActivity(Intent(context, NetworkConditionsActivity::class.java))
++                if (onNavigateToNetworkConditions != null) {
++                    onNavigateToNetworkConditions()
++                } else {
++                    context.startActivity(Intent(context, NetworkConditionsActivity::class.java))
++                }
+             },
+             onRunOnBatteryChange = { enabled ->
+                 prefs.runOnBattery = enabled
+@@ -440,7 +468,11 @@ fun SettingsScreen(
+                 reloadPrefs++
+             },
+             onSyncScheduleSettingsOpen = {
+-                context.startActivity(Intent(context, SyncScheduleActivity::class.java))
++                if (onNavigateToSyncSchedule != null) {
++                    onNavigateToSyncSchedule()
++                } else {
++                    context.startActivity(Intent(context, SyncScheduleActivity::class.java))
++                }
+             },
+             onKeepAliveChange = { enabled ->
+                 prefs.keepAlive = enabled
+diff --git a/app/src/main/java/com/chiller3/basicsync/settings/SyncScheduleScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/SyncScheduleScreen.kt
+index c9a55e0..c1818a1 100644
+--- a/app/src/main/java/com/chiller3/basicsync/settings/SyncScheduleScreen.kt
++++ b/app/src/main/java/com/chiller3/basicsync/settings/SyncScheduleScreen.kt
+@@ -33,7 +33,10 @@ import com.chiller3.basicsync.ui.SwitchPreference
+ import com.chiller3.basicsync.ui.theme.AppTheme
+ 
+ @Composable
+-fun SyncScheduleScreen(onBack: () -> Unit) {
++fun SyncScheduleScreen(
++    onBack: () -> Unit,
++    onOpenDrawer: (() -> Unit)? = null,
++) {
+     val context = LocalContext.current
+ 
+     val prefs = remember { Preferences(context) }
+@@ -53,6 +56,7 @@ fun SyncScheduleScreen(onBack: () -> Unit) {
+     AppScreen(
+         title = { Text(text = stringResource(R.string.pref_sync_schedule_settings_name)) },
+         onBack = onBack,
++        onOpenDrawer = onOpenDrawer,
+     ) { params ->
+         SyncScheduleContent(
+             syncSchedule = syncSchedule,
+diff --git a/app/src/main/java/com/chiller3/basicsync/settings/WebUiScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/WebUiScreen.kt
+index d40ef60..80bbafa 100644
+--- a/app/src/main/java/com/chiller3/basicsync/settings/WebUiScreen.kt
++++ b/app/src/main/java/com/chiller3/basicsync/settings/WebUiScreen.kt
+@@ -35,14 +35,23 @@ import androidx.compose.animation.AnimatedVisibility
+ import androidx.compose.animation.fadeIn
+ import androidx.compose.animation.fadeOut
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.ime
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.union
++import androidx.compose.material3.Button
+ import androidx.compose.material3.CircularWavyProgressIndicator
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.ScaffoldDefaults
++import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
+@@ -54,7 +63,11 @@ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.platform.LocalResources
++import androidx.compose.ui.res.painterResource
+ import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.viewinterop.AndroidView
+ import androidx.core.net.toUri
+ import androidx.lifecycle.compose.LifecycleResumeEffect
+@@ -67,6 +80,7 @@ import com.chiller3.basicsync.syncthing.SyncthingSafClient
+ import com.chiller3.basicsync.syncthing.SyncthingService
+ import com.chiller3.basicsync.ui.AppScreen
+ import com.chiller3.basicsync.ui.PreferenceDefaults
++import com.chiller3.basicsync.ui.runStateLabelRes
+ import java.io.ByteArrayInputStream
+ import java.security.cert.CertificateFactory
+ import java.security.cert.X509Certificate
+@@ -95,10 +109,18 @@ private fun jsEscape(s: String) = buildString {
+ fun WebUiScreen(
+     onClose: () -> Unit,
+     onExit: () -> Unit,
++    onOpenDrawer: (() -> Unit)? = null,
++    webView: WebView? = null,
+ ) {
+     val context = LocalContext.current
+     val resources = LocalResources.current
+ 
++    // When the WebView is hoisted by the caller (MainActivity), the caller owns it and is
++    // responsible for destroying it. That allows the DOM state to survive switching between
++    // destinations.
++    val ownsWebView = webView == null
++    val actualWebView = webView ?: remember { WebView(context) }
++
+     val isTv = remember { context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
+     val edgeToEdge = remember {
+         !isTv && run {
+@@ -116,19 +138,21 @@ fun WebUiScreen(
+     // We intentionally do not use WebView.saveState() and WebView.restoreState(). It only supports
+     // saving the back/forward history, which is pointless for the Syncthing web UI because it is an
+     // SPA that is always at the same URL.
+-    val webView = remember { WebView(context) }
+     LifecycleResumeEffect(Unit) {
+-        webView.onResume()
+-        webView.resumeTimers()
++        actualWebView.onResume()
++        actualWebView.resumeTimers()
+ 
+         onPauseOrDispose {
+-            webView.onPause()
+-            webView.pauseTimers()
++            actualWebView.onPause()
++            actualWebView.pauseTimers()
+         }
+     }
+ 
+     var guiUri by remember { mutableStateOf<Uri?>(null) }
+     var guiCert by remember { mutableStateOf<X509Certificate?>(null) }
++    var runState by remember { mutableStateOf<SyncthingService.RunState?>(null) }
++    // Null until the service reports its state for the first time.
++    var webUiAvailable by remember { mutableStateOf<Boolean?>(null) }
+     rememberServiceEventWatcher(
+         listener = object : SyncthingService.ServiceListener {
+             override fun onMissingStoragePermissions(local: Boolean, saf: List<Uri>) {}
+@@ -139,25 +163,37 @@ fun WebUiScreen(
+                 state: SyncthingService.ServiceState,
+                 guiInfo: SyncthingService.GuiInfo?,
+             ) {
+-                if (!state.runState.webUiAvailable) {
++                runState = state.runState
++                webUiAvailable = state.runState.webUiAvailable
++
++                if (!state.runState.webUiAvailable && onOpenDrawer == null) {
++                    // A standalone web UI activity has nothing left to show when Syncthing stops.
++                    // When this is the main page inside the drawer, that is not true: the page
++                    // stays and explains how to start Syncthing instead.
+                     onClose()
+                 }
+ 
+-                if (guiInfo != null && webView.url == null) {
++                if (guiInfo != null) {
++                    // Keep these up to date even when the WebView is already loaded because the
++                    // WebViewClient callbacks depend on them.
+                     guiUri = guiInfo.address.toUri()
+                     guiCert = loadDer(guiInfo.cert)
+ 
+-                    // Use basic auth because Android's WebView has no sane way to pass in
+-                    // "X-Api-Key" nor "Authorization: Bearer" for each request. Basic auth is the
+-                    // only method that'll persist throughout the session, so stbridge forcibly sets
+-                    // the password to the API key.
+-                    val authorization = Base64.encodeToString(
+-                        "${guiInfo.user}:${guiInfo.apiKey}".encodeToByteArray(),
+-                        Base64.NO_WRAP,
+-                    )
+-                    val headers = mapOf("Authorization" to "Basic $authorization")
+-
+-                    webView.loadUrl(guiInfo.address, headers)
++                    // The WebView is only loaded once. When it is hoisted by MainActivity, it is
++                    // already showing the web UI after switching back to this destination.
++                    if (actualWebView.url == null) {
++                        // Use basic auth because Android's WebView has no sane way to pass in
++                        // "X-Api-Key" nor "Authorization: Bearer" for each request. Basic auth is
++                        // the only method that'll persist throughout the session, so stbridge
++                        // forcibly sets the password to the API key.
++                        val authorization = Base64.encodeToString(
++                            "${guiInfo.user}:${guiInfo.apiKey}".encodeToByteArray(),
++                            Base64.NO_WRAP,
++                        )
++                        val headers = mapOf("Authorization" to "Basic $authorization")
++
++                        actualWebView.loadUrl(guiInfo.address, headers)
++                    }
+                 }
+             }
+ 
+@@ -171,23 +207,23 @@ fun WebUiScreen(
+     )
+ 
+     fun onFolderSelected(type: String, path: String) {
+-        webView.evaluateJavascript("onFolderSelected(\"${jsEscape(type)}\", \"${jsEscape(path)}\");") {}
++        actualWebView.evaluateJavascript("onFolderSelected(\"${jsEscape(type)}\", \"${jsEscape(path)}\");") {}
+     }
+ 
+     fun onDeviceIdScanned(deviceId: String) {
+-        webView.evaluateJavascript("onDeviceIdScanned(\"${jsEscape(deviceId)}\");") {}
++        actualWebView.evaluateJavascript("onDeviceIdScanned(\"${jsEscape(deviceId)}\");") {}
+     }
+ 
+     fun bridgeInit(isTv: Boolean, edgeToEdge: Boolean) {
+-        webView.evaluateJavascript("bridgeInit($isTv, $edgeToEdge);") {}
++        actualWebView.evaluateJavascript("bridgeInit($isTv, $edgeToEdge);") {}
+     }
+ 
+     fun closeAllDropdowns() {
+-        webView.evaluateJavascript("closeAllDropdowns();") {}
++        actualWebView.evaluateJavascript("closeAllDropdowns();") {}
+     }
+ 
+     fun closeTopModal() {
+-        webView.evaluateJavascript("closeTopModal();") {}
++        actualWebView.evaluateJavascript("closeTopModal();") {}
+     }
+ 
+     var dropdownsOpen by remember { mutableIntStateOf(0) }
+@@ -201,7 +237,7 @@ fun WebUiScreen(
+             } else if (modalsOpen > 0) {
+                 closeTopModal()
+             } else if (hasBrowserHistory) {
+-                webView.goBack()
++                actualWebView.goBack()
+             }
+         },
+     )
+@@ -362,7 +398,9 @@ fun WebUiScreen(
+     }
+ 
+     var showAlert by remember { mutableIntStateOf(0) }
+-    var loading by remember { mutableStateOf(true) }
++    // A hoisted WebView may already have loaded the web UI before this destination was shown again.
++    // In that case, onPageFinished() will not be called anymore.
++    var loading by remember { mutableStateOf(actualWebView.url == null) }
+ 
+     val webViewClient = remember {
+         object : WebViewClient() {
+@@ -493,71 +531,101 @@ fun WebUiScreen(
+     }
+ 
+     AppScreen(
+-        fullScreenContent = true,
++        title = if (onOpenDrawer != null) {
++            {
++                Text(
++                    text = stringResource(
++                        R.string.main_sync_title_with_status,
++                        stringResource(R.string.main_destination_sync),
++                        stringResource(runStateLabelRes(runState)),
++                    ),
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++            }
++        } else {
++            null
++        },
++        onOpenDrawer = onOpenDrawer,
++        fullScreenContent = onOpenDrawer == null,
+         contentWindowInsets = if (edgeToEdge) {
+             ScaffoldDefaults.contentWindowInsets
+         } else {
+             ScaffoldDefaults.contentWindowInsets.union(WindowInsets.ime)
+         },
+     ) { params ->
+-        AndroidView(
+-            factory = {
+-                webView.apply {
+-                    layoutParams = ViewGroup.LayoutParams(
+-                        ViewGroup.LayoutParams.MATCH_PARENT,
+-                        ViewGroup.LayoutParams.MATCH_PARENT,
+-                    )
+-
+-                    settings.apply {
+-                        // All required assets are served locally from the daemon.
+-                        allowContentAccess = false
+-                        allowFileAccess = false
+-                        cacheMode = WebSettings.LOAD_NO_CACHE
+-
+-                        // The web UI does not work at all without JavaScript.
+-                        @SuppressLint("SetJavaScriptEnabled")
+-                        javaScriptEnabled = true
+-
+-                        // The web UI uses localStorage for a few things.
+-                        domStorageEnabled = true
+-
+-                        // The NARROW_COLUMNS default is deprecated since API 29.
+-                        layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
+-                    }
++        // When this page is the app's main page, keep it in place while Syncthing is not
++        // running instead of sending the user to the settings page.
++        val showNotRunning = onOpenDrawer != null && webUiAvailable == false
++
++        if (showNotRunning) {
++            WebUiNotRunningContent(
++                onStart = { SyncthingService.start(context, SyncthingService.ACTION_START) },
++            )
++        } else {
++            AndroidView(
++                factory = {
++                    actualWebView.apply {
++                        layoutParams = ViewGroup.LayoutParams(
++                            ViewGroup.LayoutParams.MATCH_PARENT,
++                            ViewGroup.LayoutParams.MATCH_PARENT,
++                        )
+ 
+-                    // Android Studio's lint is broken when using remember { ... }.
+-                    @SuppressLint("JavascriptInterface")
+-                    addJavascriptInterface(webViewInterface, "BasicSync")
++                        settings.apply {
++                            // All required assets are served locally from the daemon.
++                            allowContentAccess = false
++                            allowFileAccess = false
++                            cacheMode = WebSettings.LOAD_NO_CACHE
+ 
+-                    this.webViewClient = webViewClient
+-                    this.webChromeClient = webChromeClient
+-                }
+-            },
+-            onRelease = {
+-                it.destroy()
+-            },
+-            // We don't use AnimatedVisibility nor AnimatedContent because the WebView needs to load
+-            // immediately and stay loaded. Instead, the loading spinner will just be a full screen
+-            // overlay.
+-            modifier = if (edgeToEdge) {
+-                Modifier
+-            } else {
+-                Modifier.padding(paddingValues = params.contentPadding)
+-            },
+-        )
++                            // The web UI does not work at all without JavaScript.
++                            @SuppressLint("SetJavaScriptEnabled")
++                            javaScriptEnabled = true
++
++                            // The web UI uses localStorage for a few things.
++                            domStorageEnabled = true
++
++                            // The NARROW_COLUMNS default is deprecated since API 29.
++                            layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
++                        }
++
++                        // Android Studio's lint is broken when using remember { ... }.
++                        @SuppressLint("JavascriptInterface")
++                        addJavascriptInterface(webViewInterface, "BasicSync")
+ 
+-        AnimatedVisibility(
+-            visible = loading,
+-            enter = fadeIn(),
+-            exit = fadeOut(),
+-        ) {
+-            Box(
+-                contentAlignment = Alignment.Center,
+-                modifier = Modifier
+-                    .fillMaxSize()
+-                    .background(PreferenceDefaults.containerColor),
++                        this.webViewClient = webViewClient
++                        this.webChromeClient = webChromeClient
++                    }
++                },
++                onRelease = {
++                    // The WebView is owned by the caller when it was hoisted, so it must outlive this
++                    // composable.
++                    if (ownsWebView) {
++                        it.destroy()
++                    }
++                },
++                // We don't use AnimatedVisibility nor AnimatedContent because the WebView needs to load
++                // immediately and stay loaded. Instead, the loading spinner will just be a full screen
++                // overlay.
++                modifier = if (edgeToEdge) {
++                    Modifier
++                } else {
++                    Modifier.padding(paddingValues = params.contentPadding)
++                },
++            )
++
++            AnimatedVisibility(
++                visible = loading,
++                enter = fadeIn(),
++                exit = fadeOut(),
+             ) {
+-                CircularWavyProgressIndicator()
++                Box(
++                    contentAlignment = Alignment.Center,
++                    modifier = Modifier
++                        .fillMaxSize()
++                        .background(PreferenceDefaults.containerColor),
++                ) {
++                    CircularWavyProgressIndicator()
++                }
+             }
+         }
+ 
+@@ -574,3 +642,50 @@ fun WebUiScreen(
+         }
+     }
+ }
++
++/**
++ * Shown on the sync page while Syncthing is not running. It is only used when the page is the
++ * app's main page; the standalone web UI activity is closed instead.
++ */
++@Composable
++private fun WebUiNotRunningContent(
++    onStart: () -> Unit,
++) {
++    Column(
++        modifier = Modifier
++            .fillMaxSize()
++            .padding(horizontal = 32.dp, vertical = 24.dp),
++        verticalArrangement = Arrangement.Center,
++        horizontalAlignment = Alignment.CenterHorizontally,
++    ) {
++        Icon(
++            painter = painterResource(R.drawable.ic_sync_24),
++            contentDescription = null,
++            tint = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.size(48.dp),
++        )
++
++        Spacer(modifier = Modifier.height(16.dp))
++
++        Text(
++            text = stringResource(R.string.main_sync_not_running_title),
++            style = MaterialTheme.typography.titleLarge,
++            textAlign = TextAlign.Center,
++        )
++
++        Spacer(modifier = Modifier.height(8.dp))
++
++        Text(
++            text = stringResource(R.string.main_sync_not_running_message),
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            textAlign = TextAlign.Center,
++        )
++
++        Spacer(modifier = Modifier.height(24.dp))
++
++        Button(onClick = onStart) {
++            Text(text = stringResource(R.string.main_sync_not_running_action))
++        }
++    }
++}
+diff --git a/app/src/main/java/com/chiller3/basicsync/ui/MainDrawer.kt b/app/src/main/java/com/chiller3/basicsync/ui/MainDrawer.kt
+new file mode 100644
+index 0000000..896e107
+--- /dev/null
++++ b/app/src/main/java/com/chiller3/basicsync/ui/MainDrawer.kt
+@@ -0,0 +1,350 @@
++/*
++ * SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
++ * SPDX-License-Identifier: GPL-3.0-only
++ */
++
++package com.chiller3.basicsync.ui
++
++import androidx.annotation.DrawableRes
++import androidx.annotation.StringRes
++import androidx.compose.foundation.Image
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.ColumnScope
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Badge
++import androidx.compose.material3.DrawerValue
++import androidx.compose.material3.HorizontalDivider
++import androidx.compose.material3.Icon
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.ModalDrawerSheet
++import androidx.compose.material3.ModalNavigationDrawer
++import androidx.compose.material3.NavigationDrawerItem
++import androidx.compose.material3.NavigationDrawerItemDefaults
++import androidx.compose.material3.PermanentDrawerSheet
++import androidx.compose.material3.PermanentNavigationDrawer
++import androidx.compose.material3.Text
++import androidx.compose.material3.rememberDrawerState
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalConfiguration
++import androidx.compose.ui.res.painterResource
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import com.chiller3.basicsync.BuildConfig
++import com.chiller3.basicsync.R
++import com.chiller3.basicsync.syncthing.SyncthingService
++import kotlinx.coroutines.launch
++
++private val DrawerWidth = 320.dp
++private val DrawerHorizontalPadding = 16.dp
++private val DrawerHeaderHorizontalPadding = 24.dp
++private val HeaderIconSize = 48.dp
++private val StatusDotSize = 8.dp
++
++/**
++ * The top-level pages that are reachable from the navigation drawer.
++ *
++ * @param labelRes the title shown for the destination in the drawer
++ * @param iconRes the icon shown next to the title in the drawer
++ */
++enum class MainDestination(
++    @StringRes val labelRes: Int,
++    @DrawableRes val iconRes: Int,
++) {
++    SYNC(R.string.main_destination_sync, R.drawable.ic_sync_24),
++    CONFLICTS(R.string.pref_conflicts_name, R.drawable.ic_conflict_24),
++    SETTINGS(R.string.main_destination_settings, R.drawable.ic_settings_24),
++    NETWORK_CONDITIONS(R.string.pref_network_conditions_name, R.drawable.ic_network_24),
++    SYNC_SCHEDULE(R.string.pref_sync_schedule_settings_name, R.drawable.ic_schedule_24),
++    ;
++}
++
++/**
++ * Material icon resource for a Syncthing run state, used for the status line in the drawer header
++ * and for the subtitle of the sync page.
++ */
++@StringRes
++fun runStateLabelRes(runState: SyncthingService.RunState?): Int = when (runState) {
++    SyncthingService.RunState.RUNNING -> R.string.drawer_status_running
++    SyncthingService.RunState.NOT_RUNNING -> R.string.drawer_status_not_running
++    SyncthingService.RunState.PAUSED -> R.string.drawer_status_paused
++    SyncthingService.RunState.STARTING -> R.string.drawer_status_starting
++    SyncthingService.RunState.STOPPING -> R.string.drawer_status_stopping
++    SyncthingService.RunState.IMPORTING -> R.string.drawer_status_importing
++    SyncthingService.RunState.EXPORTING -> R.string.drawer_status_exporting
++    null -> R.string.drawer_status_connecting
++}
++
++@Composable
++private fun runStateColor(runState: SyncthingService.RunState?): Color = when (runState) {
++    SyncthingService.RunState.RUNNING -> MaterialTheme.colorScheme.primary
++    SyncthingService.RunState.STARTING,
++    SyncthingService.RunState.STOPPING,
++    SyncthingService.RunState.IMPORTING,
++    SyncthingService.RunState.EXPORTING -> MaterialTheme.colorScheme.tertiary
++    SyncthingService.RunState.PAUSED -> MaterialTheme.colorScheme.secondary
++    SyncthingService.RunState.NOT_RUNNING, null -> MaterialTheme.colorScheme.outline
++}
++
++/**
++ * Navigation drawer shell for [com.chiller3.basicsync.MainActivity].
++ *
++ * A modal drawer is used on compact screens and a permanent drawer is used on wide screens (tablets
++ * and TVs). The [content] lambda receives the callback that opens the modal drawer so that every
++ * destination can show a hamburger button in its app bar.
++ */
++@Composable
++fun MainDrawer(
++    selectedDestination: MainDestination,
++    onDestinationSelected: (MainDestination) -> Unit,
++    runState: SyncthingService.RunState?,
++    conflictCount: Int,
++    onExit: () -> Unit,
++    content: @Composable (openDrawer: () -> Unit) -> Unit,
++) {
++    // Permanent drawer for tablets and TVs, modal drawer for phones.
++    val usePermanentDrawer = LocalConfiguration.current.screenWidthDp >= 600
++
++    val drawerState = rememberDrawerState(DrawerValue.Closed)
++    val scope = rememberCoroutineScope()
++
++    val openDrawer: () -> Unit = {
++        if (!usePermanentDrawer) {
++            scope.launch { drawerState.open() }
++        }
++    }
++    val selectDestination: (MainDestination) -> Unit = { destination ->
++        onDestinationSelected(destination)
++        if (!usePermanentDrawer) {
++            scope.launch { drawerState.close() }
++        }
++    }
++
++    if (usePermanentDrawer) {
++        PermanentNavigationDrawer(
++            drawerContent = {
++                PermanentDrawerSheet(modifier = Modifier.width(DrawerWidth)) {
++                    DrawerSheetContent(
++                        selectedDestination = selectedDestination,
++                        onDestinationSelected = selectDestination,
++                        runState = runState,
++                        conflictCount = conflictCount,
++                        onExit = onExit,
++                    )
++                }
++            },
++            content = { content(openDrawer) },
++        )
++    } else {
++        ModalNavigationDrawer(
++            drawerState = drawerState,
++            gesturesEnabled = true,
++            drawerContent = {
++                ModalDrawerSheet(modifier = Modifier.width(DrawerWidth)) {
++                    DrawerSheetContent(
++                        selectedDestination = selectedDestination,
++                        onDestinationSelected = selectDestination,
++                        runState = runState,
++                        conflictCount = conflictCount,
++                        onExit = onExit,
++                    )
++                }
++            },
++            content = { content(openDrawer) },
++        )
++    }
++}
++
++@Composable
++private fun ColumnScope.DrawerSheetContent(
++    selectedDestination: MainDestination,
++    onDestinationSelected: (MainDestination) -> Unit,
++    runState: SyncthingService.RunState?,
++    conflictCount: Int,
++    onExit: () -> Unit,
++) {
++    DrawerHeader(runState = runState)
++
++    HorizontalDivider(
++        color = MaterialTheme.colorScheme.outlineVariant,
++        modifier = Modifier.padding(
++            horizontal = DrawerHorizontalPadding,
++            vertical = 8.dp,
++        ),
++    )
++
++    for (destination in MainDestination.entries) {
++        NavigationDrawerItem(
++            label = {
++                Text(
++                    text = stringResource(destination.labelRes),
++                    style = MaterialTheme.typography.titleMedium,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++            },
++            selected = destination == selectedDestination,
++            onClick = { onDestinationSelected(destination) },
++            icon = {
++                Icon(
++                    painter = painterResource(destination.iconRes),
++                    contentDescription = null,
++                    modifier = Modifier.size(24.dp),
++                )
++            },
++            badge = if (destination == MainDestination.CONFLICTS && conflictCount > 0) {
++                {
++                    Badge {
++                        Text(
++                            text = if (conflictCount > 99) {
++                                stringResource(R.string.drawer_badge_overflow)
++                            } else {
++                                conflictCount.toString()
++                            },
++                        )
++                    }
++                }
++            } else {
++                null
++            },
++            // The height of the item itself (56dp) comes from Material3's NavigationDrawerItem.
++            modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
++        )
++    }
++
++    Spacer(modifier = Modifier.weight(1f))
++
++    HorizontalDivider(
++        color = MaterialTheme.colorScheme.outlineVariant,
++        modifier = Modifier.padding(
++            horizontal = DrawerHorizontalPadding,
++            vertical = 8.dp,
++        ),
++    )
++
++    NavigationDrawerItem(
++        label = {
++            Text(
++                text = stringResource(R.string.drawer_exit_app),
++                style = MaterialTheme.typography.titleMedium,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
++            )
++        },
++        selected = false,
++        onClick = onExit,
++        icon = {
++            Icon(
++                painter = painterResource(R.drawable.ic_exit_24),
++                contentDescription = null,
++                modifier = Modifier.size(24.dp),
++            )
++        },
++        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
++    )
++
++    Text(
++        text = stringResource(R.string.drawer_footer_note),
++        style = MaterialTheme.typography.labelSmall,
++        color = MaterialTheme.colorScheme.onSurfaceVariant,
++        maxLines = 2,
++        overflow = TextOverflow.Ellipsis,
++        modifier = Modifier.padding(
++            start = DrawerHeaderHorizontalPadding,
++            top = 8.dp,
++            end = DrawerHeaderHorizontalPadding,
++            bottom = 16.dp,
++        ),
++    )
++}
++
++@Composable
++private fun DrawerHeader(runState: SyncthingService.RunState?) {
++    Column(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(
++                horizontal = DrawerHeaderHorizontalPadding,
++                vertical = 20.dp,
++            ),
++    ) {
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            // The launcher icon is an adaptive icon, which painterResource() cannot load. Compose
++            // it from its layers and clip it to the rounded square shape launchers use.
++            Box(
++                modifier = Modifier
++                    .size(HeaderIconSize)
++                    .clip(RoundedCornerShape(12.dp)),
++            ) {
++                Image(
++                    painter = painterResource(R.drawable.ic_launcher_background),
++                    contentDescription = null,
++                    contentScale = ContentScale.Crop,
++                    modifier = Modifier.fillMaxSize(),
++                )
++                Image(
++                    painter = painterResource(R.drawable.ic_launcher_foreground),
++                    contentDescription = null,
++                    contentScale = ContentScale.Crop,
++                    modifier = Modifier.fillMaxSize(),
++                )
++            }
++
++            Spacer(modifier = Modifier.width(16.dp))
++
++            Column(modifier = Modifier.weight(1f)) {
++                Text(
++                    text = stringResource(R.string.app_name),
++                    style = MaterialTheme.typography.headlineSmall,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++                Text(
++                    text = stringResource(R.string.drawer_version, BuildConfig.VERSION_NAME),
++                    style = MaterialTheme.typography.labelMedium,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                )
++            }
++        }
++
++        Spacer(modifier = Modifier.height(12.dp))
++
++        Row(verticalAlignment = Alignment.CenterVertically) {
++            Box(
++                modifier = Modifier
++                    .size(StatusDotSize)
++                    .clip(CircleShape)
++                    .background(runStateColor(runState)),
++            )
++
++            Spacer(modifier = Modifier.width(8.dp))
++
++            Text(
++                text = stringResource(runStateLabelRes(runState)),
++                style = MaterialTheme.typography.labelMedium,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
++            )
++        }
++    }
++}
+diff --git a/app/src/main/java/com/chiller3/basicsync/ui/Screen.kt b/app/src/main/java/com/chiller3/basicsync/ui/Screen.kt
+index 4ef3d53..cd5804d 100644
+--- a/app/src/main/java/com/chiller3/basicsync/ui/Screen.kt
++++ b/app/src/main/java/com/chiller3/basicsync/ui/Screen.kt
+@@ -24,8 +24,10 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.input.nestedscroll.nestedScroll
++import androidx.compose.ui.res.painterResource
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.unit.dp
++import com.chiller3.basicsync.R
+ import com.chiller3.basicsync.ui.theme.Icons
+ 
+ data class AppScreenParams(
+@@ -37,6 +39,7 @@ data class AppScreenParams(
+ fun AppScreen(
+     title: (@Composable () -> Unit)? = null,
+     onBack: (() -> Unit)? = null,
++    onOpenDrawer: (() -> Unit)? = null,
+     contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
+     fullScreenContent: Boolean = false,
+     content: @Composable (AppScreenParams) -> Unit,
+@@ -52,26 +55,43 @@ fun AppScreen(
+                 TopAppBar(
+                     title = title,
+                     navigationIcon = {
+-                        onBack?.let { onClick ->
+-                            IconButton(
+-                                onClick = onClick,
+-                                colors = IconButtonDefaults.filledIconButtonColors(
+-                                    containerColor = PreferenceDefaults.scrolledContainerColor.let {
+-                                        if (fullScreenContent) {
+-                                            it.copy(alpha = 0.5f)
+-                                        } else {
+-                                            it
+-                                        }
+-                                    },
+-                                ),
+-                            ) {
+-                                @SuppressLint("PrivateResource")
+-                                Icon(
+-                                    imageVector = Icons.AutoMirrored.ArrowBack,
+-                                    contentDescription = stringResource(
+-                                        androidx.appcompat.R.string.abc_action_bar_up_description,
+-                                    ),
+-                                )
++                        val iconButtonColors = IconButtonDefaults.filledIconButtonColors(
++                            containerColor = PreferenceDefaults.scrolledContainerColor.let {
++                                if (fullScreenContent) {
++                                    it.copy(alpha = 0.5f)
++                                } else {
++                                    it
++                                }
++                            },
++                        )
++
++                        when {
++                            onOpenDrawer != null -> {
++                                IconButton(
++                                    onClick = onOpenDrawer,
++                                    colors = iconButtonColors,
++                                ) {
++                                    Icon(
++                                        painter = painterResource(R.drawable.ic_menu_24),
++                                        contentDescription = stringResource(
++                                            R.string.nav_open_drawer,
++                                        ),
++                                    )
++                                }
++                            }
++                            onBack != null -> {
++                                IconButton(
++                                    onClick = onBack,
++                                    colors = iconButtonColors,
++                                ) {
++                                    @SuppressLint("PrivateResource")
++                                    Icon(
++                                        imageVector = Icons.AutoMirrored.ArrowBack,
++                                        contentDescription = stringResource(
++                                            androidx.appcompat.R.string.abc_action_bar_up_description,
++                                        ),
++                                    )
++                                }
+                             }
+                         }
+                     },
+diff --git a/app/src/main/res/drawable/ic_conflict_24.xml b/app/src/main/res/drawable/ic_conflict_24.xml
+new file mode 100644
+index 0000000..7e0ac46
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_conflict_24.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: Google
++    SPDX-License-Identifier: Apache-2.0
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M1,21H23L12,2L1,21M12,6L19.53,19H4.47L12,6M11,10V14H13V10H11M11,16V18H13V16H11Z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_exit_24.xml b/app/src/main/res/drawable/ic_exit_24.xml
+new file mode 100644
+index 0000000..65a31d8
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_exit_24.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: Google
++    SPDX-License-Identifier: Apache-2.0
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M16.56,5.44L15.11,6.89C16.84,7.94 18,9.83 18,12C18,15.31 15.31,18 12,18C8.69,18 6,15.31 6,12C6,9.83 7.16,7.94 8.88,6.88L7.44,5.44C5.36,6.88 4,9.28 4,12C4,16.42 7.58,20 12,20C16.42,20 20,16.42 20,12C20,9.28 18.64,6.88 16.56,5.44M11,3V13H13V3H11Z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_menu_24.xml b/app/src/main/res/drawable/ic_menu_24.xml
+new file mode 100644
+index 0000000..4991394
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_menu_24.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: Google
++    SPDX-License-Identifier: Apache-2.0
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_network_24.xml b/app/src/main/res/drawable/ic_network_24.xml
+new file mode 100644
+index 0000000..2ddd412
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_network_24.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: Google
++    SPDX-License-Identifier: Apache-2.0
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M1,9L2.5,10.5C8.54,5.5 15.46,5.5 21.5,10.5L23,9C16,2.5 8,2.5 1,9M5,13L6.5,14.5C9.5,11.5 14.5,11.5 17.5,14.5L19,13C15.5,9.5 8.5,9.5 5,13M11,17L12,18L13,17C12.5,16.5 11.5,16.5 11,17Z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_schedule_24.xml b/app/src/main/res/drawable/ic_schedule_24.xml
+new file mode 100644
+index 0000000..743d361
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_schedule_24.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: Google
++    SPDX-License-Identifier: Apache-2.0
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M11.99,2C6.47,2 2,6.48 2,12C2,17.52 6.47,22 11.99,22C17.52,22 22,17.52 22,12C22,6.48 17.52,2 11.99,2M12,20C7.58,20 4,16.42 4,12C4,7.58 7.58,4 12,4C16.42,4 20,7.58 20,12C20,16.42 16.42,20 12,20M12.5,7H11V13L16.25,16.15L17,14.92L12.5,12.25V7Z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_settings_24.xml b/app/src/main/res/drawable/ic_settings_24.xml
+new file mode 100644
+index 0000000..0277a38
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_settings_24.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: Google
++    SPDX-License-Identifier: Apache-2.0
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M19.43,12.98C19.47,12.66 19.5,12.34 19.5,12C19.5,11.66 19.47,11.34 19.43,11.02L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11.02C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.66 4.57,12.98L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.98M12,15.5C10.07,15.5 8.5,13.93 8.5,12C8.5,10.07 10.07,8.5 12,8.5C13.93,8.5 15.5,10.07 15.5,12C15.5,13.93 13.93,15.5 12,15.5Z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_sync_24.xml b/app/src/main/res/drawable/ic_sync_24.xml
+new file mode 100644
+index 0000000..ace3bce
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_sync_24.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: Google
++    SPDX-License-Identifier: Apache-2.0
++-->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M12,4V1L8,5L12,9V6C15.31,6 18,8.69 18,12C18,13.01 17.75,13.96 17.31,14.8L18.76,16.25C19.54,15.03 20,13.57 20,12C20,7.58 16.42,4 12,4M6,12C6,10.99 6.25,10.04 6.69,9.2L5.24,7.75C4.46,8.97 4,10.43 4,12C4,16.42 7.58,20 12,20V23L16,19L12,15V18C8.69,18 6,15.31 6,12Z" />
++</vector>
+diff --git a/app/src/main/res/values-zh-rCN/strings_nav.xml b/app/src/main/res/values-zh-rCN/strings_nav.xml
+new file mode 100644
+index 0000000..bce3ad5
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_nav.xml
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="main_destination_sync">同步</string>
++    <string name="main_destination_settings">设置</string>
++    <string name="nav_open_drawer">打开导航菜单</string>
++    <string name="drawer_exit_app">退出应用</string>
++    <string name="drawer_version">版本 %1$s</string>
++    <string name="drawer_footer_note">基于 GPL-3.0 许可自由开源</string>
++    <string name="drawer_status_running">运行中</string>
++    <string name="drawer_status_not_running">已停止</string>
++    <string name="drawer_status_paused">已暂停</string>
++    <string name="drawer_status_starting">正在启动</string>
++    <string name="drawer_status_stopping">正在停止</string>
++    <string name="drawer_status_importing">正在导入配置</string>
++    <string name="drawer_status_exporting">正在导出配置</string>
++    <string name="drawer_status_connecting">正在连接…</string>
++    <string name="main_sync_title_with_status">%1$s · %2$s</string>
++    <!-- Title shown on the sync page while Syncthing is not running. -->
++    <string name="main_sync_not_running_title">Syncthing 未运行</string>
++    <!-- Explanation shown on the sync page while Syncthing is not running. -->
++    <string name="main_sync_not_running_message">当运行条件满足时，BasicSync 会自动启动 Syncthing。启动后，Web 界面会显示在这里。</string>
++    <!-- Button that starts Syncthing from the sync page. -->
++    <string name="main_sync_not_running_action">启动 Syncthing</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_nav.xml b/app/src/main/res/values/strings_nav.xml
+new file mode 100644
+index 0000000..f44f54b
+--- /dev/null
++++ b/app/src/main/res/values/strings_nav.xml
+@@ -0,0 +1,49 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
++    SPDX-License-Identifier: GPL-3.0-only
++-->
++<resources>
++    <!-- Title of the drawer destination that shows Syncthing's web UI. This is the app's main page. -->
++    <string name="main_destination_sync">Sync</string>
++    <!-- Title of the drawer destination that shows the general settings. -->
++    <string name="main_destination_settings">Settings</string>
++
++    <!-- Content description for the navigation icon that opens the navigation drawer. -->
++    <string name="nav_open_drawer">Open navigation menu</string>
++
++    <!-- Title of the drawer item that closes the app entirely. -->
++    <string name="drawer_exit_app">Exit app</string>
++    <!-- Version shown below the app name in the drawer header. %1$s is the version name. -->
++    <string name="drawer_version">Version %1$s</string>
++    <!-- Note at the bottom of the drawer showing the app's license. Keep as short as possible. -->
++    <string name="drawer_footer_note">Free and open source under GPL-3.0</string>
++    <!-- Shown instead of a conflict count of 100 or more. -->
++    <string name="drawer_badge_overflow" translatable="false">99+</string>
++
++    <!-- Syncthing status shown in the drawer header: it is running and ready to sync. -->
++    <string name="drawer_status_running">Running</string>
++    <!-- Syncthing status shown in the drawer header: it is not running at all (not just paused). -->
++    <string name="drawer_status_not_running">Stopped</string>
++    <!-- Syncthing status shown in the drawer header: it is running, but syncing is paused. -->
++    <string name="drawer_status_paused">Paused</string>
++    <!-- Syncthing status shown in the drawer header: it was previously stopped and is starting up. -->
++    <string name="drawer_status_starting">Starting</string>
++    <!-- Syncthing status shown in the drawer header: it was previously running and is shutting down entirely. -->
++    <string name="drawer_status_stopping">Stopping</string>
++    <!-- Syncthing status shown in the drawer header: the configuration is being imported. -->
++    <string name="drawer_status_importing">Importing configuration</string>
++    <!-- Syncthing status shown in the drawer header: the configuration is being exported. -->
++    <string name="drawer_status_exporting">Exporting configuration</string>
++    <!-- Syncthing status shown when the state is not known yet, like right after the app was opened. -->
++    <string name="drawer_status_connecting">Connecting…</string>
++
++    <!-- Title of the sync page. %1$s is the page title ("Sync") and %2$s is the Syncthing status, like "Running". -->
++    <string name="main_sync_title_with_status">%1$s · %2$s</string>
++    <!-- Title shown on the sync page while Syncthing is not running. -->
++    <string name="main_sync_not_running_title">Syncthing is not running</string>
++    <!-- Explanation shown on the sync page while Syncthing is not running. -->
++    <string name="main_sync_not_running_message">BasicSync starts Syncthing automatically when its run conditions are met. The web UI shows up here as soon as it is running.</string>
++    <!-- Button that starts Syncthing from the sync page. -->
++    <string name="main_sync_not_running_action">Start Syncthing</string>
++</resources>
+-- 
+2.56.1
+

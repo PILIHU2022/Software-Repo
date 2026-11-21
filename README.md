@@ -6,17 +6,18 @@
 
 # Software-Repo — Patchwork build overlay
 
-A personal, patch-based build overlay for four Android apps — **ScreenTime**,
-**RecurringExpenseTracker**, **Fcitx5 for Android** and the **BaiduNetGo
-Android client** — plus the **BaiduNetGo desktop** client, which is built here
-but is *not* an Android/F-Droid app.
+A personal, patch-based build overlay for five Android apps — **ScreenTime**,
+**RecurringExpenseTracker**, **Fcitx5 for Android**, **BasicSync** and the
+**BaiduNetGo Android client** — plus the **BaiduNetGo desktop** client, which is
+built here but is *not* an Android/F-Droid app.
 No application source is vendored here. The repository keeps ordered patch
 queues, plus the CI that applies them to current upstream code: signed APKs are
 published through a signed F-Droid repository, and the desktop app's x86
 installers are published as GitHub Releases plus an update feed.
 
 > Personal project, not affiliated with or endorsed by the upstream authors
-> (Dennis Bauer, Atharok, the Fcitx5 for Android contributors, pengstem).
+> (Dennis Bauer, Atharok, the Fcitx5 for Android contributors, Andrew Gunnerson,
+> pengstem).
 
 ## What this is
 
@@ -45,6 +46,7 @@ code.
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `e8ac17f` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 17 | `0.1.3-patchwork` (11207, arm64-v8a) |
+| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `74b1dea` | 4 | `3.29-patchwork` (25604800, arm64-v8a) |
 | BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 47 | `0.8.3.47` — upstream `0.8.3` + 47 patches (linux/windows x86, Arch package; Release + feed) |
 | BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 47 | `0.8.3-patchwork` (80347 — upstream 803 × 100 + 47 patches) |
 | DataArk | *in-tree* — source at [`dataark/`](dataark/) (no upstream; GPL-3.0, icon from [Android-DataBackup](https://github.com/XayahSuSuSu/Android-DataBackup)) | — | — | `1.0.0` — full source committed, not a patch queue; CI is dormant (see below) |
@@ -62,7 +64,7 @@ gating — Dhizuku is APK-only, and external `Android/data` requires root. See
 `if: false` job guard): nothing runs it automatically or manually until the
 triggers are consciously re-enabled.
 
-The four Android apps are published in F-Droid. **The BaiduNetGo desktop
+The five Android apps are published in F-Droid. **The BaiduNetGo desktop
 program is not**: it is a
 Go/MyGo desktop program, built on its own 10-day schedule. Its installers —
 `.deb`, `.tar.gz`, an Arch Linux `.pkg.tar.zst` (`sudo pacman -U`) and the
@@ -124,6 +126,29 @@ and typing statistics survive future updates. Only `arm64-v8a` is published (ups
 and no universal APK), and the APK is
 about 52 MB.
 
+**BasicSync** — Syncthing on Android, wrapped in a small Kotlin/Compose app
+that only decides *when* Syncthing runs. The queue adds four patches on top of
+the 3.29 release:
+
+* the app now **opens on the sync page** — Syncthing's web UI is what the app is
+  for, so it is no longer two taps deep in a settings list — and a **navigation
+  drawer** (modal on phones, permanent on tablets and TVs) holds the pages that
+  are actually used: sync, sync conflicts (with a badge), settings, network
+  conditions and the sync schedule, plus the app version and the live Syncthing
+  run state. The drawer's `WebView` is owned by the activity, so the web UI keeps
+  its DOM state instead of reloading when switching pages;
+* a **conflict management page**: every sync conflict shows its folder, its
+  creation time and three actions — *Use conflict version* (replace the original
+  with the conflict copy), *Keep original* (delete the conflict copy) and *Open
+  folder* — behind confirmations, with per-item progress and readable errors.
+  This works for direct-storage folders and for SAF folders, both resolved
+  through the same document URIs Syncthing already reports;
+* the Gradle build honours `PATCHWORK_VERSION_CODE`, `PATCHWORK_VERSION_NAME` and
+  `PATCHWORK_ABI`, which the overlay needs because upstream derives its
+  versionCode from `git describe` (a 5-bit commit-count field a long-lived queue
+  would overflow) and would otherwise build the Go/Syncthing runtime for all
+  four ABIs. All three variables are unset in upstream builds.
+
 **BaiduNetGo (desktop, not F-Droid)** — the community-fixed build of pengstem's
 pure-Go Baidu Netdisk client: a duplicate finder, an in-app file clipboard with
 undo, Finder-style marquee selection and drag-to-move, window/font adaptation,
@@ -165,7 +190,10 @@ Both Android apps with prebuilt native dependencies (RecurringExpenseTracker and
 ScreenTime) are compiled **ARM only**: `KEEP_ABIS="arm64-v8a armeabi-v7a"`
 in their `app.conf` makes `build-app.sh` strip `lib/x86/` and `lib/x86_64/` after
 Gradle, then realign to 16 KB pages and re-sign the APK (v2/v3). Fcitx5's
-`arm64-v8a` build is unchanged.
+`arm64-v8a` build is unchanged. BasicSync also ships `arm64-v8a`
+only, but there the filter is applied *before* the build: the queue's version
+patch narrows the ABI splits to `PATCHWORK_ABI`, so the embedded Go/Syncthing
+runtime is compiled once instead of four times.
 
 ## F-Droid repository
 
@@ -312,6 +340,7 @@ every downstream commit bumps `versionCode` even when upstream did not change.
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 7 | `11207` / `"0.1.3-patchwork"` |
+| BasicSync | `256048` / `"3.29"` | 1 | `25604800` / `"3.29-patchwork"` |
 
 For fcitx5 the upstream code is itself ABI-dependent
 (`baseVersionCode × 10 + ABI id`, where arm64-v8a is 2), so the full formula is:
@@ -328,6 +357,24 @@ the optional `PATCHWORK_REVISION` environment variable there, and
 code is returned unchanged. Because the per-ABI order is preserved
 (`111xx < 112xx < 113xx`), publishing `armeabi-v7a` later would not conflict
 with the arm64 build.
+
+**BasicSync** is different again: upstream computes versionCode from
+`git describe` as `major << 16 | minor << 11 | commit-count << 3 | abi`, so a
+downstream queue would eat into a 5-bit counter and, at 32 commits past the last
+tag, wrap into the next release's number. `build-app.sh`'s
+`VERSION_STYLE=pinned` branch therefore reads `v<major>.<minor>-<count>-g<sha>`
+from the applied worktree, rebuilds the upstream part of the code, and pins the
+result through the environment:
+
+```
+versionCode = (major << 16 | minor << 11 | count << 3) × 100 + PATCHWORK_REVISION
+versionName = "<major>.<minor>-patchwork"
+```
+
+A single ABI is built per invocation (`BUILD_ABI=arm64-v8a`), so no ABI
+digit is added and each published APK carries the architecture it was built for.
+The patch also narrows the ABI splits, which keeps the embedded Go/Syncthing
+runtime to one architecture.
 
 **BaiduNetGo (Android)** follows the same formula, with the queue's patch count
 as the revision (there is no `apps/<app>/` directory to count commits in):
@@ -353,7 +400,8 @@ is unchanged.
 ├── apps/
 │   ├── expenses/{app.conf,patches/}     # 0001..0018, KEEP_ABIS=ARM
 │   ├── screentime/{app.conf,patches/}   # 0001..0011, KEEP_ABIS=ARM
-│   └── fcitx5/{app.conf,patches/}       # 0001..0010
+│   ├── fcitx5/{app.conf,patches/}       # 0001..0017
+│   └── basicsync/{app.conf,patches/}    # 0001..0004, VERSION_STYLE=pinned
 ├── desktop/
 │   ├── baidunetgo/{app.conf,patches/}   # 0001..0041, desktop + Android client
 │   └── .build-state.json                # last upstream commit built
@@ -391,6 +439,17 @@ The desktop app needs Go (the version in the upstream `go.mod`), `zip` and, for
 the Windows installers, NSIS (`makensis`). MyGo needs no cgo, so `linux/amd64`
 and `windows/amd64` are both built on any machine:
 
+BasicSync needs the most unusual toolchain of the Gradle-only apps: Android SDK
+packages `build-tools;37.0.0`, `platforms;android-37.0` and
+`ndk;30.0.16248370` (the NDK version `app/build.gradle.kts` pins), a Go
+toolchain on `PATH`, and the two pinned submodules (`external/go` and
+`external/syncthing`, ~200 MB) because the app builds Syncthing as a Go library
+with `gomobile`. The first build compiles the Go toolchain and gomobile itself and
+takes 8–12 minutes; later builds reuse them. `apps/basicsync/app.conf` sets
+`SUBMODULES=recursive`, so `build-app.sh` fetches the submodules right before
+Gradle, and `--no-build` still stops before that. `GOCACHE` must point inside the
+repository (or any writable directory) when `$HOME` is not writable.
+
 Fcitx5 for Android needs more: Android SDK packages `platforms;android-36`,
 `build-tools;36.1.0`, `cmake;3.31.6`, `ndk;28.0.13004108`, the host packages
 `extra-cmake-modules` and `gettext` (`msgfmt`), 19 git submodules (~450 MB, one
@@ -402,7 +461,7 @@ machine (about 3 minutes on a warm 16-core cache). `build-app.sh` runs
 before that and does not download them.
 
 When unset, `ANDROID_HOME`, `ANDROID_USER_HOME` and `GRADLE_USER_HOME` default
-to `../.toolchain/`:
+to `<repo>/.toolchain/`:
 
 ```bash
 export ANDROID_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/android-sdk
@@ -413,7 +472,7 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-app.sh expenses              # full build into dist/
 ./scripts/build-app.sh screentime --out dist
 ./scripts/build-app.sh fcitx5 --no-build     # fetch + patches, no submodules (11203)
-./scripts/build-app.sh fcitx5 --out ../.toolchain/tmp/fcitx5-dist
+./scripts/build-app.sh fcitx5 --out .toolchain/tmp/fcitx5-dist
 ./scripts/check-upstream.sh                  # JSON status; --all/--apps select apps
 ./scripts/publish-fdroid.sh --apk-dir dist   # rebuild fdroid/repo + index
 ./scripts/sync-patches.sh --check            # compare queues with the clones
@@ -464,7 +523,7 @@ folded into `main` (upstream plus the community commits), exported relative to
 
 ```bash
 # 1. Develop on a feature branch in the app clone
-cd ../ScreenTime
+cd apps/ScreenTime
 git switch -c feat/my-change main
 # ... edit, build, commit ...
 
@@ -474,7 +533,7 @@ git format-patch main..feat/my-change \
   -o .patchwork/patches --no-signature --zero-commit --no-numbered
 
 # 3. Sync into this repository, commit and push; CI rebuilds
-cd ../Software-Repo
+cd ../..
 ./scripts/sync-patches.sh
 git add apps/screentime/patches
 git commit -m "Update ScreenTime patch queue"
@@ -485,13 +544,13 @@ BaiduNetGo's queue is exported from its authoring clone's `main`, which is the
 upstream branch plus the community commits (no `.patchwork/` directory):
 
 ```bash
-cd ../baidunetgo
+cd desktop/baidunetgo-clone
 git fetch origin
-rm -f ../Software-Repo/desktop/baidunetgo/patches/*.patch
+rm -f ../baidunetgo/patches/*.patch
 git format-patch --no-signature --zero-commit --no-numbered \
-  origin/main..main -o ../Software-Repo/desktop/baidunetgo/patches
+  origin/main..main -o ../baidunetgo/patches
 
-cd ../Software-Repo
+cd ..
 git add desktop/baidunetgo/patches
 git commit -m "Update the BaiduNetGo patch queue"
 git push origin main
@@ -513,7 +572,7 @@ out of sync) and is suitable for CI or a local pre-commit check. For expenses
 and screentime, if the clone is not on the `patchwork` branch, the script reads
 the queue from that branch via `git archive` and never modifies the clone. For
 fcitx5 it exports from `feat/typing-heatmap`, and if the clone is unavailable
-it falls back to the staged queue in `../.toolchain/tmp/fcitx5-patches`
+it falls back to the staged queue in `.toolchain/tmp/fcitx5-patches`
 (override with `FCITX5_PATCHES_DIR`; `FCITX5_BRANCH` and `FCITX5_BASE` select
 the branch and base).
 

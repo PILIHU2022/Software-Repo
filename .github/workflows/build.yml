@@ -286,6 +286,30 @@ jobs:
             "cmake;3.31.6" \
             "ndk;28.0.13004108"
 
+      # BasicSync compiles the Go/Syncthing bridge with gomobile for the NDK
+      # version its build.gradle.kts pins (30.0.16248370), so the hosted
+      # runner's preinstalled NDKs are not enough. The Go toolchain is required
+      # to bootstrap external/go and to install gobind/gomobile (upstream CI
+      # does the same).
+      - name: Install BasicSync SDK and Go dependencies
+        if: matrix.app == 'basicsync'
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          if ! sdkmanager --install "ndk;30.0.16248370"; then
+            sdkmanager --channel=3 --install "ndk;30.0.16248370"
+          fi
+          df -h /
+
+      - name: Set up Go
+        if: matrix.app == 'basicsync'
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          # stbridge/go.mod lives in the app checkout that build-app.sh creates,
+          # not in this repository, so setup-go cannot read a version file.
+          cache: false
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:

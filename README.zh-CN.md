@@ -6,8 +6,8 @@
 
 # Software-Repo —— Patchwork 构建叠加仓库
 
-这是一个面向四个 Android 应用——**ScreenTime**、**RecurringExpenseTracker**、
-**Fcitx5 for Android** 与 **BaiduNetGo Android 客户端**——一个桌面应用
+这是一个面向五个 Android 应用——**ScreenTime**、**RecurringExpenseTracker**、
+**Fcitx5 for Android**、**BasicSync** 与 **BaiduNetGo Android 客户端**——一个桌面应用
 **BaiduNetGo**，以及一个内置源码应用
 **[DataArk](dataark/README.md)** 的个人构建仓库。前五个走补丁队列；DataArk 的
 完整源码直接提交在 [`dataark/`](dataark/)（原创 Kotlin/Compose 应用数据备份工具，
@@ -21,6 +21,7 @@ APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包，
 GitHub Release 并附一份更新 feed。
 
 > 个人项目，与上游作者（Dennis Bauer、Atharok、Fcitx5 for Android 贡献者、
+> Andrew Gunnerson、
 > pengstem）无关，也未获其背书。
 
 ## 这是什么
@@ -48,10 +49,11 @@ issue，而不是继续发布过期代码。
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `e8ac17f` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 17 | `0.1.3-patchwork`（11207，arm64-v8a） |
+| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `74b1dea` | 4 | `3.29-patchwork`（25604800，arm64-v8a） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 47 | `0.8.3.47` —— 上游 `0.8.3` + 47 个补丁（linux/windows x86、Arch 包；Release + feed） |
 | BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 47 | `0.8.3-patchwork`（80347 —— 上游 803 × 100 + 47 个补丁） |
 
-四个 Android 应用发布在 F-Droid。**BaiduNetGo 桌面版不发布**：它是 Go/MyGo 桌面程序，
+五个 Android 应用发布在 F-Droid。**BaiduNetGo 桌面版不发布**：它是 Go/MyGo 桌面程序，
 按自己的 10 天周期构建：安装包（`.deb`、`.tar.gz`、Arch Linux 的
 `.pkg.tar.zst`（用 `sudo pacman -U` 安装）、Windows 安装版/便携版 `.zip`）发布成
 `baidunetgo-desktop-<version>-<short_sha>` 的 Release，同时保留
@@ -88,6 +90,23 @@ Rime 配置」，也可用
 另一个补丁让 `build-logic` 读取下游的 `PATCHWORK_REVISION` 环境变量；该变量未
 设置时行为与上游完全一致，官方/F-Droid 构建不受影响。只发布 `arm64-v8a`
 （上游按 ABI 拆包、没有 universal APK），APK 约 52 MB。
+
+**BasicSync** —— 在 Android 上运行 Syncthing 的小型 Kotlin/Compose 外壳，它本身
+只决定 Syncthing *什么时候*运行。补丁队列在 3.29 之上加四个补丁：
+
+* 应用现在**直接打开同步页面**——Syncthing 的 Web 界面正是这个应用存在的意义，
+  不再藏在设置列表第二层；同时新增**侧边栏**（手机上是抽屉，平板/电视上是常驻
+  侧栏），放常用页面：同步、同步冲突（带数量角标）、设置、网络条件、同步计划，
+  顶部显示应用版本与 Syncthing 实时运行状态。侧栏的 `WebView` 由 Activity 持有，
+  切换页面时 Web 界面保留 DOM 状态而不会重新加载；
+* **冲突管理页面**：每个同步冲突都显示所在目录、创建时间和三个操作——*使用冲突版本*
+  （用冲突副本替换原文件）、*保留原文件*（删除冲突副本）、*打开所在目录*——破坏性
+  操作都有确认框，逐条显示进度，并给出可读的错误信息。直接存储与 SAF 目录都支持，
+  两者都复用 Syncthing 已经上报的 document URI；
+* Gradle 构建读取 `PATCHWORK_VERSION_CODE`、`PATCHWORK_VERSION_NAME` 与
+  `PATCHWORK_ABI`：上游的 versionCode 由 `git describe` 推导（提交数字段只有 5 位，
+  长期维护的队列会溢出），而且默认要为四种 ABI 各编一遍 Go/Syncthing 运行时。
+  三个变量在上游构建里都不存在，因此不影响上游行为。
 
 **BaiduNetGo（桌面，不进 F-Droid）** —— 基于 pengstem 的纯 Go 百度网盘客户端做的
 社区修复版：查重、应用内文件剪贴板与撤销、Finder 风格的框选与拖动移动、窗口/字体
@@ -249,6 +268,7 @@ versionName = "<上游 versionName>-patchwork"
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112`（arm64-v8a）/ `"0.1.3"` | 7 | `11207` / `"0.1.3-patchwork"` |
+| BasicSync | `256048` / `"3.29"` | 1 | `25604800` / `"3.29-patchwork"` |
 
 fcitx5 的上游 versionCode 本身就按 ABI 区分（`baseVersionCode × 10 + ABI id`，
 arm64-v8a 的 id 为 2），所以完整公式是：
@@ -263,6 +283,21 @@ build-logic 的 `Versions.calculateVersionCode()` 计算。因此补丁 `0003` �
 `VERSION_STYLE=build-logic` 导出它和 `BUILD_ABI`、`BUILD_VERSION_NAME`，不再改写
 文件。变量未设置时返回上游原值。由于保留了 per-ABI 顺序
 （`111xx < 112xx < 113xx`），以后补发 `armeabi-v7a` 也不会与 arm64 版本冲突。
+
+**BasicSync** 又是另一种情况：上游用 `git describe` 计算 versionCode，形式为
+`major << 16 | minor << 11 | 提交数 << 3 | abi`，下游队列会吃掉只有 5 位的提交数
+字段，超过 31 个提交就会撞进下一个版本的号段。因此 `build-app.sh` 的
+`VERSION_STYLE=pinned` 分支从应用后的工作区里读出 `v<major>.<minor>-<count>-g<sha>`，
+重建上游那部分编号，并通过环境变量把结果钉死：
+
+```
+versionCode = (major << 16 | minor << 11 | count << 3) × 100 + PATCHWORK_REVISION
+versionName = "<major>.<minor>-patchwork"
+```
+
+每次构建只编一个 ABI（`BUILD_ABI=arm64-v8a`），所以不再叠加 ABI 位，
+每个 APK 就是它自己架构的版本；补丁同时收窄 ABI 拆分，让内嵌的 Go/Syncthing
+运行时只编一次。
 
 **BaiduNetGo（Android）** 采用同一公式，revision 取补丁队列长度（没有
 `apps/<app>/` 目录可数提交）：
@@ -287,7 +322,8 @@ versionName = "<上游 versionName>-patchwork"   （0.8.3 -> "0.8.3-patchwork"�
 ├── apps/
 │   ├── expenses/{app.conf,patches/}     # 0001..0018，KEEP_ABIS=ARM
 │   ├── screentime/{app.conf,patches/}   # 0001..0011，KEEP_ABIS=ARM
-│   └── fcitx5/{app.conf,patches/}       # 0001..0003
+│   ├── fcitx5/{app.conf,patches/}       # 0001..0017
+│   └── basicsync/{app.conf,patches/}    # 0001..0004，VERSION_STYLE=pinned
 ├── desktop/
 │   ├── baidunetgo/{app.conf,patches/}   # 0001..0041，桌面版 + Android 客户端
 │   └── .build-state.json                # 上次成功构建的上游提交
@@ -324,6 +360,15 @@ platform 与 build-tools），以及用于剥离非 ARM ABI 的 `zip`。它们�
 NSIS（`makensis`）。MyGo 不需要 cgo，所以 `linux/amd64` 与 `windows/amd64` 都能在
 任意机器上构建。
 
+BasicSync 在纯 Gradle 应用里工具链最特殊：Android SDK 包
+`build-tools;37.0.0`、`platforms;android-37.0`、`ndk;30.0.16248370`（
+`app/build.gradle.kts` 钉住的 NDK 版本），`PATH` 中要有 Go 工具链，还要
+`external/go` 与 `external/syncthing` 两个钉住的子模块（约 200 MB），因为应用用
+`gomobile` 把 Syncthing 当成 Go 库编译进去。首次构建要现编 Go 工具链和 gomobile
+本身，约 8–12 分钟，之后复用缓存。`apps/basicsync/app.conf` 设置了
+`SUBMODULES=recursive`，因此 `build-app.sh` 在 Gradle 之前拉子模块；`--no-build`
+会在此之前停下。`$HOME` 不可写时要把 `GOCACHE` 指到仓库内（或任何可写目录）。
+
 Fcitx5 for Android 需要更多：Android SDK 包 `platforms;android-36`、
 `build-tools;36.1.0`、`cmake;3.31.6`、`ndk;28.0.13004108`，宿主机包
 `extra-cmake-modules` 与 `gettext`（`msgfmt`），19 个 git 子模块（约 450 MB，
@@ -334,7 +379,7 @@ Gradle 缓存、检出和构建产物。4 vCPU 机器预计 15–30 分钟（16 
 不会下载子模块。
 
 未设置的 `ANDROID_HOME`、`ANDROID_USER_HOME`、`GRADLE_USER_HOME` 默认指向
-`../.toolchain/`：
+`<repo>/.toolchain/`：
 
 ```bash
 export ANDROID_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/android-sdk
@@ -345,7 +390,7 @@ export GRADLE_USER_HOME=/home/Spark/Projects/GitHub_APPS/.toolchain/gradle-home
 ./scripts/build-app.sh expenses              # 完整构建，输出到 dist/
 ./scripts/build-app.sh screentime --out dist
 ./scripts/build-app.sh fcitx5 --no-build     # 拉上游 + 补丁，不下载子模块（11202）
-./scripts/build-app.sh fcitx5 --out ../.toolchain/tmp/fcitx5-dist
+./scripts/build-app.sh fcitx5 --out .toolchain/tmp/fcitx5-dist
 ./scripts/check-upstream.sh                  # 输出 JSON；--all/--apps 选择 app
 ./scripts/publish-fdroid.sh --apk-dir dist   # 重建 fdroid/repo 与索引
 ./scripts/sync-patches.sh --check            # 对比作者仓库与补丁队列
@@ -392,7 +437,7 @@ screentime 的队列放在 `.patchwork/patches/`（或 `patchwork` 分支）；f
 
 ```bash
 # 1. 在 app clone 中从上游 main 建 feature 分支并开发
-cd ../ScreenTime
+cd apps/ScreenTime
 git switch -c feat/my-change main
 # ... 修改、构建、提交 ...
 
@@ -402,7 +447,7 @@ git format-patch main..feat/my-change \
   -o .patchwork/patches --no-signature --zero-commit --no-numbered
 
 # 3. 同步进本仓库，提交并推送；CI 会自动重建
-cd ../Software-Repo
+cd ../..
 ./scripts/sync-patches.sh
 git add apps/screentime/patches
 git commit -m "Update ScreenTime patch queue"
@@ -412,13 +457,13 @@ git push origin main
 BaiduNetGo 的队列从作者 clone 的 `main` 导出（没有 `.patchwork/` 目录）：
 
 ```bash
-cd ../baidunetgo
+cd desktop/baidunetgo-clone
 git fetch origin
-rm -f ../Software-Repo/desktop/baidunetgo/patches/*.patch
+rm -f ../baidunetgo/patches/*.patch
 git format-patch --no-signature --zero-commit --no-numbered \
-  origin/main..main -o ../Software-Repo/desktop/baidunetgo/patches
+  origin/main..main -o ../baidunetgo/patches
 
-cd ../Software-Repo
+cd ..
 git add desktop/baidunetgo/patches
 git commit -m "Update the BaiduNetGo patch queue"
 git push origin main
@@ -437,7 +482,7 @@ CRLF 格式的邮件处理），因此 `build-baidunetgo.sh` 用
 本地提交前检查。对 expenses / screentime，如果 clone 不在 `patchwork` 分支，脚本
 会通过 `git archive` 从该分支读取队列，不会修改 clone；对 fcitx5，脚本从
 `feat/rime-sync-manager` 导出，clone 不可用时回退到
-`../.toolchain/tmp/fcitx5-patches` 里的暂存队列（可用 `FCITX5_PATCHES_DIR` 覆盖；
+`.toolchain/tmp/fcitx5-patches` 里的暂存队列（可用 `FCITX5_PATCHES_DIR` 覆盖；
 `FCITX5_BRANCH`、`FCITX5_BASE` 选择分支与基线）。
 
 补丁必须保持“从上游 `main` 导出”的形式，并且仍能用 `git am -3` 应用；CI 检出时
