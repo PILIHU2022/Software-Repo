@@ -50,8 +50,8 @@ issue，而不是继续发布过期代码。
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 17 | `0.1.3-patchwork`（11207，arm64-v8a） |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `74b1dea` | 4 | `3.29-patchwork`（25604800，arm64-v8a） |
-| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 47 | `0.8.3.47` —— 上游 `0.8.3` + 47 个补丁（linux/windows x86、Arch 包；Release + feed） |
-| BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 47 | `0.8.3-patchwork`（80347 —— 上游 803 × 100 + 47 个补丁） |
+| BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 48 | `0.8.3.48` —— 上游 `0.8.3` + 48 个补丁（linux/windows x86、Arch 包；Release + feed） |
+| BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 48 | `0.8.3-patchwork`（80348 —— 上游 803 × 100 + 48 个补丁） |
 
 五个 Android 应用发布在 F-Droid。**BaiduNetGo 桌面版不发布**：它是 Go/MyGo 桌面程序，
 按自己的 10 天周期构建：安装包（`.deb`、`.tar.gz`、Arch Linux 的
@@ -303,14 +303,14 @@ versionName = "<major>.<minor>-patchwork"
 `apps/<app>/` 目录可数提交）：
 
 ```
-versionCode = 803 × 100 + 补丁数        （47 个补丁 -> 80347）
+versionCode = 803 × 100 + 补丁数        （48 个补丁 -> 80348）
 versionName = "<上游 versionName>-patchwork"   （0.8.3 -> "0.8.3-patchwork"）
 ```
 
 `scripts/build-baidunetgo-android.sh` 在构建前改写 prepared 树中的
 `android/app/build.gradle.kts`（与 `build-app.sh` 相同的文件改写方式），补丁数
 超过 99 时同样直接报错。桌面版自己的版本策略（`0.8.3` + `.<补丁数>` =
-`0.8.3.47`）不变。
+`0.8.3.48`）不变。
 
 ## 仓库结构
 

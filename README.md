@@ -47,8 +47,8 @@ code.
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 17 | `0.1.3-patchwork` (11207, arm64-v8a) |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `74b1dea` | 4 | `3.29-patchwork` (25604800, arm64-v8a) |
-| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 47 | `0.8.3.47` — upstream `0.8.3` + 47 patches (linux/windows x86, Arch package; Release + feed) |
-| BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 47 | `0.8.3-patchwork` (80347 — upstream 803 × 100 + 47 patches) |
+| BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 48 | `0.8.3.48` — upstream `0.8.3` + 48 patches (linux/windows x86, Arch package; Release + feed) |
+| BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 48 | `0.8.3-patchwork` (80348 — upstream 803 × 100 + 48 patches) |
 | DataArk | *in-tree* — source at [`dataark/`](dataark/) (no upstream; GPL-3.0, icon from [Android-DataBackup](https://github.com/XayahSuSuSu/Android-DataBackup)) | — | — | `1.0.0` — full source committed, not a patch queue; CI is dormant (see below) |
 
 **DataArk** — the one app whose full source lives in this tree instead of a
@@ -380,14 +380,14 @@ runtime to one architecture.
 as the revision (there is no `apps/<app>/` directory to count commits in):
 
 ```
-versionCode = 803 × 100 + patch count        (47 patches -> 80347)
+versionCode = 803 × 100 + patch count        (48 patches -> 80348)
 versionName = "<upstream versionName>-patchwork"   (0.8.3 -> "0.8.3-patchwork")
 ```
 
 `scripts/build-baidunetgo-android.sh` rewrites `android/app/build.gradle.kts`
 in the prepared tree before the Gradle build, the same file-rewrite approach
 `build-app.sh` uses, and rejects patch counts above 99 like every other app
-here. The desktop build's own scheme (`0.8.3` + `.<patch count>` = `0.8.3.47`)
+here. The desktop build's own scheme (`0.8.3` + `.<patch count>` = `0.8.3.48`)
 is unchanged.
 
 ## Repository layout

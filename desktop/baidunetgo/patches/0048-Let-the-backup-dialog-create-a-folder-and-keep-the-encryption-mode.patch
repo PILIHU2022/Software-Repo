@@ -1,0 +1,549 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 15:39:57 +0800
+Subject: [PATCH] =?UTF-8?q?Let=20=E5=A4=87=E4=BB=BD=E5=88=B0=20create=20a?=
+ =?UTF-8?q?=20folder=20from=20its=20chooser=20and=20let=20=E5=8A=A0?=
+ =?UTF-8?q?=E5=AF=86=E6=96=B9=E5=BC=8F=20be=20chosen=20while=20=E5=8A=A0?=
+ =?UTF-8?q?=E5=AF=86=E5=A4=87=E4=BB=BD=20is=20off,=20so=20a=20key-only=20c?=
+ =?UTF-8?q?hoice=20survives=20turning=20the=20switch=20on=20and=20never=20?=
+ =?UTF-8?q?asks=20for=20a=20passphrase=20#minor?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ CHANGELOG.md       |   2 +
+ app/backup.go      |  12 ++-
+ app/backup_page.go | 196 ++++++++++++++++++++++++++++++++++++++++++---
+ app/backup_test.go | 128 +++++++++++++++++++++++++++++
+ app/settings.go    |  28 ++++---
+ docs/BACKUP.md     |   4 +-
+ 6 files changed, 345 insertions(+), 25 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8a5fcc7..639ed2a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,8 @@
+ 
+ ### 新增
+ 
++- 桌面端「备份到」的选择弹窗支持新建文件夹：在当前网盘目录下输入名字即可建好并直接进入，目标目录还不存在时会先补建父目录；建好的文件夹可以立即选为备份目标。
++- 桌面端加密方式的配置不再依赖「加密备份」开关：开关未打开时也能先选好「仅密码 / 收件人密钥 / 密码+密钥」，打开开关时沿用这个选择并只询问该模式缺少的口令或收件人；在「收件人密钥」模式下不再询问加密口令，也不会把模式改回「仅密码」。
+ - 安卓端 0.8.4：文件页不再用缩略图预览。图片会把原图下载到应用缓存，再通过 FileProvider 交给系统看图应用（`用其他应用打开` 选择器；没有可用看图应用时给出中文提示）；视频改为应用内 Media3 ExoPlayer 播放，画质菜单按账号与片源提供 1080 / 720 / 480 / 360（不提供「原画」），播放中切换画质会保持进度与暂停状态，失败时可重试。该版本不改动任何已保存数据的格式，覆盖安装保留登录、设置、备份、查重缓存与传输记录；`:core` 新增视频画质/播放列表与有界 Range 下载接口，`versionCode` 804。
+ - 桌面端新增「挂载」页（Linux）：把一个网盘文件夹用纯 Go 的 FUSE（`go-fuse/v2`，无 cgo）挂到本机的空文件夹上，文件管理器、播放器、编辑器可以直接浏览、打开、复制网盘文件，不必先下载；只读挂载（`-o ro`，文件 0444、目录 0555），列表缓存 3 秒，读取走 `internal/remote` 的 512 KB 有界 Range 并自动刷新过期直链。挂载点必须为空；启动时检测 `/dev/fuse` 与 `fusermount3`/`fusermount`，残留挂载会先卸载，注销与退出时同步卸载，可配置「启动时自动挂载」。macOS / Windows 仍能编译，页面显示「仅 Linux 支持挂载」。核心在 `internal/cloudfs`，页面与生命周期在 `app/mount.go` / `app/mount_page.go`。
+ - 图片与视频预览改为轻量外部播放器：应用内不再画图片与视频，图片交给 **imv**（下载成 0600 临时文件，退出即删），视频与部分音频交给 **mpv**；文本 / 代码 / Markdown / PDF / MP3·OGG·WAV 仍在应用内看与听。找不到 imv / mpv 时，或右键「打开方式…」，可从检测到的应用里选一个，或用系统文件选择器指定，并按图片 / 视频分别记住（设置「播放与预览」里也能改）。
+diff --git a/app/backup.go b/app/backup.go
+index 360490e..2206425 100644
+--- a/app/backup.go
++++ b/app/backup.go
+@@ -211,9 +211,15 @@ type backupState struct {
+ 	genPublicOpen bool
+ 
+ 	// destOpen and destPicker are the 备份到 dialog: the netdisk folder
+-	// chooser, reused from the move and copy dialogs.
+-	destOpen   bool
+-	destPicker picker
++	// chooser, reused from the move and copy dialogs. destNewOpen, destNewName,
++	// destNewErr and destNewBusy are its 新建文件夹 dialog, which names and
++	// makes a folder in the folder shown.
++	destOpen    bool
++	destPicker  picker
++	destNewOpen bool
++	destNewName string
++	destNewErr  string
++	destNewBusy bool
+ 
+ 	// detailsOpen is the 查看详情 dialog of the last run's errors.
+ 	detailsOpen bool
+diff --git a/app/backup_page.go b/app/backup_page.go
+index c1e43c5..9a8c2e0 100644
+--- a/app/backup_page.go
++++ b/app/backup_page.go
+@@ -1,6 +1,7 @@
+ package app
+ 
+ import (
++	"context"
+ 	"os"
+ 	"path"
+ 	"path/filepath"
+@@ -10,6 +11,7 @@ import (
+ 	"github.com/egoist/mygo/ui"
+ 
+ 	"github.com/pengstem/baidunetgo/internal/backup"
++	"github.com/pengstem/baidunetgo/internal/baidu"
+ 	"github.com/pengstem/baidunetgo/internal/pgp"
+ )
+ 
+@@ -47,7 +49,7 @@ func (a *App) backupSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 		a.backupFolderRows(c, t, p, s, b)
+ 		a.backupEncryptRow(c, t, p, s, b)
+ 		a.backupEncryptModeRow(c, t, p, s, b)
+-		if mode := s.backupEncryptMode(); mode != backupModeKeys {
++		if mode := s.backupConfiguredEncryptMode(); mode != backupModeKeys {
+ 			a.backupPasswordRow(c, t, p, s, b)
+ 		}
+ 		a.backupRecipientsRow(c, t, p, s, b)
+@@ -118,7 +120,9 @@ func (a *App) backupFolderRows(c *ui.Context, t *ui.Theme, p *palette, s *settin
+ }
+ 
+ // backupEncryptRow is the 加密备份 switch, with the hint that encrypted files
+-// end in .gpg. Turning it on without a passphrase opens the dialog for one.
++// end in .gpg. Turning it on asks for what the mode already chosen needs: a
++// passphrase for 仅密码 / 密码+密钥, a recipient for 收件人密钥 / 密码+密钥 —
++// never a passphrase for 收件人密钥, whose mode the switch leaves untouched.
+ func (a *App) backupEncryptRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
+ 	enc := s.Backup.Encrypt
+ 	detail := "关闭，文件原样上传"
+@@ -131,21 +135,39 @@ func (a *App) backupEncryptRow(c *ui.Context, t *ui.Theme, p *palette, s *settin
+ 		}
+ 		s.Backup.Encrypt = enc
+ 		a.applyBackupSettings()
+-		if enc && !b.passSet {
+-			a.openBackupPassword()
++		if !enc {
++			return
++		}
++		// Ask for what the configured mode needs, not for a passphrase
++		// regardless: the mode chosen while the switch was off stays.
++		switch s.backupConfiguredEncryptMode() {
++		case backupModePassphrase:
++			if !b.passSet {
++				a.openBackupPassword()
++			}
++		case backupModeBoth:
++			if !b.passSet {
++				a.openBackupPassword()
++			} else if len(b.recipients) == 0 {
++				a.openBackupRecipients()
++			}
++		case backupModeKeys:
++			if len(b.recipients) == 0 {
++				a.openBackupRecipients()
++			}
+ 		}
+ 	})
+ }
+ 
+-// backupEncryptModeRow is the 加密方式 popup, shown while encryption is on:
+-// 仅密码 keeps the passphrase-only behavior, 收件人密钥 encrypts to the
+-// recipients' public keys only, and 密码+密钥 needs both. Switching into a
+-// key mode without any recipient, or into one that needs a passphrase with
+-// none set, opens the dialog for it.
++// backupEncryptModeRow is the 加密方式 popup: passphrase-only encryption,
++// encryption to the recipients' public keys, or both. It edits the
++// configured mode even while 加密备份 is off, so turning the switch on later
++// uses what was picked; prompts for missing pieces wait until encryption is
++// actually on.
+ func (a *App) backupEncryptModeRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
+ 	chosen := s.backupEncryptModeIndex()
+ 	detail := ""
+-	switch s.backupEncryptMode() {
++	switch s.backupConfiguredEncryptMode() {
+ 	case backupModeKeys:
+ 		detail = "加密给收件人的公钥，只有他们的私钥能解开"
+ 	case backupModeBoth:
+@@ -162,6 +184,9 @@ func (a *App) backupEncryptModeRow(c *ui.Context, t *ui.Theme, p *palette, s *se
+ 		mode := backupEncryptModes[chosen]
+ 		s.Backup.EncryptMode = mode
+ 		a.applyBackupSettings()
++		if !s.Backup.Encrypt {
++			return // configure now, ask for what is missing when it is on
++		}
+ 		switch mode {
+ 		case backupModeKeys, backupModeBoth:
+ 			if len(b.recipients) == 0 {
+@@ -177,7 +202,7 @@ func (a *App) backupEncryptModeRow(c *ui.Context, t *ui.Theme, p *palette, s *se
+ // backupRecipientsRow says how many recipient keys are set and opens the
+ // dialog that manages them; shown in the modes that use the recipients.
+ func (a *App) backupRecipientsRow(c *ui.Context, t *ui.Theme, p *palette, s *settings, b *backupState) {
+-	if mode := s.backupEncryptMode(); mode != backupModeKeys && mode != backupModeBoth {
++	if mode := s.backupConfiguredEncryptMode(); mode != backupModeKeys && mode != backupModeBoth {
+ 		return
+ 	}
+ 	detail := "未添加，收件人密钥加密需要至少一个"
+@@ -296,12 +321,19 @@ func (a *App) backupDialogs(c *ui.Context, t *ui.Theme, p *palette) {
+ 		ui.Modal(c, &b.destOpen, func() {
+ 			dialogTitle(c, t, "备份到", "网盘上保存备份的文件夹，不存在时会自动创建")
+ 			a.folderChooser(c, t, p, &b.destPicker, 260, nil)
+-			ui.Text(c, "当前："+b.destPicker.dir).FontSize(11).TextColor(t.TextMuted).SingleLine()
++			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
++				ui.Text(c, "当前："+b.destPicker.dir).FontSize(11).TextColor(t.TextMuted).Grow(1).SingleLine()
++				if pill(c, t, p, "folder-plus", "新建文件夹…", false).Clicked() {
++					a.openBackupDestNew()
++				}
++			})
+ 			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+ 				if pill(c, t, p, "", "取消", false).Clicked() {
++					b.destNewOpen = false
+ 					b.destOpen = false
+ 				}
+ 				if pill(c, t, p, "folder", "选择此文件夹", true).AutoFocus().Clicked() {
++					b.destNewOpen = false
+ 					b.destOpen = false
+ 					a.settings.Backup.Dest = b.destPicker.dir
+ 					a.applyBackupSettings()
+@@ -309,6 +341,33 @@ func (a *App) backupDialogs(c *ui.Context, t *ui.Theme, p *palette) {
+ 			})
+ 		})
+ 	}
++	if b.destNewOpen {
++		ui.Modal(c, &b.destNewOpen, func() {
++			dialogTitle(c, t, "新建文件夹", "在「"+dirLabel(b.destPicker.dir)+"」中新建一个文件夹")
++			ui.Column(c).Width(340).Gap(4).Children(func() {
++				ui.Text(c, "名称").FontSize(11).TextColor(t.TextMuted)
++				in := ui.TextInputBase(c.Key("backup-dest-new"), &b.destNewName).
++					Label("文件夹名称").Grow(1).AutoFocus().Disabled(b.destNewBusy)
++				if b.destNewErr != "" {
++					ui.Text(c, b.destNewErr).FontSize(11).TextColor(t.Danger).Transition(rowEnter)
++				}
++				if b.destNewBusy {
++					ui.Text(c, "正在新建…").FontSize(11).TextColor(t.TextMuted)
++				}
++				if in.Submitted() && !b.destNewBusy {
++					a.createBackupDestFolder()
++				}
++			})
++			ui.Row(c).Gap(8).Justify(ui.End).Margin(4, 0, 0).Children(func() {
++				if pill(c, t, p, "", "取消", false).Disabled(b.destNewBusy).Clicked() {
++					b.destNewOpen, b.destNewErr, b.destNewName = false, "", ""
++				}
++				if pill(c, t, p, "folder-plus", "新建", true).Disabled(b.destNewBusy).Clicked() {
++					a.createBackupDestFolder()
++				}
++			})
++		})
++	}
+ 	if b.pwdOpen {
+ 		a.backupPasswordDialog(c, t, p)
+ 	}
+@@ -707,6 +766,119 @@ func (a *App) openBackupDest() {
+ 	b.destOpen = true
+ }
+ 
++// openBackupDestNew opens the 新建文件夹 dialog of 备份到 on the folder shown.
++func (a *App) openBackupDestNew() {
++	b := &a.backup
++	b.destNewName, b.destNewErr, b.destNewBusy = "", "", false
++	b.destNewOpen = true
++}
++
++// createBackupDestFolder makes the folder named in 备份到's 新建文件夹 dialog
++// under the folder shown, then moves the chooser into it so the new folder
++// can be chosen at once. It makes a missing destination folder on the way,
++// as the backup engine itself does.
++func (a *App) createBackupDestFolder() {
++	b := &a.backup
++	if b.destNewBusy {
++		return
++	}
++	name := strings.TrimSpace(b.destNewName)
++	switch {
++	case name == "":
++		b.destNewErr = "请输入文件夹名称"
++		return
++	case name == "." || name == "..":
++		b.destNewErr = "名称不能是 . 或 .."
++		return
++	case strings.ContainsAny(name, badNameChars):
++		b.destNewErr = `名称不能包含 / \ : * ? " < > |`
++		return
++	}
++	parent := b.destPicker.dir
++	newDir := path.Join(parent, name)
++	if fs, ok := b.destPicker.folders[parent]; ok {
++		for _, f := range fs {
++			if f.IsDir && strings.EqualFold(f.Name, name) {
++				b.destNewErr = "这里已有名为「" + name + "」的文件夹"
++				return
++			}
++		}
++	}
++	s := a.sess
++	if s == nil {
++		b.destNewErr = "未登录，无法新建文件夹"
++		return
++	}
++	b.destNewBusy, b.destNewErr = true, ""
++	go func() {
++		ctx := context.Background()
++		err := a.ensureNetdiskFolder(ctx, s.client, parent)
++		if err == nil {
++			err = s.client.Mkdir(ctx, newDir)
++		}
++		a.update(func() {
++			b.destNewBusy = false
++			if err != nil {
++				b.destNewErr = "无法新建「" + name + "」：" + err.Error()
++				return
++			}
++			a.netdiskChanged()
++			a.noteBackupDestFolder(parent, name, newDir)
++			b.destPicker.dir = newDir
++			b.destNewOpen, b.destNewErr, b.destNewName = false, "", ""
++		})
++	}()
++}
++
++// ensureNetdiskFolder makes dir when it is missing, and its parents before
++// it, so that a new folder can be made under a destination the first backup
++// has not created yet.
++func (a *App) ensureNetdiskFolder(ctx context.Context, c *baidu.Client, dir string) error {
++	if dir == "" || dir == "/" {
++		return nil
++	}
++	if _, err := c.List(ctx, dir, baidu.Order{By: "name"}); err == nil {
++		return nil
++	}
++	parent := path.Dir(dir)
++	if parent == dir {
++		return nil
++	}
++	if err := a.ensureNetdiskFolder(ctx, c, parent); err != nil {
++		return err
++	}
++	return c.Mkdir(ctx, dir)
++}
++
++// noteBackupDestFolder puts a folder just made into the chooser's cache of
++// its parent, and reads the parent again where the browser shows it, so
++// going back up shows the folder without another round of the chooser's own
++// loading.
++func (a *App) noteBackupDestFolder(parent, name, dir string) {
++	pk := &a.backup.destPicker
++	var fs []baidu.File
++	if cached, ok := pk.folders[parent]; ok {
++		fs = cached
++	} else if l := a.listings[parent]; l != nil && l.loaded {
++		for _, f := range l.files {
++			if f.IsDir {
++				fs = append(fs, f)
++			}
++		}
++	}
++	if fs != nil {
++		if pk.folders == nil {
++			pk.folders = map[string][]baidu.File{}
++		}
++		fs = append(fs, baidu.File{Name: name, Path: dir, IsDir: true})
++		sortFiles(fs, baidu.Order{By: "name"})
++		pk.folders[parent] = fs
++	}
++	delete(pk.folders, dir)
++	delete(pk.loading, dir)
++	a.reload(parent)
++}
++
+ // saveBackupPassphrase keeps the 设置密码… dialog's passphrase: at least eight
+ // characters, typed twice alike, sealed into backup-key.enc and never into
+ // settings.json.
+diff --git a/app/backup_test.go b/app/backup_test.go
+index 485615c..06fd3ba 100644
+--- a/app/backup_test.go
++++ b/app/backup_test.go
+@@ -192,6 +192,134 @@ func TestBackupEncryptAsksForPassword(t *testing.T) {
+ 	}
+ }
+ 
++// TestBackupEncryptModeStaysWhenSwitchedOff changes 加密方式 while 加密备份 is
++// off and then turns the switch on: the mode chosen stays, and key-only
++// encryption asks for a recipient, never for a passphrase.
++func TestBackupEncryptModeStaysWhenSwitchedOff(t *testing.T) {
++	backupTestDirs(t)
++	a, tt, _ := signedIn(t)
++	a.settings.Backup.Encrypt = false
++	a.settings.Backup.EncryptMode = backupModePassphrase
++	a.applyBackupSettings()
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	scrollToShow(t, tt, "加密方式")
++	if err := tt.Click("仅密码"); err != nil {
++		t.Fatalf("%v; texts %q", err, tt.Texts())
++	}
++	tt.Advance(100 * time.Millisecond)
++	if err := tt.ChooseMenuItem("收件人密钥"); err != nil {
++		t.Fatalf("%v; menu %q", err, tt.Menu())
++	}
++	tt.Advance(200 * time.Millisecond)
++	if a.settings.Backup.EncryptMode != backupModeKeys {
++		t.Fatalf("mode after choosing while off = %q, want keys", a.settings.Backup.EncryptMode)
++	}
++	if a.backup.pwdOpen || a.backup.recOpen {
++		t.Fatal("changing the mode while encryption is off opened a dialog")
++	}
++	save(t, tt, "settings-backup-mode-off")
++	if !tt.HasText("收件人密钥") {
++		t.Errorf("the 加密方式 row does not show the chosen mode; texts %q", tt.Texts())
++	}
++	if got := a.settings.backupEncryptMode(); got != "" {
++		t.Errorf("backupEncryptMode with encryption off = %q, want none", got)
++	}
++	if got := a.settings.backupConfiguredEncryptMode(); got != backupModeKeys {
++		t.Errorf("configured mode = %q, want keys", got)
++	}
++
++	scrollToShow(t, tt, "加密备份")
++	sw, ok := tt.AccessByRole(ui.RoleSwitch, "加密备份")
++	if !ok {
++		t.Fatalf("no 加密备份 switch; texts %q", tt.Texts())
++	}
++	b := sw.Bounds
++	tt.ClickAt(b.X+b.W/2, b.Y+b.H/2)
++	tt.Advance(300 * time.Millisecond)
++	if !a.settings.Backup.Encrypt {
++		t.Fatal("turning 加密备份 on did not take")
++	}
++	if a.backup.pwdOpen {
++		t.Fatal("key-only encryption asked for a passphrase")
++	}
++	if a.settings.Backup.EncryptMode != backupModeKeys || a.settings.backupEncryptModeIndex() != 1 {
++		t.Fatalf("turning encryption on changed the mode: %q index %d",
++			a.settings.Backup.EncryptMode, a.settings.backupEncryptModeIndex())
++	}
++	if !a.backup.recOpen {
++		t.Error("key-only encryption with no recipient did not open the recipients dialog")
++	}
++}
++
++// TestBackupDestNewFolder makes a folder from 备份到's 新建文件夹 dialog,
++// checking that a bad name is refused and that the new folder can be chosen
++// as the destination.
++func TestBackupDestNewFolder(t *testing.T) {
++	backupTestDirs(t)
++	a, tt, srv := signedIn(t)
++	a.router.Push("/settings")
++	waitFor(t, tt, "备份到")
++	a.openBackupDest()
++	tt.Advance(100 * time.Millisecond)
++	waitFor(t, tt, "新建文件夹…")
++	if err := tt.Click("新建文件夹…"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(200 * time.Millisecond)
++	if on, _ := tt.TextInputActive(); !on {
++		t.Fatal("the 新建文件夹 dialog did not focus its name field")
++	}
++	save(t, tt, "settings-backup-dest-new")
++	// A name with a path separator is refused and the dialog stays open.
++	tt.Type("a/b")
++	tt.Advance(50 * time.Millisecond)
++	if err := tt.Click("新建"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if a.backup.destNewErr == "" || !a.backup.destNewOpen {
++		t.Fatalf("a bad folder name was accepted: err %q open %v",
++			a.backup.destNewErr, a.backup.destNewOpen)
++	}
++	field, ok := tt.AccessByRole(ui.RoleTextField, "文件夹名称")
++	if !ok {
++		t.Fatalf("no folder name field; texts %q", tt.Texts())
++	}
++	fb := field.Bounds
++	tt.ClickAt(fb.X+fb.W/2, fb.Y+fb.H/2)
++	tt.Advance(50 * time.Millisecond)
++	tt.Key(ui.Cmd, ui.KeyA)
++	tt.Type("自动备份")
++	tt.Advance(50 * time.Millisecond)
++	if err := tt.Click("新建"); err != nil {
++		t.Fatal(err)
++	}
++	waitUntil(t, tt, "the new backup folder", func() bool {
++		return srv.Exists("/备份/自动备份")
++	})
++	if got, want := a.backup.destPicker.dir, "/备份/自动备份"; got != want {
++		t.Errorf("chooser after creating the folder = %q, want %q", got, want)
++	}
++	if a.backup.destNewOpen {
++		t.Error("the 新建文件夹 dialog stayed open after making the folder")
++	}
++	save(t, tt, "settings-backup-dest-created")
++	if !tt.HasText("当前：/备份/自动备份") {
++		t.Errorf("the chooser does not show the new folder; texts %q", tt.Texts())
++	}
++	if err := tt.Click("选择此文件夹"); err != nil {
++		t.Fatal(err)
++	}
++	tt.Advance(100 * time.Millisecond)
++	if got, want := a.settings.backupDest(), "/备份/自动备份"; got != want {
++		t.Errorf("backup destination = %q, want %q", got, want)
++	}
++	if a.backup.destOpen {
++		t.Error("the 备份到 dialog stayed open after choosing")
++	}
++}
++
+ // TestBackupRun backs a tree up to the fake netdisk: the files arrive with
+ // their content, the state file is written, and a second run uploads nothing.
+ func TestBackupRun(t *testing.T) {
+diff --git a/app/settings.go b/app/settings.go
+index 3d41eda..0a58511 100644
+--- a/app/settings.go
++++ b/app/settings.go
+@@ -118,13 +118,11 @@ var backupEncryptModeLabels = []string{"仅密码", "收件人密钥", "密码+
+ // backupEncryptModes are the settings values behind those labels.
+ var backupEncryptModes = []string{backupModePassphrase, backupModeKeys, backupModeBoth}
+ 
+-// backupEncryptMode is the way encrypted runs encrypt now: "" for none.
+-// The Encrypt switch stays the master, so an older build's settings.json —
+-// encrypt without a mode — reads as passphrase-only.
+-func (s settings) backupEncryptMode() string {
+-	if !s.Backup.Encrypt {
+-		return ""
+-	}
++// backupConfiguredEncryptMode is the 加密方式 the user chose, whether or not
++// the 加密备份 switch is on. The 加密方式 row edits this, so a mode picked
++// while encryption is off survives turning it on; an older build's
++// settings.json — encrypt without a mode — reads as passphrase-only.
++func (s settings) backupConfiguredEncryptMode() string {
+ 	switch s.Backup.EncryptMode {
+ 	case backupModeKeys, backupModeBoth:
+ 		return s.Backup.EncryptMode
+@@ -133,10 +131,22 @@ func (s settings) backupEncryptMode() string {
+ 	}
+ }
+ 
++// backupEncryptMode is the way encrypted runs encrypt now: "" for none.
++// The Encrypt switch stays the master; the mode picked while it is off is
++// kept in the settings and read by backupConfiguredEncryptMode.
++func (s settings) backupEncryptMode() string {
++	if !s.Backup.Encrypt {
++		return ""
++	}
++	return s.backupConfiguredEncryptMode()
++}
++
+ // backupEncryptModeIndex is where the chosen mode sits among the popup's
+-// choices, 0 for 仅密码.
++// choices, 0 for 仅密码. It follows the configured mode even while
++// encryption is off, so the row shows the user's choice rather than
++// resetting it to passphrase-only.
+ func (s settings) backupEncryptModeIndex() int {
+-	switch s.backupEncryptMode() {
++	switch s.backupConfiguredEncryptMode() {
+ 	case backupModeKeys:
+ 		return 1
+ 	case backupModeBoth:
+diff --git a/docs/BACKUP.md b/docs/BACKUP.md
+index 10bd8e2..642700b 100644
+--- a/docs/BACKUP.md
++++ b/docs/BACKUP.md
+@@ -4,7 +4,7 @@
+ 
+ ## 目录布局
+ 
+-- 桌面：设置 →「备份」→「文件夹」里添加任意多个本机文件夹；每个文件夹镜像到 `<备份到>/<文件夹名>/<相对路径>`，`备份到` 默认 `/备份`。
++- 桌面：设置 →「备份」→「文件夹」里添加任意多个本机文件夹；每个文件夹镜像到 `<备份到>/<文件夹名>/<相对路径>`，`备份到` 默认 `/备份`。点「备份到」一行右侧的「选择…」可逐级进入网盘目录，弹窗底部的「新建文件夹…」能在当前目录下直接建一个新文件夹并进入它。
+ - Android：同一个「备份」页用系统的目录选择器（SAF）添加文件夹，布局与桌面一致，`备份到` 默认 `/备份`。
+ - 相册（仅 Android）：「相册备份」把选中相册里的照片与视频传到 `<备份到>/相册/<相册名>/<文件名>`。
+ 
+@@ -39,6 +39,8 @@
+ 
+ ## 加密
+ 
++「加密方式」可以直接先选，不必先打开「加密备份」：开关未打开时选好的模式会保留，打开开关时只按该模式询问缺少的东西（仅密码 / 密码+密钥要口令，收件人密钥 / 密码+密钥要收件人），不会把模式改回「仅密码」，也不会在收件人密钥模式里询问口令。
++
+ 打开「加密备份」（Android 为「加密相册」/「加密备份」）后，加密方式有三种（「加密方式」一行）：
+ 
+ - **仅密码**（默认）：每个文件用备份口令对称加密。

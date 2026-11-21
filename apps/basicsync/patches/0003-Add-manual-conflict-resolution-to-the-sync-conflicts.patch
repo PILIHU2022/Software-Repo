@@ -1,4 +1,4 @@
-From 60627e854bb6f160004873322a5dc6b9da8e3e95 Mon Sep 17 00:00:00 2001
+From 611352d6eba75f76a29fd1f566fb87d2fe23e62d Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 15:15:09 +0800
 Subject: [PATCH 3/4] Add manual conflict resolution to the sync conflicts page
@@ -17,18 +17,18 @@ manager and it was easy to leave the stale copy behind.
   and the three actions, asks for confirmation before destroying data, shows
   progress per item and an empty state instead of closing itself.
 ---
- .../basicsync/settings/ConflictsScreen.kt     | 500 ++++++++++++++++--
- .../basicsync/syncthing/ConflictResolver.kt   | 414 +++++++++++++++
+ .../basicsync/settings/ConflictsScreen.kt     | 507 ++++++++++++++++--
+ .../basicsync/syncthing/ConflictResolver.kt   | 414 ++++++++++++++
  .../basicsync/syncthing/SyncthingService.kt   |  97 +++-
  .../res/values-zh-rCN/strings_conflicts.xml   | 103 ++++
  app/src/main/res/values/strings_conflicts.xml | 103 ++++
- 5 files changed, 1155 insertions(+), 62 deletions(-)
+ 5 files changed, 1162 insertions(+), 62 deletions(-)
  create mode 100644 app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
  create mode 100644 app/src/main/res/values-zh-rCN/strings_conflicts.xml
  create mode 100644 app/src/main/res/values/strings_conflicts.xml
 
 diff --git a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
-index 5ec258e..2f2bb94 100644
+index 5ec258e..26346dd 100644
 --- a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
 +++ b/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
 @@ -1,5 +1,5 @@
@@ -283,7 +283,7 @@ index 5ec258e..2f2bb94 100644
                  try {
                      val intent = Intent(Intent.ACTION_VIEW).apply {
                          setDataAndType(uri, "vnd.android.document/directory")
-@@ -85,22 +248,61 @@ fun ConflictsScreen(
+@@ -85,22 +248,68 @@ fun ConflictsScreen(
  
                      context.startActivity(intent)
                  } catch (_: ActivityNotFoundException) {
@@ -318,13 +318,20 @@ index 5ec258e..2f2bb94 100644
 -                showDocumentsUIAlert = false
              }
 +
++            // Both actions name a file, but not the same one: replacing names the original that is
++            // about to change, deleting names the conflict copy that goes away.
++            val fileName = when (pending.action) {
++                ConflictAction.UseConflict -> pending.item.originalName ?: pending.item.fileName
++                ConflictAction.KeepOriginal -> pending.item.fileName
++            }
++
 +            AlertDialog(
 +                onDismissRequest = { confirmation = null },
 +                title = {
 +                    Text(text = stringResource(titleRes))
 +                },
 +                text = {
-+                    Text(text = stringResource(messageRes, pending.item.fileName))
++                    Text(text = stringResource(messageRes, fileName))
 +                },
 +                confirmButton = {
 +                    TextButton(
@@ -353,7 +360,7 @@ index 5ec258e..2f2bb94 100644
          }
      }
  }
-@@ -108,28 +310,211 @@ fun ConflictsScreen(
+@@ -108,28 +317,211 @@ fun ConflictsScreen(
  @Composable
  fun ConflictsContent(
      conflicts: List<SyncthingService.ConflictItem>,
@@ -436,7 +443,13 @@ index 5ec258e..2f2bb94 100644
          }
 +    }
 +}
-+
+ 
+-        itemsIndexed(conflicts, key = { _, c -> "conflict_${c.displayName}" }) { index, conflict ->
+-            Preference(
+-                onClick = { conflict.parentUri?.let(onConflictOpen) },
+-                shapes = betterSegmentedShapes(index, conflicts.size),
+-                title = { Text(text = conflict.displayName) },
+-                modifier = Modifier.animateItem(),
 +@Composable
 +private fun ConflictsEmptyInfo(modifier: Modifier = Modifier) {
 +    Column(
@@ -512,13 +525,7 @@ index 5ec258e..2f2bb94 100644
 +                    )
 +                }
 +            }
- 
--        itemsIndexed(conflicts, key = { _, c -> "conflict_${c.displayName}" }) { index, conflict ->
--            Preference(
--                onClick = { conflict.parentUri?.let(onConflictOpen) },
--                shapes = betterSegmentedShapes(index, conflicts.size),
--                title = { Text(text = conflict.displayName) },
--                modifier = Modifier.animateItem(),
++
 +            Text(
 +                text = conflict.folderName,
 +                style = MaterialTheme.typography.bodySmall,
@@ -580,7 +587,7 @@ index 5ec258e..2f2bb94 100644
          }
      }
  }
-@@ -146,19 +531,46 @@ fun ConflictsContent(
+@@ -146,19 +538,46 @@ fun ConflictsContent(
  @Composable
  private fun PreviewConflictsScreen() {
      val conflicts = listOf(
@@ -1185,7 +1192,7 @@ index 4b64a89..c0a76a6 100644
          }
 diff --git a/app/src/main/res/values-zh-rCN/strings_conflicts.xml b/app/src/main/res/values-zh-rCN/strings_conflicts.xml
 new file mode 100644
-index 0000000..a83344e
+index 0000000..c722f6e
 --- /dev/null
 +++ b/app/src/main/res/values-zh-rCN/strings_conflicts.xml
 @@ -0,0 +1,103 @@
@@ -1229,7 +1236,7 @@ index 0000000..a83344e
 +    <string name="dialog_use_conflict_title">替换原文件？</string>
 +
 +    <!-- Message of the confirmation dialog for replacing the original file. %1$s is a file name. -->
-+    <string name="dialog_use_conflict_message">“%1$s”将被冲突版本覆盖，随后冲突副本会被删除。此操作无法撤销。</string>
++    <string name="dialog_use_conflict_message">“%1$s”将被冲突副本的内容替换，随后冲突副本会被删除。此操作无法撤销。</string>
 +
 +    <!-- Confirmation button for replacing the original file with the conflict copy. -->
 +    <string name="dialog_use_conflict_confirm">替换</string>
@@ -1294,7 +1301,7 @@ index 0000000..a83344e
 +</resources>
 diff --git a/app/src/main/res/values/strings_conflicts.xml b/app/src/main/res/values/strings_conflicts.xml
 new file mode 100644
-index 0000000..6c3a9b5
+index 0000000..11d0095
 --- /dev/null
 +++ b/app/src/main/res/values/strings_conflicts.xml
 @@ -0,0 +1,103 @@
@@ -1338,7 +1345,7 @@ index 0000000..6c3a9b5
 +    <string name="dialog_use_conflict_title">Replace the original file?</string>
 +
 +    <!-- Message of the confirmation dialog for replacing the original file. %1$s is a file name. -->
-+    <string name="dialog_use_conflict_message">“%1$s” will be overwritten with the conflict version and then the conflict copy will be deleted. This cannot be undone.</string>
++    <string name="dialog_use_conflict_message">“%1$s” will be replaced with the content of the conflict copy, and then the conflict copy will be deleted. This cannot be undone.</string>
 +
 +    <!-- Confirmation button for replacing the original file with the conflict copy. -->
 +    <string name="dialog_use_conflict_confirm">Replace</string>
