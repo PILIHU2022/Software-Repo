@@ -1,4 +1,4 @@
-name: Patchwork build
+name: Fcitx5 for Android build
 
 on:
   schedule:
