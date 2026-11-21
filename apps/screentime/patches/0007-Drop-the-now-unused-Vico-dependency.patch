@@ -18,7 +18,7 @@ Debug APK drops from ~25.3 MB to ~23.9 MB.
  5 files changed, 1 insertion(+), 18 deletions(-)
 
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index 91b4d39..36db958 100644
+index 33a7f41..ed675d6 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -89,7 +89,6 @@ dependencies {
@@ -79,17 +79,17 @@ index db0a350..0c26a79 100644
      <string name="kotlin_serialization_name" translatable="false">Kotlin Serialization</string>
      <string name="kotlin_serialization_id" translatable="false">org.jetbrains.kotlinx:kotlinx-serialization-json</string>
 diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
-index dd790ff..c1f1817 100644
+index cfaa6f9..aa2ee07 100644
 --- a/gradle/libs.versions.toml
 +++ b/gradle/libs.versions.toml
 @@ -11,7 +11,6 @@ composeBom = "2026.09.00"
- navigationCompose = "2.10.1"
- datastore = "1.2.1"
+ navigationCompose = "2.10.2"
+ datastore = "1.3.0"
  koin = "4.2.2"
 -vico = "3.3.1"
- kotlinxSerializationJson = "1.11.0"
+ kotlinxSerializationJson = "1.13.0"
  glance = "1.2.0"
- workRuntimeKtx = "2.11.2"
+ workRuntimeKtx = "2.12.0"
 @@ -35,7 +34,6 @@ androidx-material-icons-extended = { group = "androidx.compose.material", name =
  androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
  androidx-datastore = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
