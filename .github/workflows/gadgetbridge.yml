@@ -1,10 +1,9 @@
-name: Gadgetbridge watch
+name: Gadgetbridge
 
-# Gadgetbridge has its own watcher: a push only starts it when it touches
-# apps/gadgetbridge/, a daily cron builds only once the 10-day window has passed
-# and the upstream branch moved, and a manual dispatch always builds. The shared
-# body lives in app-watch.yml; the build itself is the patchwork builder
-# dispatched with app=gadgetbridge.
+# Gadgetbridge is built by its own pipeline: a push only starts it when it touches
+# apps/gadgetbridge/, a daily cron builds only after the app's 10-day window and an
+# upstream move, and a manual dispatch always builds. The pipeline itself
+# (watch, build, publish, record, notifications) lives in app-build.yml.
 on:
   push:
     branches:
@@ -18,16 +17,17 @@ on:
 
 permissions:
   contents: write
-  actions: write
+  pages: write
+  id-token: write
   issues: write
+  actions: read
 
 concurrency:
-  group: gadgetbridge-watch
+  group: gadgetbridge-build
   cancel-in-progress: false
 
 jobs:
-  watch:
-    uses: ./.github/workflows/app-watch.yml
+  pipeline:
+    uses: ./.github/workflows/app-build.yml
     with:
       app: gadgetbridge
-      trigger: ${{ github.event_name == 'push' && 'push' || (github.event_name == 'schedule' && 'schedule' || 'manual') }}

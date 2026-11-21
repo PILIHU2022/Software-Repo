@@ -1,6 +1,7 @@
 **English** | [简体中文](README.zh-CN.md)
 
-[![Build](https://github.com/PILIHU2022/Software-Repo/actions/workflows/build.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/build.yml)
+[![Gadgetbridge](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml)
+[![Fcitx5 for Android](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml)
 [![Deploy Pages](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
@@ -273,49 +274,52 @@ mismatch when the raw URL is used; the content is identical.
 
 ## How automation works
 
-Every app has its own watcher workflow — `expenses.yml`, `screentime.yml`,
-`fcitx5.yml`, `basicsync.yml` and `gadgetbridge.yml` — sharing the logic in
-`app-watch.yml`. A watcher only ever starts for its own app: its `push` trigger
-is limited to `apps/<app>/**` (plus that workflow file), so a commit for one app
+Every app has its own pipeline workflow — `expenses.yml`, `screentime.yml`,
+`fcitx5.yml`, `basicsync.yml` and `gadgetbridge.yml` — and each of them only
+declares that app's triggers, delegating the work to the reusable
+`app-build.yml`. A pipeline only ever starts for its own app: its `push` trigger
+is limited to `apps/<app>/**` (plus its workflow file), so a commit for one app
 never starts a build for another, and nothing at all runs for a docs-only or
-`scripts/**` commit. Each watcher runs daily at its own minute; GitHub crons
+`scripts/**` commit. Each pipeline runs daily at its own minute; GitHub crons
 cannot express "every 10 days" (a `*/10` day-of-month rule would fire on the
 1st, 11th, 21st and 31st), so the run gates itself on that app's timestamp in
 `.watch-state.json` and builds only once the 10 days have passed **and** the
 upstream SHA differs from `fdroid/.build-state.json`. A delayed or missed day
 only shifts that app's window.
 
-When the upstream moved, the watcher re-anchors the queue before building:
+When the upstream moved, the queue is re-anchored before building:
 `scripts/rebase-queue.sh` fetches the new head, applies the queue with `git am
 -3`, exports the applied commits back into `apps/<app>/patches` (keeping the
-existing file names), records the new anchor in `apps/<app>/upstream.txt`, and
-the watcher commits that with `[skip ci]`. A queue that no longer applies fails
-the watcher and opens an issue instead of publishing stale code — it is never
-anchored backwards onto the fallback commit. The watcher then records the window
-and dispatches the builder with `app=<app>` and `force=true`.
+existing file names) and records the new anchor in `apps/<app>/upstream.txt`;
+the watch job commits that with `[skip ci]`. A queue that no longer applies
+fails the run and opens an issue instead of publishing stale code — it is never
+anchored backwards onto the fallback commit, and the 10-day window is only
+advanced by a run that really built and published.
 
-`build.yml` is therefore a builder only: it has no `push` or `schedule` trigger
-of its own, which is what keeps an unrelated commit from starting a build. A
-manual dispatch can target one app with the `app` input, or rebuild everything
-with `app=all` + `force`. The fcitx5 leg additionally
-frees ~10 GB of runner disk, installs `extra-cmake-modules`/`gettext` plus the
-NDK 28.0.13004108, CMake 3.31.6 and build-tools 36.1.0 SDK packages, and has a
-120-minute timeout. Each run:
+`app-build.yml` holds the shared jobs, one app per run:
 
-1. **check** — `scripts/check-upstream.sh --apps <id>` resolves the app the
-   watcher dispatched and emits the build matrix;
-2. **build** — one matrix leg per changed app (`fail-fast: false`): mirror clone
-   in `.cache/mirror/<app>.git`, fresh checkout, optional recursive submodule
-   update (fcitx5), `git am -3` over the queue, version handling, Gradle release
-   build, keystore signing, an ARM ABI strip plus 16 KB realign and re-sign when
-   `KEEP_ABIS` is set, then `apksigner` / `aapt` verification;
-3. **publish** — `publish-fdroid.sh` keeps at most 3 APKs per package, dedupes by
-   `(package, versionCode)`, signs the index with fdroidserver (`fdroid update`),
-   commits `fdroid/repo` and `.build-state.json` with `[skip ci]`, and deploys
-   Pages. Failed legs keep their old state, so the app's next watcher run
-   retries them;
-4. **failure** — opens or comments on a **“Patchwork build failed”** issue with
-   the run link and a local reproduction command.
+1. **watch** — `git ls-remote` the app's upstream branch, compare it with
+   `fdroid/.build-state.json`, apply the 10-day gate, re-anchor the queue;
+2. **build** — mirror clone in `.cache/mirror/<app>.git`, fresh checkout,
+   optional recursive submodule update (fcitx5), `git am -3` over the queue,
+   version handling, Gradle release build, keystore signing, an ARM ABI strip
+   plus 16 KB realign and re-sign when `KEEP_ABIS` is set, then `apksigner` /
+   `aapt` verification. The fcitx5 leg additionally frees ~10 GB of runner
+   disk and installs `extra-cmake-modules`/`gettext`, NDK 28.0.13004108, CMake
+   3.31.6 and build-tools 36.1.0;
+3. **publish** — `publish-fdroid.sh` keeps at most 3 APKs per package, dedupes
+   by `(package, versionCode)`, signs the index with fdroidserver (`fdroid
+   update`), commits `fdroid/repo` and `.build-state.json` with `[skip ci]`,
+   updates the README table and deploys Pages. A failed build keeps its old
+   state, so that app's next run retries it;
+4. **record** — advance that app's 10-day window, only after build and publish
+   succeeded;
+5. **notify** — open or comment on a **“Patchwork build failed”** issue with the
+   run link and a local reproduction command, and close it once a run recovers.
+
+There is no workflow that builds every app anymore: `app-build.yml` is reusable
+and takes the app id as its only input, so a manual run means dispatching that
+app's workflow (or `scripts/build-app.sh <app>` locally).
 
 `baidunetgo.yml` is the desktop counterpart: it runs daily (`43 4 * * *`), gates
 on `.watch-state.json`'s `baidunetgo` timestamp, resolves `pengstem/baidunetgo`
@@ -333,7 +337,7 @@ patched binary checks from Settings → Updates at
 (the URL is baked in at build time). A fallback build keeps the recorded head, so
 the next 10-day window retries the new upstream. A second job in the same
 workflow builds the queue's Android client with the same SDK/JDK/keystore steps
-build.yml uses, signs it with the patchwork keystore, publishes it to a
+app-build.yml uses, signs it with the patchwork keystore, publishes it to a
 `baidunetgo-android-<version>-<short_sha>` Release and the F-Droid repository,
 and commits the Android update feed `fdroid/baidunetgo/update.json`
 (<https://software.sparkzh.top/baidunetgo/update.json> — deployed by

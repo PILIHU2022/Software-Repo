@@ -1,7 +1,7 @@
 name: Deploy Pages
 
 # Safety net: publish the committed fdroid/ directory to GitHub Pages without
-# rebuilding anything. build.yml only deploys Pages from its publish job, which
+# rebuilding anything. app-build.yml only deploys Pages from its publish job, which
 # runs when an upstream change is detected (or on an apps/** push); after the
 # owner enables Pages, this workflow makes sure a deployment happens anyway.
 # It is intentionally green while Pages is disabled (every Pages step is

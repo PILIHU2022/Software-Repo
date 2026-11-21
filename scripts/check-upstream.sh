@@ -83,29 +83,11 @@ trap 'rm -f "$TMP"' EXIT
 checked=0
 changed_count=0
 
-# Apps with a dedicated watcher workflow set CHECK_UPSTREAM_SKIP to stay out of
-# this shared matrix: their own workflow decides when to build them.
-read -r -a SKIP_APPS <<<"${CHECK_UPSTREAM_SKIP:-}"
-
 for conf in "$ROOT"/apps/*/app.conf; do
     [[ -f "$conf" ]] || continue
     # shellcheck source=/dev/null
     source "$conf"
 
-    skip=0
-    for skipped in "${SKIP_APPS[@]}"; do
-        [[ -n "$skipped" && "$skipped" == "$APP_ID" ]] && skip=1
-    done
-    # An explicit --apps target wins: the app's own workflow dispatches this
-    # script with --apps when it wants that app built.
-    if (( skip == 1 )) && [[ -z "$TARGETS" ]]; then
-        echo "$APP_ID: skipped (CHECK_UPSTREAM_SKIP; it has its own workflow)" >&2
-        continue
-    fi
-
-    if [[ -n "$TARGETS" ]] && ! target_selected "$APP_ID"; then
-        continue
-    fi
 
     checked=$((checked + 1))
 

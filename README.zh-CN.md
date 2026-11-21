@@ -1,6 +1,7 @@
 [English](README.md) | **简体中文**
 
-[![Build](https://github.com/PILIHU2022/Software-Repo/actions/workflows/build.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/build.yml)
+[![Gadgetbridge](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml)
+[![Fcitx5 for Android](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml)
 [![Deploy Pages](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
@@ -204,41 +205,43 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 
 ## 自动化流程
 
-每个 app 都有自己的监视工作流——`expenses.yml`、`screentime.yml`、`fcitx5.yml`、
-`basicsync.yml`、`gadgetbridge.yml`——共用 `app-watch.yml` 里的逻辑。监视器只为自己
-那个 app 启动：它的 `push` 触发只限 `apps/<app>/**`（加该工作流文件本身），因此改
-A 应用不会启动 B 应用的构建，纯文档或 `scripts/**` 提交则完全不触发 Actions。
+每个 app 都有自己的流水线工作流——`expenses.yml`、`screentime.yml`、`fcitx5.yml`、
+`basicsync.yml`、`gadgetbridge.yml`——每个文件只声明那个 app 的触发条件，具体工作交给
+可复用的 `app-build.yml`。流水线只为自己那个 app 启动：`push` 只匹配
+`apps/<app>/**`（加该工作流文件本身），因此改 A 应用不会启动 B 应用的构建，纯文档或
+`scripts/**` 提交则完全不触发 Actions。
 
-每个监视器每天在自己的分钟数跑一次；GitHub 的 cron 无法直接表达“每 10 天”
-（`*/10` 的日规则会在 1、11、21、31 号触发），所以每次运行自行检查
+每条流水线每天在自己的分钟数跑一次；GitHub 的 cron 无法直接表达“每 10 天”
+（`*/10` 的日规则会在 1、11、21、31 号触发），所以运行时会检查
 `.watch-state.json` 里该 app 的时间戳，只有满 10 天**且**上游 SHA 与
 `fdroid/.build-state.json` 不同才构建。延迟或漏掉一天只是把该 app 的窗口顺延。
 
-上游有提交时，监视器会先重锚队列再构建：`scripts/rebase-queue.sh` 取新的 head、
-用 `git am -3` 应用队列、把应用后的提交导出回 `apps/<app>/patches`（沿用原有文件名）、
-把新锚点写进 `apps/<app>/upstream.txt`，监视器以 `[skip ci]` 提交这次重锚。队列已经
-无法应用时，监视器失败并开 issue，而不是回退到旧提交发布过期代码。随后它记录窗口
-时间戳，并以 `app=<app>` + `force=true` 派发构建器。
+上游有提交时，构建前会先重锚队列：`scripts/rebase-queue.sh` 取新 head、用
+`git am -3` 应用队列、把应用后的提交导出回 `apps/<app>/patches`（沿用原文件名），
+并把新锚点写进 `apps/<app>/upstream.txt`，由 watch 任务以 `[skip ci]` 提交。队列
+已经无法应用时，运行失败并开 issue，而不是回退到旧提交发布过期代码；10 天窗口
+只有真正构建并发布成功的那次运行才会推进。
 
-因此 `build.yml` 只是构建器：它没有自己的 `push` / `schedule` 触发，这正是“无关提交
-不会启动构建”的来源。手动触发可以用 `app` 指定单个 app，或用 `app=all` + `force`
-全量重建。fcitx5 任务还会额外释放约 10 GB runner 磁盘、安装
-`extra-cmake-modules`/`gettext` 以及 NDK 28.0.13004108、CMake 3.31.6、
-build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
+`app-build.yml` 里的任务，一次只跑一个 app：
 
-1. **check** —— `scripts/check-upstream.sh --apps <id>` 解析监视器派发的那个 app，
-   生成构建矩阵；
-2. **build** —— 每个有变化的应用一个矩阵任务（`fail-fast: false`）：在
-   `.cache/mirror/<app>.git` 维护 mirror、创建全新检出、按需递归初始化子模块
-   （fcitx5）、用 `git am -3` 应用补丁队列、处理版本号、Gradle release 构建、
-   keystore 签名；设置了 `KEEP_ABIS` 的应用随后删除非 ARM ABI、按 16 KB 对齐并
-   重新签名，再用 `apksigner` / `aapt` 校验；
+1. **watch** —— `git ls-remote` 取该 app 的上游分支，与 `fdroid/.build-state.json`
+   比较，过 10 天闸门，重锚队列；
+2. **build** —— 在 `.cache/mirror/<app>.git` 维护 mirror、创建全新检出、按需递归
+   初始化子模块（fcitx5）、用 `git am -3` 应用补丁队列、处理版本号、Gradle
+   release 构建、keystore 签名；设置了 `KEEP_ABIS` 的应用随后删除非 ARM ABI、
+   按 16 KB 对齐并重新签名，再用 `apksigner` / `aapt` 校验。fcitx5 任务还会额外
+   释放约 10 GB runner 磁盘并安装 `extra-cmake-modules`/`gettext`、NDK
+   28.0.13004108、CMake 3.31.6、build-tools 36.1.0；
 3. **publish** —— `publish-fdroid.sh` 每个包最多保留 3 个 APK，按
    `(package, versionCode)` 去重，用 fdroidserver（`fdroid update`）签名索引，把
-   `fdroid/repo` 与 `.build-state.json` 以 `[skip ci]` 提交回 `main`，最后部署
-   Pages。失败的矩阵任务保留旧状态，该 app 的监视器下次运行会重试；
-4. **failure** —— 打开或评论 **“Patchwork build failed”** issue，附运行链接和本地
-   复现命令。
+   `fdroid/repo` 与 `.build-state.json` 以 `[skip ci]` 提交回 `main`，更新 README
+   表格并部署 Pages。构建失败时保留旧状态，该 app 下次运行会重试；
+4. **record** —— 只有在 build 与 publish 都成功后才推进该 app 的 10 天窗口；
+5. **notify** —— 打开或评论 **“Patchwork build failed”** issue（附运行链接与本地
+   复现命令），恢复后再关闭。
+
+不再有“一次构建所有 app”的工作流：`app-build.yml` 可复用、只接收 app id，手动
+构建就派发对应 app 的工作流（或本地跑 `scripts/build-app.sh <app>`）。
 
 `baidunetgo.yml` 是桌面版对应的工作流：每天（`43 4 * * *`）运行，按
 `.watch-state.json` 的 `baidunetgo` 时间戳过 10 天闸门，用 `git ls-remote` 解析
@@ -252,7 +255,7 @@ build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 `desktop/baidunetgo/update.json`——补丁版在「设置 → 更新」里检查的 feed，地址
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>
 在构建时内置进二进制。回退构建不会记录新 head，下一个 10 天窗口会继续重试。
-同一条工作流里的第二个任务会构建队列中的 Android 客户端（与 build.yml 相同的
+同一条工作流里的第二个任务会构建队列中的 Android 客户端（与 app-build.yml 相同的
 SDK/JDK/keystore 步骤），用 patchwork 密钥签名，发布到
 `baidunetgo-android-<version>-<short_sha>` Release 与 F-Droid 仓库，并提交
 Android 更新 feed `fdroid/baidunetgo/update.json`

@@ -1,86 +1,146 @@
-name: Patchwork build
+name: App build
 
-# The builder of the patchwork overlay. It no longer starts by itself: every app
-# has its own watcher (.github/workflows/<app>.yml, sharing app-watch.yml) that
-# decides when that app needs a build and dispatches this workflow with
-# app=<app> and force=true. A commit that touches one app therefore never starts
-# a build for another, and each app keeps its own 10-day upstream window.
+# Per-app build of the patchwork overlay.
 #
-# Manual use: dispatch with app=<id> (or app=all together with force).
+# Every app has a thin workflow (expenses.yml, screentime.yml, fcitx5.yml,
+# basicsync.yml, gadgetbridge.yml) whose triggers only cover that app's own
+# directory, so a commit for one app never starts a build for another. Those
+# files call this reusable workflow, which holds the whole pipeline for one app:
+#
+#  * watch: the 10-day gate, the upstream comparison and the re-anchor of the
+#    queue (scripts/rebase-queue.sh), committed with [skip ci];
+#  * build: the Gradle release build, signing and verification;
+#  * publish: the F-Droid repository, the README table and Pages;
+#  * record: advance the app's 10-day window once it really built and published;
+#  * notify: open, comment on or close the failure issue.
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       app:
-        description: App id, or "all" (apps come from apps/*/app.conf)
+        description: App id, i.e. the directory name under apps/
+        required: true
         type: string
-        default: all
-      force:
-        description: Build even when upstream has not changed
-        type: boolean
-        default: false
+
+env:
+  WATCH_INTERVAL_DAYS: '10'
 
 permissions:
   contents: write
   pages: write
   id-token: write
-
-concurrency:
-  group: patchwork-build-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  WATCH_INTERVAL_DAYS: '10'
+  issues: write
+  actions: read
 
 jobs:
-  check:
-    name: Check upstream
+  watch:
+    name: Watch ${{ inputs.app }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     outputs:
-      matrix: ${{ steps.check.outputs.matrix }}
-      any_changed: ${{ steps.check.outputs.any_changed }}
-      due: ${{ steps.gate.outputs.due }}
+      build: ${{ steps.decide.outputs.build }}
+      upstream: ${{ steps.decide.outputs.upstream }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      # Resolve which app(s) to build. The watchers dispatch this workflow with
-      # app=<id> and force=true; a manual dispatch may also ask for "all".
-      - name: Resolve build matrix
-        id: check
+      - name: Resolve the upstream head, the anchor and the 10-day window
+        id: decide
         env:
-          FORCE_INPUT: ${{ inputs.force }}
-          APP_INPUT: ${{ inputs.app }}
+          APP: ${{ inputs.app }}
+          # A reusable workflow still sees the caller's event, so push /
+          # schedule / workflow_dispatch arrive here unchanged.
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          args=()
-          if [[ -n "${APP_INPUT:-}" && "$APP_INPUT" != "all" ]]; then
-            args=(--apps "$APP_INPUT")
-          elif [[ "$FORCE_INPUT" == "true" ]]; then
-            args=(--all)
+          conf="apps/$APP/app.conf"
+          [[ -f "$conf" ]] || { echo "::error::missing $conf"; exit 1; }
+          # shellcheck source=/dev/null
+          source "$conf"
+
+          head="$(git ls-remote "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH" | awk 'NR == 1 { print $1 }')"
+          if [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve $UPSTREAM_URL ($UPSTREAM_BRANCH)"
+            exit 1
           fi
-          if [[ ${#args[@]} -gt 0 ]]; then
-            result="$(./scripts/check-upstream.sh "${args[@]}")"
-          else
-            result="$(./scripts/check-upstream.sh)"
+
+          anchor="$(tr -d '[:space:]' < "apps/$APP/upstream.txt" 2>/dev/null || true)"
+          last_built="$(jq -r --arg app "$APP" '.[$app] // empty' fdroid/.build-state.json 2>/dev/null || true)"
+
+          moved=false
+          if [[ "$head" != "$last_built" ]]; then
+            moved=true
           fi
-          printf '%s\n' "$result"
-          matrix="$(jq -c '.matrix' <<<"$result")"
-          changed="$(jq -r '.changed' <<<"$result")"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "any_changed=$changed" >> "$GITHUB_OUTPUT"
+
+          days="${WATCH_INTERVAL_DAYS:-10}"
+          due=true
+          last="$(jq -r --arg app "$APP" '.[$app] // empty' .watch-state.json 2>/dev/null || true)"
+          if [[ -n "$last" ]] && last_epoch="$(date -u -d "$last" +%s 2>/dev/null)"; then
+            age=$(( $(date -u +%s) - last_epoch ))
+            if (( age < days * 86400 )); then
+              due=false
+              echo "::notice::Last $APP window was ${age}s ago; the next one is due in $(( days * 86400 - age ))s."
+            fi
+          fi
+
+          # The queue has to be re-anchored when it was written for another
+          # upstream commit, or when no anchor was recorded yet.
+          rebase=false
+          if [[ -z "$anchor" || "$anchor" != "$head" ]]; then
+            rebase=true
+          fi
+
+          build=false
+          case "$EVENT" in
+            push|workflow_dispatch)
+              build=true
+              ;;
+            schedule)
+              if [[ "$moved" == "true" && "$due" == "true" ]]; then
+                build=true
+              fi
+              ;;
+            *)
+              echo "::error::unknown event '$EVENT' (expected push, schedule or workflow_dispatch)"
+              exit 1
+              ;;
+          esac
+
+          echo "app=$APP event=$EVENT"
+          echo "upstream=$head anchor=${anchor:-<unknown>} last_built=${last_built:-<unknown>}"
+          echo "moved=$moved due=$due rebase=$rebase build=$build"
+          {
+            echo "upstream=$head"
+            echo "rebase=$rebase"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Re-anchor the patch queue on the upstream head
+        id: rebase
+        if: steps.decide.outputs.rebase == 'true'
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          set -euo pipefail
+          ./scripts/rebase-queue.sh "$APP"
+          git add "apps/$APP"
+          if git diff --cached --quiet; then
+            echo "The stored queue already matches the rebased queue"
+            exit 0
+          fi
+          git config user.name "DeepSeek Harness"
+          git config user.email "noreply@deepseek.com"
+          git commit -m "chore($APP): rebase the queue onto $(cut -c1-7 "apps/$APP/upstream.txt") [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
 
   build:
-    name: Build ${{ matrix.app }}
-    needs: check
-    if: needs.check.outputs.any_changed == 'true'
+    name: Build ${{ inputs.app }}
+    needs: watch
+    if: needs.watch.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -160,7 +220,7 @@ jobs:
       # big toolchains and the SDK packages this leg does not use first. This
       # must stay before the NDK install below.
       - name: Free disk space (fcitx5)
-        if: matrix.app == 'fcitx5'
+        if: inputs.app == 'fcitx5'
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
@@ -185,7 +245,7 @@ jobs:
       # upstream CMake build (find_package(ECM) and add_subdirectory(po)).
       # Ninja comes from the SDK cmake package, so it is not installed via apt.
       - name: Install fcitx5 host and SDK dependencies
-        if: matrix.app == 'fcitx5'
+        if: inputs.app == 'fcitx5'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -203,7 +263,7 @@ jobs:
       # to bootstrap external/go and to install gobind/gomobile (upstream CI
       # does the same).
       - name: Install BasicSync SDK and Go dependencies
-        if: matrix.app == 'basicsync'
+        if: inputs.app == 'basicsync'
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
@@ -213,7 +273,7 @@ jobs:
           df -h /
 
       - name: Set up Go
-        if: matrix.app == 'basicsync'
+        if: inputs.app == 'basicsync'
         uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -247,14 +307,14 @@ jobs:
             echo "PATCHWORK_KEY_PASSWORD=${INPUT_KEY_PASSWORD:-patchwork123}"
           } >> "$GITHUB_ENV"
 
-      - name: Build ${{ matrix.app }}
-        run: ./scripts/build-app.sh "${{ matrix.app }}" --out "$RUNNER_TEMP/dist/${{ matrix.app }}"
+      - name: Build ${{ inputs.app }}
+        run: ./scripts/build-app.sh "${{ inputs.app }}" --out "$RUNNER_TEMP/dist/${{ inputs.app }}"
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: patchwork-${{ matrix.app }}
-          path: ${{ runner.temp }}/dist/${{ matrix.app }}
+          name: patchwork-${{ inputs.app }}
+          path: ${{ runner.temp }}/dist/${{ inputs.app }}
           if-no-files-found: error
 
       - name: Dump build environment on failure
@@ -267,20 +327,17 @@ jobs:
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<unset>}"
           df -h || true
           free -g || true
-          ls -la "$RUNNER_TEMP/dist/${{ matrix.app }}" 2>/dev/null || true
+          ls -la "$RUNNER_TEMP/dist/${{ inputs.app }}" 2>/dev/null || true
           find "$RUNNER_TEMP/dist" -maxdepth 3 -type f 2>/dev/null || true
 
   publish:
     name: Publish F-Droid repository
     needs:
-      - check
+      - watch
       - build
-    # Run even when one matrix leg failed (fail-fast is off), so surviving
-    # artifacts still get published. Skip cleanly when nothing changed.
     if: >-
       always() &&
-      needs.check.result == 'success' &&
-      needs.check.outputs.any_changed == 'true' &&
+      needs.watch.outputs.build == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'failure')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -388,54 +445,40 @@ jobs:
       - name: Publish to F-Droid repository
         if: steps.apks.outputs.found == 'true'
         env:
-          MATRIX: ${{ needs.check.outputs.matrix }}
+          APP: ${{ inputs.app }}
+          UPSTREAM_SHA: ${{ needs.watch.outputs.upstream }}
         run: |
           set -euo pipefail
-          # Only record an upstream SHA for apps whose APK really exists and
-          # whose build was not a fallback. A failed matrix leg keeps its
-          # previous state so the next run retries it; a fallback build is
-          # published but must not mark the head as successfully built, or the
-          # next scheduled run would skip the app while the queue is still
-          # broken.
+          # Only record an upstream SHA when this app's APK really exists and
+          # the build was not a fallback. A failed build keeps its previous
+          # state so the next watcher run retries it; a fallback build is
+          # published but must not mark the head as built, or the next window
+          # would skip the app while the queue is still broken.
           state='{}'
-          while IFS=$'\t' read -r app sha; do
-            [[ -n "$app" ]] || continue
-            # A multi-artifact download lands in dist/patchwork-<app>/, but a
-            # single-artifact download is extracted flat into dist/. Locate
-            # this app's build-info.txt by its own `app=` line so either layout
-            # is recorded, and take the APK name from that same file.
-            info="$(grep -rlx --include='build-info.txt' "app=$app" dist 2>/dev/null | head -n 1)"
-            apk_name="$(sed -n 's/^apk=//p' "$info" 2>/dev/null | head -n 1)"
-            if [[ -n "$info" && -n "$apk_name" && -f "$(dirname "$info")/$apk_name" ]]; then
-              fallback="$(sed -n 's/^upstream_fallback=//p' "$info" 2>/dev/null | head -n 1)"
-              built_sha="$(sed -n 's/^upstream_commit=//p' "$info" 2>/dev/null | head -n 1)"
-              if [[ "$fallback" == "1" ]]; then
-                echo "::warning title=Fallback build::$app was built from ${built_sha:-an older upstream commit} because the patch queue does not apply to $sha; keeping the previous build state so the next run retries $sha"
-                continue
-              fi
-              # Record the commit the APK was actually built from, not only the
-              # one the check job resolved: upstream can move between jobs.
-              record_sha="${built_sha:-$sha}"
-              if [[ -n "$built_sha" && "$built_sha" != "$sha" ]]; then
-                echo "::warning title=Upstream moved::$app was built from $built_sha while the check job resolved $sha; recording the built commit"
-              fi
-              state="$(jq -c --arg app "$app" --arg sha "$record_sha" '. + {($app): $sha}' <<<"$state")"
+          info="$(grep -rlx --include='build-info.txt' "app=$APP" dist 2>/dev/null | head -n 1)"
+          apk_name="$(sed -n 's/^apk=//p' "$info" 2>/dev/null | head -n 1)"
+          if [[ -n "$info" && -n "$apk_name" && -f "$(dirname "$info")/$apk_name" ]]; then
+            fallback="$(sed -n 's/^upstream_fallback=//p' "$info" 2>/dev/null | head -n 1)"
+            built_sha="$(sed -n 's/^upstream_commit=//p' "$info" 2>/dev/null | head -n 1)"
+            if [[ "$fallback" == "1" ]]; then
+              echo "::warning title=Fallback build::$APP was built from ${built_sha:-an older upstream commit} because the patch queue does not apply to $UPSTREAM_SHA; keeping the previous build state so the next run retries $UPSTREAM_SHA"
             else
-              echo "::warning::No build-info.txt or APK for '$app' (build failed or artifact missing); keeping previous build state"
+              record_sha="${built_sha:-$UPSTREAM_SHA}"
+              if [[ -n "$built_sha" && "$built_sha" != "$UPSTREAM_SHA" ]]; then
+                echo "::warning title=Upstream moved::$APP was built from $built_sha while the watch job resolved $UPSTREAM_SHA; recording the built commit"
+              fi
+              state="$(jq -cn --arg app "$APP" --arg sha "$record_sha" '{($app): $sha}')"
             fi
-          done < <(jq -r '.include[]? | [.app, .sha] | @tsv' <<<"$MATRIX")
-          printf 'Build state: %s\n' "$state"
-          expected="$(jq '.include | length' <<<"$MATRIX")"
-          recorded="$(jq 'keys | length' <<<"$state")"
-          if (( recorded < expected )); then
-            echo "::warning title=Incomplete build state::Recorded $recorded of $expected app(s); a fallback build or a missing APK keeps the previous state so the next upstream window retries it."
+          else
+            echo "::warning::No build-info.txt or APK for '$APP' (build failed or artifact missing); keeping previous build state"
           fi
+          printf 'Build state: %s\n' "$state"
           ./scripts/publish-fdroid.sh --apk-dir dist --state-json "$state"
 
       # Keep README.md / README.zh-CN.md in sync with what was actually built:
       # upstream revision, patch count and the versionCode/versionName of the
       # APKs published above. Apps without a fresh APK keep their row untouched,
-      # so a failed matrix leg never rolls another app's row back.
+      # so a failed build never rolls another app's row back.
       - name: Update README app table
         if: steps.apks.outputs.found == 'true'
         run: |
@@ -515,10 +558,67 @@ jobs:
             echo '- Fallback while Pages is off: https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  record:
+    name: Record the 10-day window
+    needs:
+      - watch
+      - build
+      - publish
+    # Advance only a run that really built and published: a failed or skipped
+    # run must be retried by the next daily check instead of waiting 10 days.
+    if: >-
+      success() &&
+      needs.watch.outputs.build == 'true' &&
+      needs.build.result == 'success' &&
+      needs.publish.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Update the watch state
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          set -euo pipefail
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          tmp="$(mktemp)"
+          jq --arg app "$APP" --arg ts "$now" '. + {($app): $ts}' .watch-state.json >"$tmp"
+          mv "$tmp" .watch-state.json
+          cat .watch-state.json
+
+      - name: Commit the state
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          APP: ${{ inputs.app }}
+        run: |
+          set -euo pipefail
+          git config user.name "DeepSeek Harness"
+          git config user.email "noreply@deepseek.com"
+          git add .watch-state.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Record the $APP upstream window [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main \
+               && git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main; then
+              echo "::notice::Watch state pushed"
+              exit 0
+            fi
+            sleep $(( attempt * 5 ))
+          done
+          echo "::warning title=Watch state commit failed::Could not push .watch-state.json"
+
   notify-failure:
     name: Report failure
     needs:
-      - check
+      - watch
       - build
       - publish
     if: failure()
@@ -635,14 +735,14 @@ jobs:
   notify-recovered:
     name: Close failure issue on recovery
     needs:
-      - check
+      - watch
       - build
       - publish
     # Only a run that actually built something is a recovery. Skipped runs
     # (upstream unchanged) must not close an issue about a real failure.
     if: >-
       success() &&
-      needs.check.outputs.any_changed == 'true'
+      needs.watch.outputs.build == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
