@@ -1,0 +1,2201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 09:40:13 +0800
+Subject: [PATCH] Back up on every app open, with rotation, and fix the silent
+ auto-export
+
+The periodic zip export could silently stop producing backups (WorkManager is unreliable on aggressive vendor ROMs, and every app start re-enqueued the work with CANCEL_AND_REENQUEUE), and it always overwrote one fixed file opened with mode "wt", so a failed export truncated the only backup the user had. A user lost weeks of data that way.
+
+Backup on app open (no background scheduling, no keep-alive):
+- New OnOpenBackupRunner writes a full zip backup (db, preferences, external files) every time the launcher activity is opened, off the main thread.
+- Every run creates a new gadgetbridge_yyyyMMddHHmmss.zip; nothing existing is touched, so a failed run can never destroy a previous backup.
+- The zip is exported to a cache temp file, validated, and only then copied into the target: into a SAF directory the user picked, or the app's backups/ folder by default.
+- Retention keeps the last N days (3/7/14/30, default 7) of our own backups, always keeping the newest one, and never deletes files it did not write.
+- Skips when nothing changed since the last backup, so app opens do not fill the storage with identical copies.
+
+Auto-export fixes:
+- PeriodicExporter no longer cancels and re-enqueues the work on every app start (ExistingPeriodicWorkPolicy.UPDATE, cancelUniqueWork only when disabled).
+- ZipBackupExportJob exports into a temporary file, validates it, and only then writes the target, deleting the partial target if the copy fails.
+- The zip auto-export location picker now picks a directory, so its runs are timestamped and rotated too.
+
+Material 3 settings screen:
+- New OnOpenBackupSettingsActivity with an MD3 preference screen (switch, folder picker, retention list, run now, clean now, status), reachable from Settings > Automations and indexed for settings search.
+- SettingsActivity, automations_settings.xml, strings and arrays updated; no Material2/AppCompat theme introduced.
+---
+ app/src/main/AndroidManifest.xml              |   4 +
+ .../activities/ControlCenterv2.java           |   6 +
+ .../activities/SettingsActivity.java          |   3 +
+ .../AbstractAutoExportSettingsFragment.kt     |  42 +-
+ .../OnOpenBackupSettingsActivity.kt           | 286 ++++++++++++
+ .../activities/welcome/WelcomeActivity.java   |   5 +
+ .../gadgetbridge/util/PeriodicExporter.kt     |  17 +-
+ .../util/backup/AbstractZipBackupJob.java     |   7 +
+ .../util/backup/BackupRetention.kt            |  64 +++
+ .../gadgetbridge/util/backup/BackupStorage.kt | 366 +++++++++++++++
+ .../util/backup/OnOpenBackupPrefs.kt          | 141 ++++++
+ .../util/backup/OnOpenBackupRunner.kt         | 422 ++++++++++++++++++
+ .../util/backup/ZipBackupExportJob.java       | 183 +++++++-
+ .../util/backup/ZipExportWorker.kt            |  27 +-
+ app/src/main/res/values/arrays.xml            |  15 +
+ app/src/main/res/values/strings.xml           |  19 +
+ app/src/main/res/xml/automations_settings.xml |   8 +
+ .../main/res/xml/on_open_backup_settings.xml  |  70 +++
+ .../util/backup/OnOpenBackupRetentionTest.kt  | 154 +++++++
+ 19 files changed, 1816 insertions(+), 23 deletions(-)
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/OnOpenBackupSettingsActivity.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupRetention.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt
+ create mode 100644 app/src/main/res/xml/on_open_backup_settings.xml
+ create mode 100644 app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRetentionTest.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 9ded9abd11..0f81f13835 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -243,6 +243,10 @@
+             android:name=".activities.automations.AutoExportFitSettingsActivity"
+             android:label="@string/pref_header_auto_export_fit"
+             android:parentActivityName=".activities.SettingsActivity" />
++        <activity
++            android:name=".activities.automations.OnOpenBackupSettingsActivity"
++            android:label="@string/pref_header_backup_on_open"
++            android:parentActivityName=".activities.SettingsActivity" />
+         <activity
+             android:name=".activities.maps.MapsTrackActivity"
+             android:label="@string/maps"
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+index de9191a740..faa42e04ab 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+@@ -94,6 +94,7 @@ import nodomain.freeyourgadget.gadgetbridge.util.DeviceHelper;
+ import nodomain.freeyourgadget.gadgetbridge.util.GB;
+ import nodomain.freeyourgadget.gadgetbridge.util.GBChangeLog;
+ import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs;
++import nodomain.freeyourgadget.gadgetbridge.util.backup.OnOpenBackupRunner;
+ 
+ //TODO: extend AbstractGBActivity, but it requires actionbar that is not available
+ public class ControlCenterv2 extends AppCompatActivity
+@@ -523,6 +524,11 @@ public class ControlCenterv2 extends AppCompatActivity
+         }
+ 
+         GBApplication.deviceService().requestDeviceInfo();
++
++        // Back up the database and preferences once per app open, in the background.
++        // This is the launcher activity, so it runs exactly when the user opens the app, whereas
++        // GBApplication.onCreate also runs when the OS starts the process for background reasons.
++        OnOpenBackupRunner.triggerOnAppOpen(this);
+     }
+ 
+     /**
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/SettingsActivity.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/SettingsActivity.java
+index 0d043853fa..0ce31e737d 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/SettingsActivity.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/SettingsActivity.java
+@@ -123,6 +123,8 @@ public class SettingsActivity extends AbstractSettingsActivityV2 implements Acti
+             open(ElevationSettingsActivity.class, result);
+         } else if (result.getResourceFile() == R.xml.automations_settings) {
+             open(AutomationsSettingsActivity.class, result);
++        } else if (result.getResourceFile() == R.xml.on_open_backup_settings) {
++            open(nodomain.freeyourgadget.gadgetbridge.activities.automations.OnOpenBackupSettingsActivity.class, result);
+         } else if (result.getResourceFile() == R.xml.internethelper_preferences) {
+             open(InternetHelperPreferencesActivity.class, result);
+         } else {
+@@ -171,6 +173,7 @@ public class SettingsActivity extends AbstractSettingsActivityV2 implements Acti
+             index(R.xml.map_settings, R.string.maps_settings);
+             index(R.xml.elevation_settings, R.string.elevation_correction);
+             index(R.xml.automations_settings, R.string.pref_header_automations);
++            index(R.xml.on_open_backup_settings, R.string.pref_header_backup_on_open);
+             if (!GBApplication.hasDirectInternetAccess())
+                 index(R.xml.internethelper_preferences, R.string.prefs_internet_helper_title);
+ 
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
+index 5bb5f45d79..d855c29ce6 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
+@@ -38,6 +38,7 @@ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
+ import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs
+ import nodomain.freeyourgadget.gadgetbridge.util.PeriodicExporter
+ import nodomain.freeyourgadget.gadgetbridge.util.UriUtils
++import nodomain.freeyourgadget.gadgetbridge.util.backup.PeriodicZipExporter
+ import org.slf4j.Logger
+ import org.slf4j.LoggerFactory
+ import java.util.Date
+@@ -73,10 +74,19 @@ abstract class AbstractAutoExportSettingsFragment(
+                 LOG.error("Got no uri")
+                 return@registerForActivityResult
+             }
+-            requireContext().contentResolver.takePersistableUriPermission(
+-                uri,
++            // The zip exporter picks a directory, so that every run can write a new timestamped
++            // file and the retention can prune the old ones. The others pick a single file.
++            val permissionFlags = if (picksBackupDirectory()) {
++                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
++            } else {
+                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+-            )
++            }
++            try {
++                requireContext().contentResolver.takePersistableUriPermission(uri, permissionFlags)
++            } catch (e: SecurityException) {
++                // Some providers do not support persistable grants; the location is still stored
++                LOG.warn("Failed to take the persistable uri permission for {}", uri, e)
++            }
+             gbPrefs.preferences.edit {
+                 putString(prefKeyLocation, uri.toString())
+             }
+@@ -92,12 +102,20 @@ abstract class AbstractAutoExportSettingsFragment(
+         val prefExportLocation = findPreference<Preference>(prefKeyLocation)
+         if (prefExportLocation != null) {
+             prefExportLocation.setOnPreferenceClickListener {
+-                val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+-                i.type = exporter.getFileMimeType()
+-                i.addCategory(Intent.CATEGORY_OPENABLE)
+-                i.putExtra(Intent.EXTRA_TITLE, "Gadgetbridge.${exporter.getFileExtension()}")
+-                i.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                 val title: String = requireContext().applicationContext.getString(R.string.choose_auto_export_location)
++                val chooseFlags = Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
++                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
++                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
++
++                val i: Intent = if (picksBackupDirectory()) {
++                    Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(chooseFlags)
++                } else {
++                    Intent(Intent.ACTION_CREATE_DOCUMENT)
++                        .setType(exporter.getFileMimeType())
++                        .addCategory(Intent.CATEGORY_OPENABLE)
++                        .putExtra(Intent.EXTRA_TITLE, "Gadgetbridge.${exporter.getFileExtension()}")
++                        .addFlags(chooseFlags)
++                }
+                 exportLocationPicker.launch(Intent.createChooser(i, title))
+ 
+                 true
+@@ -147,6 +165,14 @@ abstract class AbstractAutoExportSettingsFragment(
+         }
+     }
+ 
++    /**
++     * Whether the location picker picks a directory instead of a single file.
++     *
++     * The zip export writes a new timestamped backup per run and prunes the expired ones, which
++     * needs a directory. The db, fit and gpx exports write a single file, so they keep picking one.
++     */
++    private fun picksBackupDirectory(): Boolean = exporter is PeriodicZipExporter
++
+     /**
+      * Update the scheduled execution after a slight delay to allow for preferences to be persisted.
+      */
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/OnOpenBackupSettingsActivity.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/OnOpenBackupSettingsActivity.kt
+new file mode 100644
+index 0000000000..9e473cb15a
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/OnOpenBackupSettingsActivity.kt
+@@ -0,0 +1,286 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.activities.automations
++
++import android.content.Intent
++import android.net.Uri
++import android.os.Bundle
++import android.widget.Toast
++import androidx.activity.result.ActivityResultLauncher
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.lifecycle.lifecycleScope
++import androidx.preference.Preference
++import androidx.preference.PreferenceFragmentCompat
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import nodomain.freeyourgadget.gadgetbridge.R
++import nodomain.freeyourgadget.gadgetbridge.activities.AbstractPreferenceFragment
++import nodomain.freeyourgadget.gadgetbridge.activities.AbstractSettingsActivityV2
++import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
++import nodomain.freeyourgadget.gadgetbridge.util.GB
++import nodomain.freeyourgadget.gadgetbridge.util.UriUtils
++import nodomain.freeyourgadget.gadgetbridge.util.backup.OnOpenBackupPrefs
++import nodomain.freeyourgadget.gadgetbridge.util.backup.OnOpenBackupRunner
++import org.slf4j.Logger
++import org.slf4j.LoggerFactory
++import java.util.Date
++import java.util.concurrent.TimeUnit
++
++class OnOpenBackupSettingsActivity : AbstractSettingsActivityV2() {
++    override fun newFragment(): PreferenceFragmentCompat {
++        return OnOpenBackupSettingsFragment()
++    }
++
++    companion object {
++        class OnOpenBackupSettingsFragment : AbstractPreferenceFragment() {
++
++            private lateinit var backupFolderPicker: ActivityResultLauncher<Uri?>
++
++            override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
++                setPreferencesFromResource(R.xml.on_open_backup_settings, rootKey)
++
++                backupFolderPicker = registerForActivityResult(
++                    ActivityResultContracts.OpenDocumentTree()
++                ) { uri: Uri? ->
++                    onBackupFolderPicked(uri)
++                }
++
++                findPreference<Preference>(OnOpenBackupPrefs.LOCATION)?.setOnPreferenceClickListener {
++                    backupFolderPicker.launch(null)
++                    true
++                }
++
++                findPreference<Preference>(OnOpenBackupPrefs.RUN_NOW)?.setOnPreferenceClickListener {
++                    runBackupNow()
++                    true
++                }
++
++                findPreference<Preference>(OnOpenBackupPrefs.CLEAN_NOW)?.setOnPreferenceClickListener {
++                    deleteExpiredBackupsNow()
++                    true
++                }
++
++                updateSummaries()
++            }
++
++            override fun onResume() {
++                super.onResume()
++
++                // The user may be coming back from the folder picker or from another screen
++                updateSummaries()
++            }
++
++            /**
++             * The user picked a backup folder. Persist the read/write grant so that the backup can
++             * still write there after the app is restarted.
++             */
++            private fun onBackupFolderPicked(uri: Uri?) {
++                if (uri == null) {
++                    LOG.error("Got no uri")
++                    return
++                }
++
++                try {
++                    requireContext().contentResolver.takePersistableUriPermission(
++                        uri,
++                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
++                    )
++                } catch (e: SecurityException) {
++                    // Some document providers do not support persistable grants, the location is
++                    // still stored so that the user does not lose the selection
++                    LOG.warn("Failed to take persistable uri permission for {}", uri, e)
++                }
++
++                OnOpenBackupPrefs.setLocation(uri.toString())
++                updateSummaries()
++            }
++
++            /**
++             * Run the on-open backup right away. Runs on the IO dispatcher, as writing the backup
++             * takes a while and must never block the main thread.
++             */
++            private fun runBackupNow() {
++                val context = requireContext().applicationContext
++                val prefRunNow = findPreference<Preference>(OnOpenBackupPrefs.RUN_NOW) ?: return
++                prefRunNow.isEnabled = false
++
++                lifecycleScope.launch {
++                    val (success, message) = withContext(Dispatchers.IO) {
++                        try {
++                            val result = OnOpenBackupRunner.runNow(context)
++                            if (result.success) {
++                                true to context.getString(R.string.backup_on_open_status_ok)
++                            } else {
++                                false to context.getString(
++                                    R.string.backup_on_open_status_failed,
++                                    result.message
++                                )
++                            }
++                        } catch (e: CancellationException) {
++                            throw e
++                        } catch (e: Exception) {
++                            LOG.error("Failed to run the on-open backup", e)
++                            false to context.getString(
++                                R.string.backup_on_open_status_failed,
++                                e.message ?: e.toString()
++                            )
++                        }
++                    }
++
++                    prefRunNow.isEnabled = true
++
++                    if (!isAdded) {
++                        return@launch
++                    }
++
++                    updateSummaries()
++                    GB.toast(
++                        requireContext(),
++                        message,
++                        Toast.LENGTH_LONG,
++                        if (success) GB.INFO else GB.ERROR
++                    )
++                }
++            }
++
++            /**
++             * Delete the backups that are older than the retention period, on a background
++             * dispatcher, and report how many files were removed.
++             */
++            private fun deleteExpiredBackupsNow() {
++                val context = requireContext().applicationContext
++                val prefCleanNow = findPreference<Preference>(OnOpenBackupPrefs.CLEAN_NOW) ?: return
++                prefCleanNow.isEnabled = false
++
++                lifecycleScope.launch {
++                    val outcome: Pair<Int, String?> = withContext(Dispatchers.IO) {
++                        try {
++                            OnOpenBackupRunner.pruneNow(context) to null
++                        } catch (e: CancellationException) {
++                            throw e
++                        } catch (e: Exception) {
++                            LOG.error("Failed to delete the expired on-open backups", e)
++                            -1 to (e.message ?: e.toString())
++                        }
++                    }
++
++                    val deleted = outcome.first
++                    val errorMessage = outcome.second
++
++                    prefCleanNow.isEnabled = true
++
++                    if (!isAdded) {
++                        return@launch
++                    }
++
++                    updateSummaries()
++
++                    val message = if (deleted >= 0) {
++                        getString(R.string.backup_on_open_deleted_count, deleted)
++                    } else {
++                        getString(
++                            R.string.backup_on_open_status_failed,
++                            errorMessage ?: getString(R.string.unknown)
++                        )
++                    }
++                    GB.toast(
++                        requireContext(),
++                        message,
++                        Toast.LENGTH_LONG,
++                        if (deleted >= 0) GB.INFO else GB.ERROR
++                    )
++                }
++            }
++
++            private fun updateSummaries() {
++                updateLocationSummary()
++                updateStatusSummary()
++                updateLastBackupSummary()
++            }
++
++            private fun updateLocationSummary() {
++                val location = OnOpenBackupPrefs.location()
++                val summary = if (location == null) {
++                    getString(R.string.pref_summary_backup_on_open_location_default)
++                } else {
++                    try {
++                        UriUtils.resolveLocationSummary(requireContext(), location)
++                    } catch (e: Exception) {
++                        LOG.warn("Failed to resolve the summary of the backup location {}", location, e)
++                        location
++                    }
++                }
++                findPreference<Preference>(OnOpenBackupPrefs.LOCATION)?.summary = summary
++            }
++
++            private fun updateStatusSummary() {
++                val lastResult = OnOpenBackupPrefs.lastResult()
++                val summary = when {
++                    lastResult.isNullOrBlank() -> getString(R.string.unknown)
++                    lastResult.equals(RESULT_OK, ignoreCase = true) -> getString(R.string.backup_on_open_status_ok)
++                    else -> getString(R.string.backup_on_open_status_failed, lastResult)
++                }
++                findPreference<Preference>(STATUS_KEY)?.summary = summary
++            }
++
++            private fun updateLastBackupSummary() {
++                val lastRun = OnOpenBackupPrefs.lastRun()
++                val summary = if (lastRun > 0L) {
++                    formatDateWithDiff(Date(lastRun))
++                } else {
++                    getString(R.string.unknown)
++                }
++                findPreference<Preference>(LAST_BACKUP_KEY)?.summary = summary
++            }
++
++            /**
++             * Format a date, including the difference to the current time.
++             */
++            private fun formatDateWithDiff(date: Date): String {
++                val diffMillis = System.currentTimeMillis() - date.time
++                return if (diffMillis > 0) {
++                    requireContext().getString(
++                        R.string.datetime_in_the_past,
++                        DateTimeUtils.formatDateTime(date),
++                        DateTimeUtils.formatDurationHoursMinutes(diffMillis, TimeUnit.MILLISECONDS)
++                    )
++                } else {
++                    requireContext().getString(
++                        R.string.datetime_in_the_future,
++                        DateTimeUtils.formatDateTime(date),
++                        DateTimeUtils.formatDurationHoursMinutes(-diffMillis, TimeUnit.MILLISECONDS)
++                    )
++                }
++            }
++
++            companion object {
++                val LOG: Logger = LoggerFactory.getLogger(OnOpenBackupSettingsFragment::class.java)
++
++                /** Key of the read-only preference that shows the outcome of the last backup. */
++                private const val STATUS_KEY = "on_open_backup_status"
++
++                /** Key of the read-only preference that shows when the last backup was written. */
++                private const val LAST_BACKUP_KEY = "on_open_backup_last_backup"
++
++                /** The result [OnOpenBackupPrefs] stores after a successful backup. */
++                private const val RESULT_OK = "ok"
++            }
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/welcome/WelcomeActivity.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/welcome/WelcomeActivity.java
+index ef82ef3768..6a782f9229 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/welcome/WelcomeActivity.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/welcome/WelcomeActivity.java
+@@ -30,6 +30,7 @@ import dagger.hilt.android.AndroidEntryPoint;
+ import nodomain.freeyourgadget.gadgetbridge.GBApplication;
+ import nodomain.freeyourgadget.gadgetbridge.databinding.ActivityWelcomeBinding;
+ import nodomain.freeyourgadget.gadgetbridge.activities.AbstractGBActivity;
++import nodomain.freeyourgadget.gadgetbridge.util.backup.OnOpenBackupRunner;
+ 
+ @AndroidEntryPoint
+ public class WelcomeActivity extends AbstractGBActivity {
+@@ -50,6 +51,10 @@ public class WelcomeActivity extends AbstractGBActivity {
+ 
+         // Set up welcome page indicator
+         binding.welcomePageIndicator.setViewPager(binding.welcomeViewpager);
++
++        // Back up the database and preferences once per app open, in the background. The welcome
++        // flow is shown before the launcher activity on first run, which must still back up.
++        OnOpenBackupRunner.triggerOnAppOpen(this);
+     }
+ 
+     @Override
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/PeriodicExporter.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/PeriodicExporter.kt
+index 5b183a8694..76fe7fb68f 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/PeriodicExporter.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/PeriodicExporter.kt
+@@ -24,6 +24,16 @@ abstract class PeriodicExporter {
+     abstract fun getFileMimeType(): String
+     abstract fun getFileExtension(): String
+ 
++    /**
++     * Schedules the next period of the periodic export.
++     *
++     * This is called on every app start, and it must never throw away a healthy schedule: the
++     * combination of cancelAllWorkByTag and CANCEL_AND_REENQUEUE used to reset the schedule on
++     * every launch, which is one of the reasons an enabled auto export could silently stop running
++     * for weeks (WorkManager is also unreliable on aggressive vendor ROMs and during Doze).
++     * UPDATE keeps the existing work, its id and its next run time, and only replaces the
++     * specification when the interval, the start time or the tags changed.
++     */
+     fun scheduleNextExecution(context: Context) {
+         try {
+             val keyPrefix = getKeyPrefix()
+@@ -33,19 +43,22 @@ abstract class PeriodicExporter {
+             val prefKeyStartTime = keyPrefix + "auto_export_start_time"
+ 
+             val workManager = WorkManager.getInstance(context)
+-            workManager.cancelAllWorkByTag(getWorkTag())
+ 
+             val prefs: Prefs = GBApplication.getPrefs()
+ 
+             val autoExportEnabled = prefs.getBoolean(prefKeyEnabled, false)
+             if (!autoExportEnabled) {
+                 LOG.info("Not scheduling {} - not enabled", getWorkerClass().simpleName)
++                // Only cancel our own unique work, never all work by tag: this runs on every app
++                // start and must not disturb a schedule it is not responsible for
++                workManager.cancelUniqueWork(getWorkTag())
+                 return
+             }
+ 
+             val autoExportInterval = prefs.getInt(prefKeyInterval, 0)
+             if (autoExportInterval == 0) {
+                 LOG.info("Not scheduling {}, interval set to 0", getWorkerClass().simpleName)
++                workManager.cancelUniqueWork(getWorkTag())
+                 return
+             }
+             val exportPeriodMillis = autoExportInterval * 60 * 60 * 1000L
+@@ -76,7 +89,7 @@ abstract class PeriodicExporter {
+ 
+             workManager.enqueueUniquePeriodicWork(
+                 getWorkTag(),
+-                ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE,
++                ExistingPeriodicWorkPolicy.UPDATE,
+                 exportRequest
+             )
+         } catch (e: Exception) {
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/AbstractZipBackupJob.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/AbstractZipBackupJob.java
+index be5571fd2b..8a65928757 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/AbstractZipBackupJob.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/AbstractZipBackupJob.java
+@@ -38,6 +38,13 @@ public abstract class AbstractZipBackupJob implements Runnable {
+     public static final String PREFS_HUAWEI_CAPABILITIES_FILENAME = "preferences/huawei_capabilities_%s.json";
+     public static final String EXTERNAL_FILES_FOLDER = "files";
+ 
++    /**
++     * Directory under the app's external files dir that the on-open backups are written to when the
++     * user did not pick a folder. It is never included in a backup itself, otherwise every backup
++     * would contain all the previous ones.
++     */
++    public static final String BACKUP_DIR = "backups";
++
+     public static final int VERSION = 1;
+ 
+     protected static final Gson GSON = new GsonBuilder()
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupRetention.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupRetention.kt
+new file mode 100644
+index 0000000000..e5fad37ee1
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupRetention.kt
+@@ -0,0 +1,64 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.backup
++
++import java.time.LocalDate
++
++/**
++ * Decides which backup files the retention deletes.
++ *
++ * This deliberately contains no Android code at all, so the decision can be unit tested on a
++ * plain JVM: the only thing that can go wrong here is deleting a file the user still needs.
++ */
++object BackupRetention {
++    /**
++     * The oldest date that is still kept: the last [retentionDays] days, today inclusive. A
++     * retention of 1 only keeps today's backups, a retention of 7 keeps today and the previous
++     * six days.
++     */
++    fun cutoff(today: LocalDate, retentionDays: Int): LocalDate {
++        // A retention of 0 or less would delete everything, which must never happen
++        val days = retentionDays.coerceAtLeast(1).toLong()
++        return today.minusDays(days - 1L)
++    }
++
++    /**
++     * Whether the backup file [fileName] is older than the retention period and can be deleted.
++     * Anything that is not a backup file this feature wrote is never deleted.
++     */
++    fun shouldDelete(fileName: String, today: LocalDate, retentionDays: Int): Boolean {
++        val date = OnOpenBackupPrefs.dateOf(fileName) ?: return false
++        return date.isBefore(cutoff(today, retentionDays))
++    }
++
++    /**
++     * The backup files to delete from [fileNames], which may contain any files of the directory.
++     *
++     * The newest backup we have is always kept, even when it is older than the retention period: if
++     * the backups have been failing for a while, pruning must not leave the user without any backup.
++     */
++    fun filesToDelete(
++        fileNames: Collection<String>,
++        today: LocalDate,
++        retentionDays: Int,
++    ): List<String> {
++        val ourFiles = fileNames.filter { OnOpenBackupPrefs.isBackupFileName(it) }
++        // The file name is gadgetbridge_yyyyMMddHHmmss.zip, so the plain string order is the age order
++        val newest = ourFiles.maxOrNull()
++        return ourFiles.filter { it != newest && shouldDelete(it, today, retentionDays) }
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt
+new file mode 100644
+index 0000000000..ee50ce7730
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt
+@@ -0,0 +1,366 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.backup
++
++import android.content.ContentResolver
++import android.content.Context
++import android.net.Uri
++import android.provider.DocumentsContract
++import androidx.core.net.toUri
++import nodomain.freeyourgadget.gadgetbridge.util.FileUtils
++import org.slf4j.LoggerFactory
++import java.io.File
++import java.io.FileOutputStream
++import java.io.IOException
++
++private val LOG = LoggerFactory.getLogger(BackupStorage::class.java)
++
++private const val COPY_BUFFER_SIZE = 64 * 1024
++private const val MIME_TYPE_ZIP = "application/zip"
++
++/**
++ * A directory that backups are written into, either a SAF tree the user picked or a plain
++ * directory of the app.
++ *
++ * Every backup is written as a new file with a timestamped name, so an existing backup is
++ * never touched by a failing run. Implementations do not throw on [writeBackup] and
++ * [deleteBackup]: they report failure with the return value and remove any partial file they
++ * created themselves.
++ */
++interface BackupStorage {
++    /** Human readable description of the target, only used for logging and for user messages. */
++    fun describe(): String
++
++    /** Names of all files in the target directory, so that retention can inspect them. */
++    fun listBackupFiles(): List<String>
++
++    /**
++     * Writes [source] into the target directory as [fileName].
++     *
++     * @return the name of the created file, which can differ from [fileName] when the document
++     * provider renames it, or null if the backup could not be written, in which case no partial
++     * file is left behind.
++     */
++    fun writeBackup(fileName: String, source: File): String?
++
++    /** Deletes the backup file [fileName], returning whether it was deleted. */
++    fun deleteBackup(fileName: String): Boolean
++}
++
++/**
++ * Backups in a plain directory, used when the user did not pick a folder (or picked one the app
++ * cannot write to).
++ */
++internal class FileBackupStorage(private val dir: File) : BackupStorage {
++    override fun describe(): String = dir.absolutePath
++
++    override fun listBackupFiles(): List<String> = dir.list()?.toList() ?: emptyList()
++
++    override fun writeBackup(fileName: String, source: File): String? {
++        val target = File(dir, fileName)
++        // Write next to the target first, so that a half copied file never gets a valid backup name
++        val partial = File(dir, "$fileName.part")
++        return try {
++            if (!dir.isDirectory && !dir.mkdirs()) {
++                throw IOException("Unable to create the directory $dir")
++            }
++
++            source.inputStream().use { input ->
++                FileOutputStream(partial).use { output ->
++                    input.copyTo(output, COPY_BUFFER_SIZE)
++                    output.flush()
++                    output.fd.sync()
++                }
++            }
++
++            if (partial.length() != source.length()) {
++                throw IOException("Copied ${partial.length()} of ${source.length()} bytes to $partial")
++            }
++
++            if (!partial.renameTo(target)) {
++                throw IOException("Unable to rename $partial to $target")
++            }
++
++            LOG.info("Wrote backup {} to {}", target.name, dir)
++            target.name
++        } catch (e: Exception) {
++            LOG.error("Failed to write the backup {} into {}", fileName, dir, e)
++            partial.delete()
++            null
++        }
++    }
++
++    override fun deleteBackup(fileName: String): Boolean {
++        return try {
++            File(dir, fileName).delete()
++        } catch (e: Exception) {
++            LOG.warn("Failed to delete the backup {}", fileName, e)
++            false
++        }
++    }
++}
++
++/**
++ * Backups in a SAF tree the user picked with {@code ACTION_OPEN_DOCUMENT_TREE}.
++ *
++ * A new document is created for every backup: a persisted document uri points at a single file,
++ * which cannot be written without truncating it first.
++ */
++internal class SafBackupStorage(
++    private val context: Context,
++    private val treeUri: Uri,
++) : BackupStorage {
++    private val resolver: ContentResolver
++        get() = context.contentResolver
++
++    /** The document uri of the tree itself, the parent of all the backups. */
++    private val parentUri: Uri
++        get() = DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
++
++    private val childrenUri: Uri
++        get() = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
++
++    /** Last known children of the tree, so a deletion does not need to query the provider again. */
++    private var knownChildren: Map<String, Uri>? = null
++
++    override fun describe(): String = treeUri.toString()
++
++    override fun listBackupFiles(): List<String> {
++        val children = queryChildren()
++        knownChildren = children
++        return children.keys.toList()
++    }
++
++    override fun writeBackup(fileName: String, source: File): String? {
++        var documentUri: Uri? = null
++        try {
++            val createdUri = DocumentsContract.createDocument(resolver, parentUri, MIME_TYPE_ZIP, fileName)
++                ?: throw IOException("The document provider did not create a document for $fileName")
++            documentUri = createdUri
++
++            val actualName = displayNameOf(createdUri) ?: fileName
++
++            val outputStream = resolver.openOutputStream(createdUri, "wt")
++                ?: throw IOException("Unable to open an output stream for $createdUri")
++            outputStream.use { output ->
++                source.inputStream().use { input ->
++                    input.copyTo(output, COPY_BUFFER_SIZE)
++                }
++                output.flush()
++            }
++
++            knownChildren = null
++
++            // A provider that reports a stale or unknown size is not a reason to fail the backup
++            val writtenSize = sizeOf(createdUri)
++            if (writtenSize >= 0 && writtenSize != source.length()) {
++                LOG.warn(
++                    "The provider reports {} bytes for {}, expected {} bytes",
++                    writtenSize,
++                    actualName,
++                    source.length(),
++                )
++            }
++
++            LOG.info("Wrote backup {} to {}", actualName, treeUri)
++            return actualName
++        } catch (e: Exception) {
++            LOG.error("Failed to write the backup {} into {}", fileName, treeUri, e)
++            documentUri?.let { deleteDocumentQuietly(it) }
++            knownChildren = null
++            return null
++        }
++    }
++
++    override fun deleteBackup(fileName: String): Boolean {
++        val documentUri = knownChildren?.get(fileName) ?: findChild(fileName)
++        if (documentUri == null) {
++            return false
++        }
++
++        return deleteDocumentQuietly(documentUri)
++    }
++
++    private fun findChild(fileName: String): Uri? {
++        return try {
++            queryChildren()[fileName]
++        } catch (e: Exception) {
++            LOG.warn("Failed to list the children of {}", treeUri, e)
++            null
++        }
++    }
++
++    private fun queryChildren(): Map<String, Uri> {
++        val result = LinkedHashMap<String, Uri>()
++
++        resolver.query(
++            childrenUri,
++            arrayOf(
++                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
++                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
++            ),
++            null,
++            null,
++            null,
++        )?.use { cursor ->
++            while (cursor.moveToNext()) {
++                val documentId = cursor.getString(0) ?: continue
++                val displayName = cursor.getString(1) ?: continue
++                result[displayName] = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
++            }
++        }
++
++        return result
++    }
++
++    private fun displayNameOf(documentUri: Uri): String? {
++        return try {
++            resolver.query(
++                documentUri,
++                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
++                null,
++                null,
++                null,
++            )?.use { cursor ->
++                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
++            }
++        } catch (e: Exception) {
++            LOG.warn("Failed to read the name of {}", documentUri, e)
++            null
++        }
++    }
++
++    /** @return the size of the document, or -1 when the provider does not report it. */
++    private fun sizeOf(documentUri: Uri): Long {
++        return try {
++            resolver.query(
++                documentUri,
++                arrayOf(DocumentsContract.Document.COLUMN_SIZE),
++                null,
++                null,
++                null,
++            )?.use { cursor ->
++                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else -1L
++            } ?: -1L
++        } catch (e: Exception) {
++            LOG.debug("Failed to read the size of {}", documentUri, e)
++            -1L
++        }
++    }
++
++    private fun deleteDocumentQuietly(documentUri: Uri): Boolean {
++        return try {
++            knownChildren = null
++            DocumentsContract.deleteDocument(resolver, documentUri)
++        } catch (e: Exception) {
++            LOG.warn("Failed to delete {}", documentUri, e)
++            false
++        }
++    }
++}
++
++/**
++ * Resolves the directory the backups are written into.
++ */
++internal object BackupStorages {
++    /** The folder under the app's external files dir that is used when no location is set. */
++    fun defaultBackupDir(): File = File(FileUtils.getExternalFilesDir(), AbstractZipBackupJob.BACKUP_DIR)
++
++    /**
++     * The directory for the backup that runs when the app is opened: the SAF tree the user picked,
++     * or the app's own backup folder when there is none. A stored value that is not a tree is
++     * ignored, since a persisted single document cannot be used to create new files next to it.
++     */
++    fun forOnOpenBackup(context: Context): BackupStorage? {
++        val location = OnOpenBackupPrefs.location()
++        if (location != null) {
++            val uri = location.toUri()
++            if (DocumentsContract.isTreeUri(uri)) {
++                return SafBackupStorage(context, uri)
++            }
++            LOG.warn(
++                "Ignoring the backup location {}, it is not a directory; using the default directory",
++                location,
++            )
++        }
++
++        return try {
++            val dir = defaultBackupDir()
++            if (!dir.isDirectory && !dir.mkdirs()) {
++                LOG.error("Unable to create the default backup directory {}", dir)
++                null
++            } else {
++                FileBackupStorage(dir)
++            }
++        } catch (e: Exception) {
++            LOG.error("Unable to resolve the default backup directory", e)
++            null
++        }
++    }
++
++    /**
++     * The directory for the periodic zip export, which stores its location in a different
++     * preference.
++     *
++     * That preference has historically been a single document picked with
++     * {@code ACTION_CREATE_DOCUMENT}, so when there is no tree permission for its parent directory
++     * there is no way to create timestamped files next to it; the caller falls back to overwriting
++     * that single document then, which is safe now that the export goes through a temporary file.
++     */
++    fun forAutoExport(context: Context, location: String?): BackupStorage? {
++        if (location.isNullOrBlank()) {
++            return null
++        }
++
++        val uri = location.toUri()
++
++        if (DocumentsContract.isTreeUri(uri)) {
++            return SafBackupStorage(context, uri)
++        }
++
++        val parentTreeUri = parentTreeUriOf(uri) ?: return null
++        val hasGrant = context.contentResolver.persistedUriPermissions.any { permission ->
++            permission.uri == parentTreeUri && permission.isWritePermission
++        }
++        if (!hasGrant) {
++            LOG.info("No persisted tree permission for {}, keeping the single file auto export", parentTreeUri)
++            return null
++        }
++
++        return SafBackupStorage(context, parentTreeUri)
++    }
++
++    /**
++     * The tree uri of the directory a document uri lives in, or null when that cannot be derived.
++     */
++    private fun parentTreeUriOf(documentUri: Uri): Uri? {
++        return try {
++            val authority = documentUri.authority ?: return null
++            val documentId = DocumentsContract.getDocumentId(documentUri) ?: return null
++            val parentDocumentId = when {
++                documentId.contains('/') -> documentId.substringBeforeLast('/')
++                documentId.endsWith(':') -> return null
++                documentId.contains(':') -> documentId.substringBefore(':') + ":"
++                else -> return null
++            }
++            DocumentsContract.buildTreeDocumentUri(authority, parentDocumentId)
++        } catch (e: Exception) {
++            LOG.warn("Failed to derive the parent tree of {}", documentUri, e)
++            null
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt
+new file mode 100644
+index 0000000000..c3d87be1e9
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt
+@@ -0,0 +1,141 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.backup
++
++import nodomain.freeyourgadget.gadgetbridge.GBApplication
++import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs
++import nodomain.freeyourgadget.gadgetbridge.util.Prefs
++import java.time.LocalDate
++import java.time.LocalDateTime
++import java.time.format.DateTimeFormatter
++
++/**
++ * Preferences of the backup that runs every time the app is opened.
++ *
++ * The periodic exporter depends on WorkManager, which aggressive vendor ROMs (and Doze) routinely
++ * never run, so a background-only schedule can silently stop producing backups for weeks. The
++ * on-open backup instead runs whenever the user actually launches the app, which is the one
++ * moment the process is guaranteed to be alive and allowed to write.
++ */
++object OnOpenBackupPrefs {
++    /** Whether the on-open backup runs at all. */
++    const val ENABLED = "on_open_backup_enabled"
++
++    /**
++     * The target directory as a persisted SAF tree uri, or {@code null} to back up into the app's
++     * external files dir.
++     */
++    const val LOCATION = "on_open_backup_location"
++
++    /** How many days of backups to keep. Stored by an EditTextPreference, so it is a String. */
++    const val RETENTION_DAYS = "on_open_backup_retention_days"
++
++    /** Epoch millis of the last successful on-open backup. */
++    const val LAST_RUN = "on_open_backup_last_run"
++
++    /** File name of the last successful on-open backup. */
++    const val LAST_FILE = "on_open_backup_last_file"
++
++    /** User readable outcome of the last on-open backup, shown on the settings screen. */
++    const val LAST_RESULT = "on_open_backup_last_result"
++
++    /** Manual trigger from the settings screen. */
++    const val RUN_NOW = "on_open_backup_run_now"
++
++    /** Manual cleanup trigger from the settings screen. */
++    const val CLEAN_NOW = "on_open_backup_clean_now"
++
++    const val DEFAULT_ENABLED = true
++    const val DEFAULT_RETENTION_DAYS = 7
++
++    /** Upper bound for the retention setting, so a typo cannot keep years of 27MB backups. */
++    const val MAX_RETENTION_DAYS = 365
++
++    /** Prefix and suffix of the files this feature writes, in the same style as manual exports. */
++    const val FILE_PREFIX = "gadgetbridge_"
++    const val FILE_SUFFIX = ".zip"
++
++    private val FILE_NAME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
++
++    fun prefs(): Prefs = GBApplication.getPrefs()
++
++    fun isEnabled(): Boolean = prefs().getBoolean(ENABLED, DEFAULT_ENABLED)
++
++    fun location(): String? = prefs().getString(LOCATION, null)?.takeIf { it.isNotBlank() }
++
++    fun setLocation(uri: String?) {
++        prefs().preferences.edit().putString(LOCATION, uri).apply()
++    }
++
++    fun retentionDays(): Int {
++        val days = prefs().getInt(RETENTION_DAYS, DEFAULT_RETENTION_DAYS)
++        return if (days in 1..MAX_RETENTION_DAYS) days else DEFAULT_RETENTION_DAYS
++    }
++
++    fun lastRun(): Long = prefs().getLong(LAST_RUN, 0L)
++
++    fun lastFile(): String? = prefs().getString(LAST_FILE, null)
++
++    fun lastResult(): String? = prefs().getString(LAST_RESULT, null)
++
++    fun recordSuccess(fileName: String, whenMillis: Long) {
++        prefs().preferences.edit()
++            .putLong(LAST_RUN, whenMillis)
++            .putString(LAST_FILE, fileName)
++            .putString(LAST_RESULT, "ok")
++            .apply()
++    }
++
++    fun recordFailure(message: String) {
++        prefs().preferences.edit()
++            .putString(LAST_RESULT, message)
++            .apply()
++    }
++
++    /**
++     * The file name for a backup taken at [time], e.g. {@code gadgetbridge_20261115_083000.zip}.
++     */
++    fun fileNameFor(time: LocalDateTime): String =
++        FILE_PREFIX + time.format(FILE_NAME_FORMAT) + FILE_SUFFIX
++
++    /**
++     * Whether [fileName] is a backup written by this feature, so pruning never deletes files the
++     * user put there.
++     */
++    fun isBackupFileName(fileName: String): Boolean {
++        if (!fileName.startsWith(FILE_PREFIX) || !fileName.endsWith(FILE_SUFFIX)) {
++            return false
++        }
++        val stamp = fileName.removePrefix(FILE_PREFIX).removeSuffix(FILE_SUFFIX)
++        return stamp.length == 14 && stamp.all { it.isDigit() }
++    }
++
++    /**
++     * The date encoded in a backup file name, or {@code null} when it is not one of ours.
++     */
++    fun dateOf(fileName: String): LocalDate? {
++        if (!isBackupFileName(fileName)) {
++            return null
++        }
++        val stamp = fileName.removePrefix(FILE_PREFIX).removeSuffix(FILE_SUFFIX)
++        return try {
++            LocalDate.parse(stamp.substring(0, 8), DateTimeFormatter.ofPattern("yyyyMMdd"))
++        } catch (e: Exception) {
++            null
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt
+new file mode 100644
+index 0000000000..70756e35cc
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt
+@@ -0,0 +1,422 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.backup
++
++import android.content.Context
++import androidx.annotation.WorkerThread
++import nodomain.freeyourgadget.gadgetbridge.GBEnvironment
++import org.slf4j.LoggerFactory
++import java.io.File
++import java.time.LocalDate
++import java.time.LocalDateTime
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicBoolean
++
++/**
++ * The backup that runs when the user opens the app.
++ *
++ * This intentionally uses no background scheduling at all: the only moment a backup is guaranteed
++ * to happen is when the user launches the app, because aggressive vendor ROMs and Doze routinely
++ * never run WorkManager jobs, which is how backups can silently stop for weeks.
++ *
++ * Every run writes a new {@code gadgetbridge_yyyyMMddHHmmss.zip} through a temporary file, so a
++ * failing run can never destroy an existing backup, and then deletes the backups that are older
++ * than the retention period.
++ */
++object OnOpenBackupRunner {
++    private val LOG = LoggerFactory.getLogger(OnOpenBackupRunner::class.java)
++
++    /** A backup that succeeded this recently makes a new on-open backup pointless. */
++    const val MIN_INTERVAL_MILLIS: Long = 60_000L
++
++    /** The database this backup contains, used to tell whether it changed since the last run. */
++    private const val DATABASE_NAME = "Gadgetbridge"
++
++    /** SQLite sidecar files, which change even when the database file itself does not. */
++    private val DATABASE_SIDECAR_SUFFIXES = arrayOf("-journal", "-wal", "-shm")
++
++    /** Stale temporary files of crashed runs are removed after this many hours. */
++    private const val STALE_TEMP_FILE_AGE_HOURS = 24L
++
++    /** Guards against two backups writing at the same time, e.g. an app open during a manual run. */
++    private val running = AtomicBoolean(false)
++
++    /** The outcome of a backup, for the settings screen and for the callers of [runNow]. */
++    data class Result(
++        val success: Boolean,
++        val message: String,
++        val fileName: String?,
++    )
++
++    /**
++     * Runs a backup right now. This is the manual trigger of the settings screen, so it ignores the
++     * enable switch and the [MIN_INTERVAL_MILLIS] throttle; it does not ignore a backup that is
++     * already running and returns a "busy" [Result] for it.
++     *
++     * This method blocks until the backup has been written, call it from a background thread.
++     */
++    @JvmStatic
++    @WorkerThread
++    fun runNow(context: Context): Result {
++        val appContext = context.applicationContext ?: context
++
++        return try {
++            val storage = BackupStorages.forOnOpenBackup(appContext)
++            if (storage == null) {
++                val message = "no writable backup directory"
++                LOG.error("Unable to run the on-open backup: {}", message)
++                OnOpenBackupPrefs.recordFailure(message)
++                Result(false, message, null)
++            } else {
++                export(appContext, storage, null, recordResult = true)
++            }
++        } catch (t: Throwable) {
++            LOG.error("Failed to run the on-open backup", t)
++            val message = t.message ?: t.javaClass.simpleName
++            recordFailureQuietly(message)
++            Result(false, message, null)
++        }
++    }
++
++    /**
++     * Triggers the on-open backup in the background, called from the launcher activity.
++     *
++     * Does nothing when the feature is disabled, when a backup is already running, or when the last
++     * successful backup is less than [MIN_INTERVAL_MILLIS] ago. It never blocks the caller and never
++     * throws.
++     */
++    @JvmStatic
++    fun triggerOnAppOpen(context: Context) {
++        try {
++            // Robolectric tests start the launcher activity too, and must not write backups
++            if (GBEnvironment.env()?.isTest == true) {
++                LOG.debug("Not running the on-open backup in a test environment")
++                return
++            }
++
++            if (!OnOpenBackupPrefs.isEnabled()) {
++                LOG.debug("Not running the on-open backup, it is disabled")
++                return
++            }
++
++            if (running.get()) {
++                LOG.info("Not running the on-open backup, another backup is already running")
++                return
++            }
++
++            val lastRun = OnOpenBackupPrefs.lastRun()
++            if (lastRun > 0L && System.currentTimeMillis() - lastRun < MIN_INTERVAL_MILLIS) {
++                LOG.debug("Not running the on-open backup, the last one is too recent")
++                return
++            }
++
++            val appContext = context.applicationContext ?: context
++
++            // Nothing to back up when neither the database nor the preferences changed since the
++            // last backup: writing another 20MB copy of the same data on every app open would fill
++            // the storage without giving the user anything to restore. A changed database (a sync)
++            // or changed preferences always produce a new backup.
++            if (lastRun > 0L && !hasDataChangedSince(appContext, lastRun)) {
++                LOG.debug("Not running the on-open backup, nothing changed since the last one")
++                return
++            }
++
++            val thread = Thread({
++                try {
++                    val result = runNow(appContext)
++                    if (result.success) {
++                        LOG.info("On-open backup finished: {}", result.message)
++                    } else {
++                        LOG.warn("On-open backup failed: {}", result.message)
++                    }
++                } catch (t: Throwable) {
++                    // runNow does not throw, but a backup must never take the app down
++                    LOG.error("On-open backup crashed", t)
++                }
++            }, "on-open-backup")
++            thread.isDaemon = true
++            thread.start()
++        } catch (t: Throwable) {
++            LOG.error("Failed to trigger the on-open backup", t)
++        }
++    }
++
++    /**
++     * Whether the database or the preferences were modified after [whenMillis].
++     *
++     * A backup only contains the database, the preferences and the external files, so if none of
++     * those changed there is nothing new to write. The external files are left out of the check
++     * because they are rewritten by every sync that reports a raw fetch operation, and a missed
++     * backup is worse than a redundant one.
++     */
++    private fun hasDataChangedSince(context: Context, whenMillis: Long): Boolean {
++        return try {
++            if (lastModifiedOfDatabase(context) > whenMillis) {
++                return true
++            }
++            if (lastModifiedOfPreferences(context) > whenMillis) {
++                return true
++            }
++            false
++        } catch (t: Throwable) {
++            // When in doubt, write the backup
++            LOG.warn("Failed to determine whether the data changed, backing up anyway", t)
++            true
++        }
++    }
++
++    private fun lastModifiedOfDatabase(context: Context): Long {
++        val databaseFile = context.getDatabasePath(DATABASE_NAME)
++        var newest = databaseFile.lastModified()
++        for (suffix in DATABASE_SIDECAR_SUFFIXES) {
++            val sidecar = File(databaseFile.parentFile, databaseFile.name + suffix)
++            if (sidecar.exists()) {
++                newest = maxOf(newest, sidecar.lastModified())
++            }
++        }
++        return newest
++    }
++
++    private fun lastModifiedOfPreferences(context: Context): Long {
++        val prefsDir = File(context.applicationInfo.dataDir, "shared_prefs")
++        val files = prefsDir.listFiles() ?: return 0L
++        var newest = 0L
++        for (file in files) {
++            if (file.isFile) {
++                newest = maxOf(newest, file.lastModified())
++            }
++        }
++        return newest
++    }
++
++    /**
++     * Deletes the backups that are older than the retention period.
++     *
++     * @return the number of deleted files, or -1 when the directory could not be read or pruned.
++     * This method blocks, call it from a background thread.
++     */
++    @JvmStatic
++    @WorkerThread
++    fun pruneNow(context: Context): Int {
++        val appContext = context.applicationContext ?: context
++
++        return try {
++            val storage = BackupStorages.forOnOpenBackup(appContext)
++            if (storage == null) {
++                LOG.error("Unable to prune the backups, there is no backup directory")
++                -1
++            } else {
++                prune(storage)
++            }
++        } catch (t: Throwable) {
++            LOG.error("Failed to prune the backups", t)
++            -1
++        }
++    }
++
++    /**
++     * Writes a timestamped backup into [storage] and prunes the expired ones.
++     *
++     * Used by the periodic zip exporter too, which is why the result is not recorded in the
++     * on-open backup preferences unless [recordResult] is set. The optional [callback] receives the
++     * progress of the export (e.g. to update a notification) and is notified when the export
++     * finished but the file could not be written.
++     */
++    @WorkerThread
++    internal fun export(
++        context: Context,
++        storage: BackupStorage,
++        callback: ZipBackupCallback?,
++        recordResult: Boolean,
++    ): Result {
++        if (!running.compareAndSet(false, true)) {
++            val message = "a backup is already running"
++            LOG.warn("Not writing a backup into {}: {}", storage.describe(), message)
++            return Result(false, message, null)
++        }
++
++        var cleanupFile: File? = null
++
++        try {
++            deleteStaleTempFiles(context)
++
++            val tempFile = ZipBackupExportJob.createTempFile(context)
++            cleanupFile = tempFile
++
++            val listener = CapturingCallback(callback)
++            ZipBackupExportJob(context, listener, tempFile).run()
++
++            val exportError = listener.failureMessage
++                ?: if (!listener.succeeded) "the export did not complete" else null
++            if (exportError != null) {
++                LOG.error("Failed to export the backup: {}", exportError)
++                if (recordResult) {
++                    recordFailureQuietly(exportError)
++                }
++                return Result(false, exportError, null)
++            }
++
++            val fileName = OnOpenBackupPrefs.fileNameFor(LocalDateTime.now())
++            val writtenName = storage.writeBackup(fileName, tempFile)
++            if (writtenName == null) {
++                val message = "failed to write $fileName to ${storage.describe()}"
++                LOG.error("Failed to write the backup: {}", message)
++                // The export itself worked, so the user (e.g. of the periodic export) still needs
++                // to know that no backup was produced
++                callback?.onFailure(message)
++                if (recordResult) {
++                    recordFailureQuietly(message)
++                }
++                return Result(false, message, null)
++            }
++
++            if (recordResult) {
++                OnOpenBackupPrefs.recordSuccess(writtenName, System.currentTimeMillis())
++            }
++
++            val deleted = pruneQuietly(storage)
++
++            val sizeBytes = tempFile.length()
++            val message = buildString {
++                append("wrote ").append(writtenName).append(" to ").append(storage.describe())
++                if (deleted > 0) {
++                    append(", deleted ").append(deleted).append(" expired backup(s)")
++                }
++            }
++            // The size makes a successful backup verifiable on-device with adb logcat
++            LOG.info("Backup finished: {} ({} bytes)", message, sizeBytes)
++
++            return Result(true, message, writtenName)
++        } catch (t: Throwable) {
++            LOG.error("Failed to write the backup", t)
++            val message = t.message ?: t.javaClass.simpleName
++            callback?.onFailure(message)
++            if (recordResult) {
++                recordFailureQuietly(message)
++            }
++            return Result(false, message, null)
++        } finally {
++            running.set(false)
++            cleanupFile?.let { file ->
++                if (file.exists() && !file.delete()) {
++                    LOG.warn("Unable to delete the temporary file {}", file)
++                }
++            }
++        }
++    }
++
++    /**
++     * Writes a timestamped backup into [storage] for the periodic zip export. The run is not
++     * recorded in the on-open backup preferences, since it was not an app open, but the retention
++     * of the target directory is applied.
++     */
++    @WorkerThread
++    internal fun exportToStorage(
++        context: Context,
++        storage: BackupStorage,
++        callback: ZipBackupCallback?,
++    ): Result = export(context, storage, callback, recordResult = false)
++
++    private fun prune(storage: BackupStorage): Int {
++        val retentionDays = OnOpenBackupPrefs.retentionDays()
++        val fileNames = storage.listBackupFiles()
++        val deletable = BackupRetention.filesToDelete(fileNames, LocalDate.now(), retentionDays)
++
++        var deleted = 0
++        for (fileName in deletable) {
++            if (storage.deleteBackup(fileName)) {
++                deleted++
++            } else {
++                LOG.warn("Unable to delete the expired backup {}", fileName)
++            }
++        }
++
++        LOG.info(
++            "Deleted {} of {} expired backups in {} (retention: {} days)",
++            deleted,
++            deletable.size,
++            storage.describe(),
++            retentionDays,
++        )
++        return deleted
++    }
++
++    private fun pruneQuietly(storage: BackupStorage): Int {
++        return try {
++            prune(storage)
++        } catch (t: Throwable) {
++            // An expired backup that stays behind is not a reason to report a failed backup
++            LOG.warn("Failed to delete the expired backups in {}", storage.describe(), t)
++            0
++        }
++    }
++
++    private fun recordFailureQuietly(message: String) {
++        try {
++            OnOpenBackupPrefs.recordFailure(message)
++        } catch (t: Throwable) {
++            LOG.warn("Failed to record the backup failure", t)
++        }
++    }
++
++    /** Removes the temporary files a crashed earlier run may have left in the cache dir. */
++    private fun deleteStaleTempFiles(context: Context) {
++        try {
++            val cacheDir = context.cacheDir ?: return
++            val cutoff = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(STALE_TEMP_FILE_AGE_HOURS)
++            cacheDir.listFiles()?.forEach { file ->
++                if (file.isFile && file.name.startsWith(ZipBackupExportJob.TEMP_FILE_PREFIX) && file.lastModified() < cutoff) {
++                    if (!file.delete()) {
++                        LOG.warn("Unable to delete the stale temporary file {}", file)
++                    }
++                }
++            }
++        } catch (t: Throwable) {
++            LOG.debug("Failed to delete the stale temporary files", t)
++        }
++    }
++
++    /**
++     * Forwards the progress of the export to the real callback and remembers whether the export
++     * succeeded, so that a failure before anything was written can be reported.
++     */
++    private class CapturingCallback(private val delegate: ZipBackupCallback?) : ZipBackupCallback {
++        var succeeded: Boolean = false
++            private set
++
++        var failureMessage: String? = null
++            private set
++
++        override fun onProgress(progress: Int, message: String?) {
++            delegate?.onProgress(progress, message)
++        }
++
++        override fun onSuccess(warnings: String?) {
++            succeeded = true
++            delegate?.onSuccess(warnings)
++        }
++
++        override fun onFailure(errorMessage: String?) {
++            failureMessage = errorMessage ?: "unknown error"
++            delegate?.onFailure(errorMessage)
++        }
++
++        override fun onConfirmationRequired(message: String) {
++            delegate?.onConfirmationRequired(message)
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipBackupExportJob.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipBackupExportJob.java
+index be28ecc0c9..42c76d8ba4 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipBackupExportJob.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipBackupExportJob.java
+@@ -16,9 +16,13 @@
+     along with this program.  If not, see <https://www.gnu.org/licenses/>. */
+ package nodomain.freeyourgadget.gadgetbridge.util.backup;
+ 
++import android.content.ContentResolver;
+ import android.content.Context;
+ import android.content.SharedPreferences;
+ import android.net.Uri;
++import android.provider.DocumentsContract;
++
++import androidx.annotation.Nullable;
+ 
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -26,6 +30,7 @@ import org.slf4j.LoggerFactory;
+ import java.io.BufferedOutputStream;
+ import java.io.File;
+ import java.io.FileInputStream;
++import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
+@@ -36,6 +41,7 @@ import java.util.Date;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.zip.ZipEntry;
++import java.util.zip.ZipFile;
+ import java.util.zip.ZipOutputStream;
+ 
+ import nodomain.freeyourgadget.gadgetbridge.BuildConfig;
+@@ -53,19 +59,128 @@ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetLayoutStore;
+ public class ZipBackupExportJob extends AbstractZipBackupJob {
+     private static final Logger LOG = LoggerFactory.getLogger(ZipBackupExportJob.class);
+ 
++    /** Prefix and suffix of the temporary file the zip is written to before it is published. */
++    public static final String TEMP_FILE_PREFIX = "gadgetbridge-export-";
++    public static final String TEMP_FILE_SUFFIX = ".zip";
++
++    private static final int COPY_BUFFER_SIZE = 64 * 1024;
++
++    /** The document to publish the finished zip to, or null when {@link #mTargetFile} is the target. */
++    @Nullable
+     private final Uri mUri;
+ 
++    /** The file to write the zip to, or null to write a temporary file and then {@link #mUri}. */
++    @Nullable
++    private final File mTargetFile;
++
+     private final byte[] copyBuffer = new byte[8192];
+ 
+     public ZipBackupExportJob(final Context context, final ZipBackupCallback callback, final Uri uri) {
+         super(context, callback);
+         this.mUri = uri;
++        this.mTargetFile = null;
++    }
++
++    /**
++     * Exports the backup into {@code targetFile} and leaves it there, without writing to any uri.
++     * The caller owns the file and is responsible for deleting it.
++     *
++     * This is used to export into a temporary file first, so that the real backup is only written
++     * once the export is complete, and so that a failing export cannot destroy the previous one.
++     */
++    public ZipBackupExportJob(final Context context, final ZipBackupCallback callback, final File targetFile) {
++        super(context, callback);
++        this.mUri = null;
++        this.mTargetFile = targetFile;
+     }
+ 
+     @Override
+     public void run() {
+-        try (final OutputStream outputStream = getContext().getContentResolver().openOutputStream(mUri, "wt");
+-             final BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(outputStream, 1024 * 1024);
++        final boolean ownsTempFile = mTargetFile == null;
++        File tempFile = mTargetFile;
++
++        try {
++            if (tempFile == null) {
++                tempFile = createTempFile(getContext());
++            }
++
++            exportZip(tempFile);
++
++            if (isAborted()) {
++                return;
++            }
++
++            // A truncated or empty zip must never replace an existing backup
++            validateZip(tempFile);
++
++            if (ownsTempFile) {
++                copyToTargetUri(tempFile);
++            }
++
++            LOG.info("Export complete");
++
++            onSuccess(null);
++        } catch (final Exception e) {
++            LOG.error("Export failed", e);
++
++            if (!isAborted()) {
++                onFailure(e.getLocalizedMessage());
++            }
++        } finally {
++            if (ownsTempFile && tempFile != null) {
++                if (tempFile.exists() && !tempFile.delete()) {
++                    LOG.warn("Unable to delete the temporary file {}", tempFile);
++                }
++            }
++        }
++    }
++
++    /**
++     * Creates a temporary file in the cache dir to export into, so that the target is only touched
++     * once the export is complete.
++     */
++    public static File createTempFile(final Context context) throws IOException {
++        final File cacheDir = context.getCacheDir();
++        if (cacheDir == null) {
++            throw new IOException("Unable to access the cache directory");
++        }
++
++        final File tempFile = File.createTempFile(TEMP_FILE_PREFIX, TEMP_FILE_SUFFIX, cacheDir);
++        LOG.debug("Exporting to the temporary file {}", tempFile);
++        return tempFile;
++    }
++
++    /**
++     * Makes sure the exported file is a complete, readable zip file.
++     *
++     * @throws IOException when the file is empty, truncated or not a zip file at all.
++     */
++    public static void validateZip(final File zipFile) throws IOException {
++        if (!zipFile.isFile() || zipFile.length() <= 0) {
++            throw new IOException("The exported zip is empty: " + zipFile);
++        }
++
++        final int entries;
++        try (final ZipFile zip = new ZipFile(zipFile)) {
++            entries = zip.size();
++        } catch (final IOException e) {
++            throw new IOException("The exported zip is not a valid zip file: " + zipFile, e);
++        }
++
++        if (entries == 0) {
++            throw new IOException("The exported zip has no entries: " + zipFile);
++        }
++    }
++
++    /**
++     * Writes the complete backup into {@code targetFile}. Nothing else is touched, so a failure
++     * here leaves any existing backup intact.
++     */
++    private void exportZip(final File targetFile) throws IOException {
++        LOG.debug("Exporting to {}", targetFile);
++
++        try (final OutputStream fileOutputStream = new FileOutputStream(targetFile);
++             final BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream, 1024 * 1024);
+              final ZipOutputStream zipOut = new ZipOutputStream(bufferedOutputStream)) {
+ 
+             if (isAborted()) return;
+@@ -113,18 +228,63 @@ public class ZipBackupExportJob extends AbstractZipBackupJob {
+             LOG.debug("Flushing output stream");
+ 
+             bufferedOutputStream.flush();
++        }
++    }
+ 
+-            if (isAborted()) return;
++    /**
++     * Copies the finished zip into the target document.
++     *
++     * The copy happens only after the export is complete and validated, so the target is truncated
++     * as late as possible. If the copy itself fails, the partially written target is deleted: a
++     * truncated backup is useless, and a missing file is easier to notice.
++     */
++    private void copyToTargetUri(final File source) throws IOException {
++        final Uri uri = mUri;
++        if (uri == null) {
++            throw new IOException("No target uri to write the backup to");
++        }
+ 
+-            LOG.info("Export complete");
++        final Context context = getContext();
++        final ContentResolver contentResolver = context.getContentResolver();
+ 
+-            onSuccess(null);
++        LOG.debug("Copying the finished backup from {} to {}", source, uri);
++
++        final OutputStream outputStream;
++        try {
++            outputStream = contentResolver.openOutputStream(uri, "wt");
+         } catch (final Exception e) {
+-            LOG.error("Export failed", e);
++            // Nothing has been written yet, so the existing file is still intact
++            throw new IOException("Unable to open an output stream for " + uri, e);
++        }
+ 
+-            if (!isAborted()) {
+-                onFailure(e.getLocalizedMessage());
++        if (outputStream == null) {
++            throw new IOException("Unable to open an output stream for " + uri);
++        }
++
++        try (final InputStream inputStream = new FileInputStream(source);
++             final OutputStream target = outputStream) {
++            final byte[] buffer = new byte[COPY_BUFFER_SIZE];
++            int read;
++            while ((read = inputStream.read(buffer)) > 0) {
++                target.write(buffer, 0, read);
+             }
++            target.flush();
++        } catch (final Exception e) {
++            deleteTargetQuietly(context, uri);
++            throw new IOException("Failed to copy the backup to " + uri, e);
++        }
++    }
++
++    private static void deleteTargetQuietly(final Context context, final Uri uri) {
++        try {
++            final ContentResolver contentResolver = context.getContentResolver();
++            if (DocumentsContract.isDocumentUri(context, uri)) {
++                DocumentsContract.deleteDocument(contentResolver, uri);
++            } else {
++                contentResolver.delete(uri, null, null);
++            }
++        } catch (final Exception e) {
++            LOG.warn("Unable to delete the partially written backup {}", uri, e);
+         }
+     }
+ 
+@@ -205,6 +365,11 @@ public class ZipBackupExportJob extends AbstractZipBackupJob {
+ 
+         Arrays.sort(childEntries);
+         for (final String child : childEntries) {
++            if (BACKUP_DIR.equals(child)) {
++                // Never put our own backups into a backup, they would grow exponentially
++                LOG.debug("Skipping the backup directory {}", child);
++                continue;
++            }
+             getAllRelativeFilesAux(ret, dir, child);
+         }
+ 
+@@ -286,4 +451,4 @@ public class ZipBackupExportJob extends AbstractZipBackupJob {
+ 
+         zipOut.setComment(comment);
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
+index 441e786b29..6652ec7540 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
+@@ -52,13 +52,32 @@ class ZipExportWorker(
+ 
+         setForegroundAsync(createForegroundInfo())
+ 
+-        ZipBackupExportJob(mContext, this, dst.toUri()).run()
++        // Write a new timestamped file into the configured directory instead of overwriting a
++        // single one, and apply the same retention as the on-open backup, so that a failing run
++        // can never destroy the last good backup
++        val storage = BackupStorages.forAutoExport(mContext, dst)
+ 
+-        LOG.info("Zip export completed, success={}", success)
++        val result = if (storage != null) {
++            OnOpenBackupRunner.exportToStorage(mContext, storage, this)
++        } else {
++            // The legacy auto export location is a single file (ACTION_CREATE_DOCUMENT), and there
++            // is no tree permission to create new files next to it. The export now goes through a
++            // temporary file, so even this mode cannot truncate the previous backup anymore
++            LOG.info("Exporting to the single configured file {}, without rotation", dst)
++            success = false
++            ZipBackupExportJob(mContext, this, dst.toUri()).run()
++            OnOpenBackupRunner.Result(
++                success,
++                if (success) "wrote $dst" else "the export failed",
++                null
++            )
++        }
++
++        LOG.info("Zip export completed, success={}, {}", result.success, result.message)
+ 
+-        broadcastSuccess(success)
++        broadcastSuccess(result.success)
+ 
+-        return if (success) Result.success() else Result.failure()
++        return if (result.success) Result.success() else Result.failure()
+     }
+ 
+     override fun onProgress(progress: Int, message: String?) {
+diff --git a/app/src/main/res/values/arrays.xml b/app/src/main/res/values/arrays.xml
+index d30b9b57b3..f71b1570df 100644
+--- a/app/src/main/res/values/arrays.xml
++++ b/app/src/main/res/values/arrays.xml
+@@ -5361,4 +5361,19 @@
+         <item>repebble</item>
+     </string-array>
+ 
++    <!-- Backup on app open: retention options -->
++    <string-array name="pref_backup_retention_entries">
++        <item>@string/backup_on_open_retention_3_days</item>
++        <item>@string/backup_on_open_retention_7_days</item>
++        <item>@string/backup_on_open_retention_14_days</item>
++        <item>@string/backup_on_open_retention_30_days</item>
++    </string-array>
++
++    <string-array name="pref_backup_retention_values">
++        <item>3</item>
++        <item>7</item>
++        <item>14</item>
++        <item>30</item>
++    </string-array>
++
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index d658101e8f..bb47485135 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -6892,4 +6892,23 @@ The result is the average of all the measurements.</string>
+     <string name="magic_touch_head_init_title">Massage head init</string>
+     <string name="magic_touch_unplug_charger">Unplug the charger to control the massager</string>
+     <string name="magic_touch_turn_on_first">Turn the massager on first</string>
++    <!-- Backup on app open -->
++    <string name="pref_header_backup_on_open">Backup on app open</string>
++    <string name="pref_title_backup_on_open_enabled">Back up every time the app opens</string>
++    <string name="pref_summary_backup_on_open_enabled">Writes a timestamped backup when you launch Gadgetbridge, so scheduled background backups cannot silently stop running</string>
++    <string name="pref_title_backup_on_open_location">Backup folder</string>
++    <string name="pref_summary_backup_on_open_location_default">App external files folder — deleted with the app, pick a public folder such as Downloads for backups that survive a reinstall</string>
++    <string name="pref_title_backup_on_open_retention">Keep backups for</string>
++    <string name="backup_on_open_run_now">Back up now</string>
++    <string name="backup_on_open_clean_now">Delete expired backups now</string>
++    <string name="backup_on_open_status">Status</string>
++    <string name="backup_on_open_last_backup">Last backup</string>
++    <string name="backup_on_open_status_ok">Backup written</string>
++    <string name="backup_on_open_status_failed">Backup failed: %1$s</string>
++    <string name="backup_on_open_choose_folder">Choose backup folder</string>
++    <string name="backup_on_open_deleted_count">Deleted %1$d old backups</string>
++    <string name="backup_on_open_retention_3_days">3 days</string>
++    <string name="backup_on_open_retention_7_days">7 days</string>
++    <string name="backup_on_open_retention_14_days">14 days</string>
++    <string name="backup_on_open_retention_30_days">30 days</string>
+ </resources>
+diff --git a/app/src/main/res/xml/automations_settings.xml b/app/src/main/res/xml/automations_settings.xml
+index 18c001361c..7e4880452c 100644
+--- a/app/src/main/res/xml/automations_settings.xml
++++ b/app/src/main/res/xml/automations_settings.xml
+@@ -36,6 +36,14 @@
+                 android:targetPackage="@string/applicationId" />
+         </Preference>
+ 
++        <Preference
++            android:icon="@drawable/ic_save"
++            android:title="@string/pref_header_backup_on_open">
++            <intent
++                android:targetClass="nodomain.freeyourgadget.gadgetbridge.activities.automations.OnOpenBackupSettingsActivity"
++                android:targetPackage="@string/applicationId" />
++        </Preference>
++
+     </PreferenceCategory>
+ 
+     <PreferenceCategory android:title="@string/pref_header_auto_fetch">
+diff --git a/app/src/main/res/xml/on_open_backup_settings.xml b/app/src/main/res/xml/on_open_backup_settings.xml
+new file mode 100644
+index 0000000000..a8c2b54798
+--- /dev/null
++++ b/app/src/main/res/xml/on_open_backup_settings.xml
+@@ -0,0 +1,70 @@
++<?xml version="1.0" encoding="utf-8"?>
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto">
++
++    <!--
++        Backup on app open. The keys and defaults must match OnOpenBackupPrefs.
++        See OnOpenBackupSettingsActivity for the location picker and the manual actions.
++    -->
++
++    <SwitchPreferenceCompat
++        android:defaultValue="true"
++        android:icon="@drawable/ic_toggle_on"
++        android:key="on_open_backup_enabled"
++        android:layout="@layout/preference_checkbox"
++        android:summary="@string/pref_summary_backup_on_open_enabled"
++        android:title="@string/pref_title_backup_on_open_enabled"
++        app:iconSpaceReserved="false" />
++
++    <Preference
++        android:dependency="on_open_backup_enabled"
++        android:icon="@drawable/ic_file_export"
++        android:key="on_open_backup_location"
++        android:summary="@string/backup_on_open_choose_folder"
++        android:title="@string/pref_title_backup_on_open_location"
++        app:iconSpaceReserved="false" />
++
++    <ListPreference
++        android:defaultValue="7"
++        android:dependency="on_open_backup_enabled"
++        android:entries="@array/pref_backup_retention_entries"
++        android:entryValues="@array/pref_backup_retention_values"
++        android:icon="@drawable/ic_timer"
++        android:key="on_open_backup_retention_days"
++        android:title="@string/pref_title_backup_on_open_retention"
++        app:iconSpaceReserved="false"
++        app:useSimpleSummaryProvider="true" />
++
++    <Preference
++        android:icon="@drawable/ic_play"
++        android:key="on_open_backup_run_now"
++        android:title="@string/backup_on_open_run_now"
++        app:iconSpaceReserved="false" />
++
++    <Preference
++        android:icon="@drawable/ic_delete"
++        android:key="on_open_backup_clean_now"
++        android:title="@string/backup_on_open_clean_now"
++        app:iconSpaceReserved="false" />
++
++    <PreferenceCategory
++        android:key="pref_header_status"
++        android:title="@string/status">
++
++        <Preference
++            android:icon="@drawable/ic_info"
++            android:key="on_open_backup_status"
++            android:summary="@string/unknown"
++            android:title="@string/backup_on_open_status"
++            app:iconSpaceReserved="false" />
++
++        <Preference
++            android:icon="@drawable/ic_access_time"
++            android:key="on_open_backup_last_backup"
++            android:summary="@string/unknown"
++            android:title="@string/backup_on_open_last_backup"
++            app:iconSpaceReserved="false" />
++
++    </PreferenceCategory>
++
++</PreferenceScreen>
+\ No newline at end of file
+diff --git a/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRetentionTest.kt b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRetentionTest.kt
+new file mode 100644
+index 0000000000..5d4e015aa2
+--- /dev/null
++++ b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRetentionTest.kt
+@@ -0,0 +1,154 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.backup
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.LocalDate
++import java.time.LocalDateTime
++import java.time.LocalTime
++
++/**
++ * The retention is the only part of the backup that deletes files, so these tests pin down that it
++ * only ever deletes the backups it wrote itself, and that it never deletes the last one.
++ *
++ * Plain JVM test: neither the file name helpers nor the retention decision touch Android.
++ */
++class OnOpenBackupRetentionTest {
++    private val today: LocalDate = LocalDate.of(2026, 10, 2)
++
++    private val retention: Int = OnOpenBackupPrefs.DEFAULT_RETENTION_DAYS
++
++    private fun backupOf(date: LocalDate, hour: Int = 12): String =
++        OnOpenBackupPrefs.fileNameFor(LocalDateTime.of(date, LocalTime.of(hour, 0)))
++
++    @Test
++    fun fileNameFor_usesATimestampedName() {
++        val fileName = OnOpenBackupPrefs.fileNameFor(LocalDateTime.of(2026, 10, 2, 8, 30, 5))
++
++        assertEquals("gadgetbridge_20261002083005.zip", fileName)
++        assertTrue(OnOpenBackupPrefs.isBackupFileName(fileName))
++    }
++
++    @Test
++    fun isBackupFileName_onlyMatchesOurOwnFiles() {
++        assertTrue(OnOpenBackupPrefs.isBackupFileName("gadgetbridge_20261002083005.zip"))
++
++        // Never match files that the user or older versions of the app may have put there
++        assertFalse(OnOpenBackupPrefs.isBackupFileName("Gadgetbridge.zip"))
++        assertFalse(OnOpenBackupPrefs.isBackupFileName("notes.txt"))
++        assertFalse(OnOpenBackupPrefs.isBackupFileName("gadgetbridge.zip"))
++        assertFalse(OnOpenBackupPrefs.isBackupFileName("gadgetbridge_2026100208300.zip"))
++        assertFalse(OnOpenBackupPrefs.isBackupFileName("gadgetbridge_20261002083005.zip.part"))
++        assertFalse(OnOpenBackupPrefs.isBackupFileName("gadgetbridge_2026100208300a.zip"))
++        assertFalse(OnOpenBackupPrefs.isBackupFileName(""))
++    }
++
++    @Test
++    fun dateOf_readsTheDateFromTheName() {
++        assertEquals(
++            LocalDate.of(2026, 10, 2),
++            OnOpenBackupPrefs.dateOf("gadgetbridge_20261002083005.zip"),
++        )
++
++        assertNull(OnOpenBackupPrefs.dateOf("Gadgetbridge.zip"))
++        assertNull(OnOpenBackupPrefs.dateOf("notes.txt"))
++    }
++
++    @Test
++    fun dateOf_rejectsImpossibleDates() {
++        // Matches the name pattern, but month 13 is not a date, so it must never be pruned
++        assertNull(OnOpenBackupPrefs.dateOf("gadgetbridge_20261302143005.zip"))
++    }
++
++    @Test
++    fun cutoff_isTheFirstKeptDay() {
++        assertEquals(today.minusDays(6), BackupRetention.cutoff(today, retention))
++        assertEquals(today, BackupRetention.cutoff(today, 1))
++        // A broken setting must not be able to delete everything
++        assertEquals(today, BackupRetention.cutoff(today, 0))
++        assertEquals(today, BackupRetention.cutoff(today, -3))
++    }
++
++    @Test
++    fun retention_keepsTodayAndThePreviousSixDays() {
++        assertFalse(BackupRetention.shouldDelete(backupOf(today), today, retention))
++        assertFalse(BackupRetention.shouldDelete(backupOf(today.minusDays(6)), today, retention))
++        assertTrue(BackupRetention.shouldDelete(backupOf(today.minusDays(7)), today, retention))
++        assertTrue(BackupRetention.shouldDelete(backupOf(today.minusDays(8)), today, retention))
++    }
++
++    @Test
++    fun retention_otherPeriods() {
++        assertFalse(BackupRetention.shouldDelete(backupOf(today), today, 1))
++        assertTrue(BackupRetention.shouldDelete(backupOf(today.minusDays(1)), today, 1))
++
++        assertFalse(BackupRetention.shouldDelete(backupOf(today.minusDays(29)), today, 30))
++        assertTrue(BackupRetention.shouldDelete(backupOf(today.minusDays(30)), today, 30))
++    }
++
++    @Test
++    fun shouldDelete_neverMatchesForeignOrMalformedFiles() {
++        assertFalse(BackupRetention.shouldDelete("Gadgetbridge.zip", today, retention))
++        assertFalse(BackupRetention.shouldDelete("notes.txt", today, retention))
++        assertFalse(BackupRetention.shouldDelete("gadgetbridge_20260101120000.zip.part", today, retention))
++        assertFalse(BackupRetention.shouldDelete("gadgetbridge_20261301120000.zip", today, retention))
++        assertFalse(BackupRetention.shouldDelete("", today, retention))
++    }
++
++    @Test
++    fun filesToDelete_deletesOnlyExpiredBackups() {
++        val expired = backupOf(today.minusDays(8))
++        val kept = backupOf(today.minusDays(2))
++        val newest = backupOf(today)
++
++        val deletable = BackupRetention.filesToDelete(
++            listOf(expired, kept, newest, "notes.txt", "Gadgetbridge.zip"),
++            today,
++            retention,
++        )
++
++        assertEquals(listOf(expired), deletable)
++    }
++
++    @Test
++    fun filesToDelete_keepsTheNewestBackupEvenWhenItIsOlderThanTheRetention() {
++        val newest = backupOf(today.minusDays(30))
++        val older = backupOf(today.minusDays(31))
++
++        // A month without a successful backup: pruning must not leave the user without any backup
++        assertTrue(BackupRetention.filesToDelete(listOf(newest), today, retention).isEmpty())
++        assertEquals(listOf(older), BackupRetention.filesToDelete(listOf(newest, older), today, retention))
++    }
++
++    @Test
++    fun filesToDelete_keepsTheNewestBackupOfALargeExpiredSet() {
++        val names = listOf(
++            backupOf(today.minusDays(9)),
++            backupOf(today.minusDays(8)),
++            backupOf(today.minusDays(20)),
++        )
++
++        val deletable = BackupRetention.filesToDelete(names, today, retention)
++
++        assertEquals(listOf(names[0], names[2]), deletable)
++        assertFalse(names[1] in deletable)
++    }
++}
+\ No newline at end of file

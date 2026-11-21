@@ -23,6 +23,9 @@ on:
       - main
     paths:
       - 'apps/**'
+      # Gadgetbridge has its own watcher; dispatch this workflow with
+      # app=gadgetbridge instead of building it from a push.
+      - '!apps/gadgetbridge/**'
       - 'scripts/**'
       - '.github/workflows/build.yml'
 
@@ -96,6 +99,11 @@ jobs:
           FORCE_INPUT: ${{ inputs.force }}
           APP_INPUT: ${{ inputs.app }}
           DUE: ${{ steps.gate.outputs.due }}
+          # Gadgetbridge has its own watcher (.github/workflows/gadgetbridge.yml),
+          # which decides when to build it and dispatches this workflow with
+          # app=gadgetbridge. Keeping it out of this matrix means a commit that
+          # does not touch apps/gadgetbridge never starts a Gadgetbridge build.
+          CHECK_UPSTREAM_SKIP: gadgetbridge
         run: |
           set -euo pipefail
           # A scheduled run outside the 10-day window does nothing: emit an
@@ -107,7 +115,7 @@ jobs:
           fi
           # App list comes from apps/*/app.conf, so adding an app needs no
           # workflow edit.
-          mapfile -t ALL_APPS < <(find apps -mindepth 2 -maxdepth 2 -name app.conf | LC_ALL=C sort | cut -d/ -f2)
+          mapfile -t ALL_APPS < <(find apps -mindepth 2 -maxdepth 2 -name app.conf | LC_ALL=C sort | cut -d/ -f2 | grep -vx gadgetbridge)
           args=()
           if [[ "$EVENT" == "push" ]]; then
             selected=""

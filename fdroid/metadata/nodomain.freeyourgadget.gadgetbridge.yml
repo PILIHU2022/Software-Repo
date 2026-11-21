@@ -1,0 +1,39 @@
+Categories:
+  - Health & Fitness
+License: AGPL-3.0-only
+AuthorName: Gadgetbridge contributors
+Name: Gadgetbridge
+WebSite: https://gadgetbridge.org
+Summary: Use your Bluetooth gadgets without the vendor's app, with a Compose UI
+Description: |
+  Gadgetbridge lets you use Bluetooth wearables and other gadgets without the
+  vendor's closed-source application, without an account and without sending
+  your data anywhere.
+
+  This patchwork build starts from upstream and adds:
+  - a Jetpack Compose + Material 3 Expressive user interface: the settings tree,
+  the first-run guide, the About page and the sleep score sheet are Compose,
+  and the remaining screens inherit the larger Expressive shapes;
+  - an age-based sleep score estimated from the recorded sleep stages when the
+  device does not report one, with a breakdown sheet behind the score ring;
+  - a backup that runs every time the app is opened, with its own settings page,
+  a retention period and a folder the user can change;
+  - a database export that writes to a temporary file, validates it and only
+  then replaces the target, so a failed run cannot truncate the previous backup;
+  - a single, complete music snapshot for Xiaomi devices, so the watch no longer
+  shows a new title with an old playback state;
+  - a time re-sync after every (re)connection.
+
+  Note: the package name matches the official app but the signing key differs,
+  so the official version must be uninstalled before installing this build,
+  which also means the recorded data does not carry over.
+
+  Gadgetbridge is free software under the AGPL-3.0; the corresponding source is
+  the upstream repository plus the patch queue in this repository.
+SourceCode: https://codeberg.org/Freeyourgadget/Gadgetbridge
+IssueTracker: https://codeberg.org/Freeyourgadget/Gadgetbridge/issues
+Translation: https://hosted.weblate.org/projects/freeyourgadget/gadgetbridge
+RepoType: git
+Repo: https://codeberg.org/Freeyourgadget/Gadgetbridge.git
+UpdateCheckMode: None
+AutoUpdateMode: None

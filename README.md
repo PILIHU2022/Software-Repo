@@ -6,10 +6,11 @@
 
 # Software-Repo — Patchwork build overlay
 
-A personal, patch-based build overlay for five Android apps — **ScreenTime**,
-**RecurringExpenseTracker**, **Fcitx5 for Android**, **BasicSync** and the
-**BaiduNetGo Android client** — plus the **BaiduNetGo desktop** client, which is
-built here but is *not* an Android/F-Droid app.
+A personal, patch-based build overlay for six Android apps — **ScreenTime**,
+**RecurringExpenseTracker**, **Fcitx5 for Android**, **BasicSync**,
+**Gadgetbridge** and the **BaiduNetGo Android client** — plus the
+**BaiduNetGo desktop** client, which is built here but is *not* an
+Android/F-Droid app.
 No application source is vendored here. The repository keeps ordered patch
 queues, plus the CI that applies them to current upstream code: signed APKs are
 published through a signed F-Droid repository, and the desktop app's x86
@@ -17,7 +18,7 @@ installers are published as GitHub Releases plus an update feed.
 
 > Personal project, not affiliated with or endorsed by the upstream authors
 > (Dennis Bauer, Atharok, the Fcitx5 for Android contributors, Andrew Gunnerson,
-> pengstem).
+> the Gadgetbridge contributors, pengstem).
 
 ## What this is
 
@@ -47,6 +48,7 @@ code.
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 17 | `0.1.3-patchwork` (11207, arm64-v8a) |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `74b1dea` | 4 | `3.29-patchwork` (25604800, arm64-v8a) |
+| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge) (`master`) | `93d4d79` | 5 | `2026.11.1-patchwork` (25700) |
 | BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 48 | `0.8.3.48` — upstream `0.8.3` + 48 patches (linux/windows x86, Arch package; Release + feed) |
 | BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 48 | `0.8.3-patchwork` (80348 — upstream 803 × 100 + 48 patches) |
 | DataArk | *in-tree* — source at [`dataark/`](dataark/) (no upstream; GPL-3.0, icon from [Android-DataBackup](https://github.com/XayahSuSuSu/Android-DataBackup)) | — | — | `1.0.0` — full source committed, not a patch queue; CI is dormant (see below) |
@@ -125,6 +127,37 @@ System, and auto backups zip `shared_prefs` + `databases` once per version bump
 and typing statistics survive future updates. Only `arm64-v8a` is published (upstream produces per-ABI APKs
 and no universal APK), and the APK is
 about 52 MB.
+
+**Gadgetbridge** — Bluetooth wearables without the vendor's app. The queue
+starts from upstream and adds five patches:
+
+* the **user interface runs on Jetpack Compose + Material 3 Expressive**: the
+  settings tree (home, every sub-screen, the search), the first-run guide, the
+  About page and the sleep score sheet are Compose, and the remaing XML screens
+  inherit the larger Expressive shapes, so a settings change or a theme switch
+  looks the same everywhere;
+* an **age-based sleep score**: when the device reports no score of its own, the
+  recorded sleep stages are scored against the sleep duration recommended for
+  the user's age (deep sleep share, REM share and efficiency included), shown in
+  the day and week charts and in the dashboard widget, with a **breakdown sheet
+  behind the score ring** and a chart setting to turn it off;
+* a **backup that runs on every app open** — the one moment the process is
+  guaranteed to be alive — with its own settings page, a retention period, a
+  changeable folder and a reset action, instead of relying on WorkManager, which
+  vendor ROMs routinely never run;
+* the **database export writes a temporary file first**, validates the SQLite
+  header and only then replaces the target, so a failing run (a revoked SAF
+  grant, a moved document) can no longer truncate the previous backup, and a
+  missing location is reported rather than silently skipped;
+* the **Xiaomi music and time paths are made consistent**: one complete music
+  snapshot per change (state, title, artist, position, duration) instead of a
+  metadata packet and a state packet that overwrite each other, a finished
+  release build signed from the environment, and the clock re-sent once per
+  connection after the watch answers a device state request.
+
+The release APK is signed here rather than upstream: `PATCHWORK_SIGN_*` feeds a
+small build patch, so the F-Droid repository serves a build whose package name
+matches the official app but whose key does not.
 
 **BasicSync** — Syncthing on Android, wrapped in a small Kotlin/Compose app
 that only decides *when* Syncthing runs. The queue adds four patches on top of
@@ -341,6 +374,7 @@ every downstream commit bumps `versionCode` even when upstream did not change.
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 7 | `11207` / `"0.1.3-patchwork"` |
 | BasicSync | `256048` / `"3.29"` | 1 | `25604800` / `"3.29-patchwork"` |
+| Gadgetbridge | `257` / `"2026.11.1"` | 5 | `25700` / `"2026.11.1-patchwork"` |
 
 For fcitx5 the upstream code is itself ABI-dependent
 (`baseVersionCode × 10 + ABI id`, where arm64-v8a is 2), so the full formula is:

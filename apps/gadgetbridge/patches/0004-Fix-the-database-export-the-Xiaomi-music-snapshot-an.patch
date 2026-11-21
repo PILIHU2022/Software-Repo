@@ -1,0 +1,1403 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 15:45:08 +0800
+Subject: [PATCH] Fix the database export, the Xiaomi music snapshot and time
+ sync, and keep every sheet below the status bar
+
+Database export:
+- Export to a temporary file first, check the SQLite header, and only then
+  write the target, so a failing run can no longer truncate the previous backup.
+- A missing export location is reported instead of silently succeeding.
+
+Xiaomi music:
+- Always send one complete snapshot (state, track, artist, position, duration)
+  instead of a metadata packet and a state packet that overwrite each other.
+- Map the playback state to the wire values the watch expects and keep the
+  track when only the playback state changes.
+
+Xiaomi time sync:
+- Re-send the clock once per connection after the watch answers a device state
+  request, and add an explicit syncNow entry point.
+
+Backup on app open:
+- Give the feature its own settings section, keep the folder row tappable, add
+  a reset-to-default action, and make a blank location fall back to the default.
+
+Settings UI:
+- GbSettingRow now attaches its onClick, so every Compose settings row works.
+- PrefsRefresh lets a fragment invalidate the Compose renderer when it replaces
+  a summary without writing a preference (worker status, last run).
+
+Sleep chart:
+- Space the value and the score line inside the ring and shrink the line when
+  it would touch the stroke; localize it with the current context.
+- Show a hint under the ring that opens the score breakdown.
+
+Sheets:
+- Cap Compose and View bottom sheets below the status bar so they no longer
+  cover the punch-hole camera.
+---
+ .../activities/DashboardFragment.kt           |   3 +
+ .../AbstractAutoExportSettingsFragment.kt     |   5 +
+ .../activities/charts/SleepDailyFragment.java |  17 +-
+ .../activities/dashboard/GaugeDrawer.java     |  28 ++-
+ .../WidgetInstanceSettingsFragment.kt         |   3 +
+ .../statistics/ChartConfigBottomSheet.kt      |   7 +
+ .../database/DatabaseExportWorker.kt          | 173 +++++++++++++++++-
+ .../externalevents/NotificationListener.java  |  25 +--
+ .../AbstractApiTokenSetupBottomSheet.kt       |   8 +
+ .../endurain/EndurainSetupBottomSheet.kt      |   7 +
+ .../service/devices/xiaomi/XiaomiSupport.java |   4 +-
+ .../xiaomi/services/XiaomiMusicService.java   |  69 +++++--
+ .../xiaomi/services/XiaomiSystemService.java  |  44 +++++
+ .../ui/compose/components/GbComponents.kt     |  11 +-
+ .../ui/compose/components/GbSheetBody.kt      |  60 ++++++
+ .../settings/OnOpenBackupSettingsScreen.kt    |  39 +++-
+ .../screens/settings/prefs/PrefsRefresh.kt    |  45 +++++
+ .../screens/settings/prefs/PrefsScreen.kt     |  76 ++++----
+ .../sleep/SleepScoreDetailsSheetContent.kt    |  13 +-
+ .../gadgetbridge/util/MediaManager.java       |   8 +-
+ .../util/backup/OnOpenBackupPrefs.kt          |  10 +-
+ .../util/sheets/BottomSheetCapping.kt         |  73 ++++++++
+ .../main/res/layout/fragment_sleepchart.xml   |  14 ++
+ app/src/main/res/values-zh-rCN/strings.xml    |   1 +
+ app/src/main/res/values-zh-rTW/strings.xml    |   1 +
+ app/src/main/res/values/strings.xml           |   5 +
+ app/src/main/res/xml/automations_settings.xml |   8 -
+ app/src/main/res/xml/preferences.xml          |  13 ++
+ 28 files changed, 664 insertions(+), 106 deletions(-)
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbSheetBody.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsRefresh.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sheets/BottomSheetCapping.kt
+
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/DashboardFragment.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/DashboardFragment.kt
+index 5f1653e8da..58abf22f37 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/DashboardFragment.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/DashboardFragment.kt
+@@ -70,6 +70,7 @@ import nodomain.freeyourgadget.gadgetbridge.databinding.FragmentDashboardBinding
+ import nodomain.freeyourgadget.gadgetbridge.util.BarShade
+ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
+ import nodomain.freeyourgadget.gadgetbridge.util.kotlin.getDevice
++import nodomain.freeyourgadget.gadgetbridge.util.sheets.BottomSheetCapping
+ import nodomain.freeyourgadget.gadgetbridge.widgets.DashboardQuery
+ import nodomain.freeyourgadget.gadgetbridge.widgets.PlacedWidget
+ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetGrid
+@@ -404,6 +405,8 @@ class DashboardFragment : Fragment(), MenuProvider, HeaderShadePage, DashboardGr
+         sheet.behavior.skipCollapsed = true
+         sheet.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+         sheet.show()
++        // The variant previews can get tall; stop the sheet below the status bar and the camera.
++        BottomSheetCapping.capBelowStatusBar(sheet)
+     }
+ 
+     override fun getHeaderShade(): View? {
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
+index d855c29ce6..c05a8ce7c4 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
+@@ -38,6 +38,7 @@ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
+ import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs
+ import nodomain.freeyourgadget.gadgetbridge.util.PeriodicExporter
+ import nodomain.freeyourgadget.gadgetbridge.util.UriUtils
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.screens.settings.prefs.PrefsRefresh
+ import nodomain.freeyourgadget.gadgetbridge.util.backup.PeriodicZipExporter
+ import org.slf4j.Logger
+ import org.slf4j.LoggerFactory
+@@ -245,6 +246,10 @@ abstract class AbstractAutoExportSettingsFragment(
+             if (nextExecution != null) {
+                 prefNextExecution?.summary = formatDateWithDiff(Date(nextExecution.nextScheduleTimeMillis))
+             }
++
++            // The summaries above are set without writing a preference, so tell the Compose settings screen to
++            // redraw them. Without this the status row keeps showing the value from the first composition.
++            PrefsRefresh.notifyChanged()
+         }
+     }
+ 
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
+index 0e79c4a320..286e3c6226 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
+@@ -331,7 +331,7 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+         String lowerText = "";
+         if (pieData.getSleepScore() > 0) {
+             final boolean ageAdjusted = pieData.getSleepScoreResult() != null;
+-            lowerText = GBApplication.getContext().getString(
++            lowerText = getString(
+                     ageAdjusted ? R.string.sleep_score_value_age_adjusted : R.string.sleep_score_value,
+                     pieData.getSleepScore()
+             );
+@@ -348,7 +348,8 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+         ));
+ 
+         final AgeSleepScoreCalculator.Result details = pieData.getSleepScoreResult();
+-        if (details != null && pieData.getSleepScore() > 0) {
++        final boolean hasDetails = details != null && pieData.getSleepScore() > 0;
++        if (hasDetails) {
+             binding.sleepStagesGauge.setClickable(true);
+             binding.sleepStagesGauge.setContentDescription(
+                     getString(R.string.sleep_score_value_age_adjusted, pieData.getSleepScore()));
+@@ -364,6 +365,18 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+             binding.sleepStagesGauge.setContentDescription(null);
+             binding.sleepStagesGauge.setOnClickListener(null);
+         }
++        // The ring is the only way into the breakdown, so say so while there is one to open.
++        binding.sleepScoreDetailsHint.setVisibility(hasDetails ? View.VISIBLE : View.GONE);
++        if (hasDetails) {
++            binding.sleepScoreDetailsHint.setOnClickListener(v -> {
++                if (getChildFragmentManager().findFragmentByTag("sleep_score_details") == null) {
++                    SleepScoreDetailsSheet.newInstance(details)
++                            .show(getChildFragmentManager(), "sleep_score_details");
++                }
++            });
++        } else {
++            binding.sleepScoreDetailsHint.setOnClickListener(null);
++        }
+     }
+ 
+     private String timeStringFormat(long seconds) {
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/GaugeDrawer.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/GaugeDrawer.java
+index d4973129d7..358795925e 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/GaugeDrawer.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/GaugeDrawer.java
+@@ -332,20 +332,40 @@ public class GaugeDrawer {
+             }
+         }
+ 
++        // Draw the value and the line below it as one block centred in the ring, with a clear gap
++        // between them and some room to the ring. The lower line is shrunk when it would otherwise
++        // reach the ring on either side (a long, localized score label used to touch the stroke).
+         Paint textPaint = new Paint();
+         textPaint.setColor(TEXT_COLOR);
+         float textPixels = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, width * 0.06f, context.getResources().getDisplayMetrics());
+         textPaint.setTextSize(textPixels);
+         textPaint.setTextAlign(Paint.Align.CENTER);
+-        int yPos = (int) ((float) height / 2 - ((textPaint.descent() + textPaint.ascent()) / 2));
+-        canvas.drawText(String.valueOf(text), width / 2f, yPos, textPaint);
++
+         Paint textLowerPaint = new Paint();
+         textLowerPaint.setColor(SUBTEXT_COLOR);
+         textLowerPaint.setTextAlign(Paint.Align.CENTER);
+         float textLowerPixels = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, width * 0.025f, context.getResources().getDisplayMetrics());
+         textLowerPaint.setTextSize(textLowerPixels);
+-        int yPosLowerText = (int) ((float) height / 2 - textPaint.ascent());
+-        canvas.drawText(String.valueOf(lowerText), width / 2f, yPosLowerText, textLowerPaint);
++
++        final String lowerString = String.valueOf(lowerText);
++        if (!lowerString.isEmpty()) {
++            final float maxLowerWidth = width - 2f * barWidth - width * 0.08f;
++            final float measuredLowerWidth = textLowerPaint.measureText(lowerString);
++            if (measuredLowerWidth > maxLowerWidth) {
++                textLowerPaint.setTextSize(textLowerPixels * maxLowerWidth / measuredLowerWidth);
++            }
++        }
++
++        final float gap = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 3, context.getResources().getDisplayMetrics());
++        final float mainHeight = textPaint.descent() - textPaint.ascent();
++        final float lowerHeight = textLowerPaint.descent() - textLowerPaint.ascent();
++        final float blockHeight = mainHeight + gap + lowerHeight;
++        final float blockTop = (height - blockHeight) / 2f;
++
++        final float mainBaseline = blockTop - textPaint.ascent();
++        canvas.drawText(String.valueOf(text), width / 2f, mainBaseline, textPaint);
++        final float lowerBaseline = blockTop + mainHeight + gap - textLowerPaint.ascent();
++        canvas.drawText(lowerString, width / 2f, lowerBaseline, textLowerPaint);
+ 
+         return bitmap;
+     }
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/WidgetInstanceSettingsFragment.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/WidgetInstanceSettingsFragment.kt
+index 047c4ea526..466335f443 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/WidgetInstanceSettingsFragment.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/dashboard/WidgetInstanceSettingsFragment.kt
+@@ -21,6 +21,7 @@ import nodomain.freeyourgadget.gadgetbridge.activities.devicesettings.dsl.ListEn
+ import nodomain.freeyourgadget.gadgetbridge.activities.devicesettings.dsl.deviceSettings
+ import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice
+ import nodomain.freeyourgadget.gadgetbridge.util.Prefs
++import nodomain.freeyourgadget.gadgetbridge.util.sheets.BottomSheetCapping
+ import nodomain.freeyourgadget.gadgetbridge.widgets.GBWidget
+ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetConfig
+ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetGrid
+@@ -143,6 +144,8 @@ class WidgetInstanceSettingsFragment : AbstractPreferenceFragment(), SettingsRen
+         sheet.behavior.skipCollapsed = true
+         sheet.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+         sheet.show()
++        // The variant previews can get tall; stop the sheet below the status bar and the camera.
++        BottomSheetCapping.capBelowStatusBar(sheet)
+     }
+ 
+     override fun onDestroyView() {
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/workouts/statistics/ChartConfigBottomSheet.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/workouts/statistics/ChartConfigBottomSheet.kt
+index d5c2bb2879..cec4c16912 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/workouts/statistics/ChartConfigBottomSheet.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/workouts/statistics/ChartConfigBottomSheet.kt
+@@ -15,6 +15,7 @@ import nodomain.freeyourgadget.gadgetbridge.R
+ import nodomain.freeyourgadget.gadgetbridge.databinding.BottomsheetSportChartConfigBinding
+ import nodomain.freeyourgadget.gadgetbridge.databinding.ItemChartMetricOptionBinding
+ import nodomain.freeyourgadget.gadgetbridge.databinding.ItemChartSetEditorBinding
++import nodomain.freeyourgadget.gadgetbridge.util.sheets.BottomSheetCapping
+ 
+ /**
+  * Picks the chart's data sets. Returns the result under [REQUEST_KEY].
+@@ -67,6 +68,12 @@ class ChartConfigBottomSheet : BottomSheetDialogFragment() {
+         outState.putString(STATE_DRAFT, draft.serialize())
+     }
+ 
++    override fun onStart() {
++        super.onStart()
++        // The chart config can get tall; keep its top edge below the status bar and the camera.
++        BottomSheetCapping.capBelowStatusBar(this)
++    }
++
+     override fun onDestroyView() {
+         _binding = null
+         super.onDestroyView()
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/database/DatabaseExportWorker.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/database/DatabaseExportWorker.kt
+index 0b20401248..2bc4f5a5cf 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/database/DatabaseExportWorker.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/database/DatabaseExportWorker.kt
+@@ -1,7 +1,15 @@
+ package nodomain.freeyourgadget.gadgetbridge.database
+ 
++import android.Manifest
+ import android.content.Context
+ import android.content.Intent
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Build
++import android.provider.DocumentsContract
++import androidx.core.app.ActivityCompat
++import androidx.core.app.NotificationCompat
++import androidx.core.app.NotificationManagerCompat
+ import androidx.core.content.edit
+ import androidx.core.net.toUri
+ import androidx.work.Worker
+@@ -12,7 +20,12 @@ import nodomain.freeyourgadget.gadgetbridge.util.GB
+ import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs
+ import org.slf4j.Logger
+ import org.slf4j.LoggerFactory
++import java.io.File
++import java.io.FileInputStream
+ import java.io.IOException
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
+ 
+ class DatabaseExportWorker(
+     private val mContext: Context,
+@@ -27,41 +40,176 @@ class DatabaseExportWorker(
+             return Result.failure()
+         }
+ 
+-        val dst = GBApplication.getPrefs().getString(GBPrefs.AUTO_EXPORT_DB_LOCATION, "")
++        val dst: String? = GBApplication.getPrefs().getString(GBPrefs.AUTO_EXPORT_DB_LOCATION, null)
+ 
+         LOG.info("Starting DB export, dst={}", dst)
+ 
+-        if (dst == null) {
++        if (dst.isNullOrBlank()) {
+             LOG.warn("Unable to export DB, export location not set")
+             GB.updateExportFailedNotification(mContext.getString(R.string.notif_export_location_not_set), mContext)
+             broadcastSuccess(false)
+             return Result.failure()
+         }
+ 
++        // Export to a temporary file first, validate it, and only then touch the user's target.
++        // Writing directly into a SAF document could truncate (or leave a corrupt file behind in)
++        // the previous export whenever the copy fails halfway.
++        var tempFile: File? = null
+         try {
+-            val outputStream = mContext.contentResolver.openOutputStream(dst.toUri())
+-                ?: throw IOException("Unable to open $dst for writing")
+-            outputStream.use { out ->
+-                GBApplication.app().databaseManager.exportDB(out)
+-            }
++            val exportedDb = File.createTempFile("gb-db-export-", ".db", mContext.cacheDir)
++            tempFile = exportedDb
++
++            // File overload: GBDatabaseManager.exportDB(File). (databaseManager is a Kotlin
++            // property, so it is accessed with the property syntax, not getDatabaseManager().)
++            GBApplication.app().databaseManager.exportDB(exportedDb)
++            validateExportedDatabase(exportedDb)
++
++            // This either writes into a new timestamped document (tree URI) or overwrites the single
++            // configured document; any failure leaves no broken document behind.
++            writeToDestination(dst.toUri(), exportedDb)
+ 
+             GBApplication.getPrefs().preferences.edit {
+                 putLong(GBPrefs.AUTO_EXPORT_DB_LAST_EXECUTION, System.currentTimeMillis())
+             }
++
++            LOG.info("DB export completed to {}", dst)
+         } catch (e: Exception) {
+             GB.updateExportFailedNotification(mContext.getString(R.string.notif_export_failed_title), mContext)
+             LOG.error("Exception while exporting DB", e)
+             broadcastSuccess(false)
+             return Result.failure()
++        } finally {
++            val leftover = tempFile
++            if (leftover != null && leftover.exists() && !leftover.delete()) {
++                LOG.warn("Unable to delete the temporary DB export file {}", leftover.absolutePath)
++            }
+         }
+ 
+-        LOG.info("DB export completed")
+-
++        notifySuccess(dst)
+         broadcastSuccess(true)
+ 
+         return Result.success()
+     }
+ 
++    /**
++     * Fails when the exported database is empty, truncated or does not start with the SQLite file
++     * header ("SQLite format 3\0"). A silent, empty or half written database is worse than no
++     * export at all.
++     */
++    @Throws(IOException::class)
++    private fun validateExportedDatabase(file: File) {
++        if (!file.isFile) {
++            throw IOException("Exported database does not exist: ${file.absolutePath}")
++        }
++        if (file.length() <= 0L) {
++            throw IOException("Exported database is empty: ${file.absolutePath}")
++        }
++
++        val header = ByteArray(SQLITE_HEADER_SIZE)
++        FileInputStream(file).use { input ->
++            var read = 0
++            while (read < header.size) {
++                val count = input.read(header, read, header.size - read)
++                if (count < 0) {
++                    break
++                }
++                read += count
++            }
++            if (read != header.size) {
++                throw IOException("Exported database is too short, got $read header bytes")
++            }
++        }
++
++        if (!header.contentEquals(SQLITE_HEADER)) {
++            throw IOException("Exported database does not have a valid SQLite header")
++        }
++    }
++
++    /**
++     * Copies the validated temporary database into the configured target.
++     *
++     * A tree URI is a directory, so a new timestamped document is created inside it. Anything else
++     * is a single document that was picked with ACTION_CREATE_DOCUMENT and is overwritten in place
++     * (mode "wt" so that the previous content is truncated while writing).
++     */
++    @Throws(IOException::class)
++    private fun writeToDestination(dst: Uri, source: File) {
++        if (DocumentsContract.isTreeUri(dst)) {
++            val parentUri = DocumentsContract.buildDocumentUriUsingTree(
++                dst,
++                DocumentsContract.getTreeDocumentId(dst)
++            )
++            val fileName = "Gadgetbridge-${SimpleDateFormat("yyyyMMddHHmmss", Locale.US).format(Date())}.db"
++            val createdUri = DocumentsContract.createDocument(
++                mContext.contentResolver,
++                parentUri,
++                DB_MIME_TYPE,
++                fileName
++            ) ?: throw IOException("The document provider did not create a document for $fileName")
++
++            try {
++                copyFileToUri(createdUri, source)
++            } catch (e: Exception) {
++                // Do not leave a truncated/corrupt database file in the user's directory.
++                try {
++                    DocumentsContract.deleteDocument(mContext.contentResolver, createdUri)
++                } catch (cleanup: Exception) {
++                    LOG.warn("Unable to delete the incomplete export document {}", createdUri, cleanup)
++                }
++                throw e
++            }
++        } else {
++            copyFileToUri(dst, source)
++        }
++    }
++
++    @Throws(IOException::class)
++    private fun copyFileToUri(uri: Uri, source: File) {
++        val outputStream = mContext.contentResolver.openOutputStream(uri, "wt")
++            ?: throw IOException("Unable to open $uri for writing")
++
++        outputStream.use { out ->
++            FileInputStream(source).use { input ->
++                val buffer = ByteArray(COPY_BUFFER_SIZE)
++                while (true) {
++                    val read = input.read(buffer)
++                    if (read < 0) {
++                        break
++                    }
++                    out.write(buffer, 0, read)
++                }
++            }
++            out.flush()
++        }
++    }
++
++    private fun notifySuccess(dst: String) {
++        try {
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
++                ActivityCompat.checkSelfPermission(
++                    mContext,
++                    Manifest.permission.POST_NOTIFICATIONS
++                ) != PackageManager.PERMISSION_GRANTED
++            ) {
++                LOG.info("Not showing the DB export success notification, permission missing")
++                return
++            }
++
++            val notification = NotificationCompat.Builder(mContext, GB.NOTIFICATION_CHANNEL_ID_EXPORT)
++                .setSmallIcon(R.drawable.ic_notification)
++                .setContentTitle(mContext.getString(R.string.backup_restore_export_complete))
++                .setContentText(dst)
++                .setAutoCancel(true)
++                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
++                .build()
++
++            NotificationManagerCompat.from(mContext)
++                .notify(NOTIFICATION_ID_EXPORT_SUCCESS, notification)
++        } catch (e: Exception) {
++            LOG.warn("Unable to show the DB export success notification", e)
++        }
++    }
++
+     private fun broadcastSuccess(success: Boolean) {
+         if (!GBApplication.getPrefs().getBoolean(GBPrefs.INTENT_API_BROADCAST_EXPORT_DB, false)) {
+             return
+@@ -77,6 +225,13 @@ class DatabaseExportWorker(
+     companion object {
+         private val LOG: Logger = LoggerFactory.getLogger(DatabaseExportWorker::class.java)
+ 
++        private const val DB_MIME_TYPE: String = "application/x-sqlite3"
++        private const val SQLITE_HEADER_SIZE: Int = 16
++        private const val COPY_BUFFER_SIZE: Int = 8192
++        private const val NOTIFICATION_ID_EXPORT_SUCCESS: Int = 15
++
++        private val SQLITE_HEADER: ByteArray = "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
++
+         const val ACTION_DATABASE_EXPORT_SUCCESS: String =
+             "nodomain.freeyourgadget.gadgetbridge.action.DATABASE_EXPORT_SUCCESS"
+         const val ACTION_DATABASE_EXPORT_FAIL: String =
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java
+index 75fee5eae4..d0a575aa0b 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java
+@@ -172,7 +172,6 @@ public class NotificationListener extends NotificationListenerService {
+ 
+     private final Handler mHandler = new Handler();
+     private Runnable mSetMusicInfoRunnable = null;
+-    private Runnable mSetMusicStateRunnable = null;
+ 
+     private boolean isDreaming = false;
+ 
+@@ -980,25 +979,19 @@ public class NotificationListener extends NotificationListenerService {
+             final MusicStateSpec stateSpec = MediaManager.extractMusicStateSpec(playbackState);
+             final MusicSpec musicSpec = MediaManager.extractMusicSpec(metadata);
+ 
+-            // finally, tell the device about it
++            // Debounce bursts, but deliver metadata and playback state together in a single
++            // callback. Previously a stale mSetMusicStateRunnable was re-posted even when
++            // stateSpec was null, resending an old state after the real one had changed.
+             if (mSetMusicInfoRunnable != null) {
+                 mHandler.removeCallbacks(mSetMusicInfoRunnable);
+             }
+-            mSetMusicInfoRunnable = () -> GBApplication.deviceService().onSetMusicInfo(musicSpec);
+-            mHandler.postDelayed(mSetMusicInfoRunnable, 100);
+-
+-            if (stateSpec != null) {
+-                if (mSetMusicStateRunnable != null) {
+-                    mHandler.removeCallbacks(mSetMusicStateRunnable);
++            mSetMusicInfoRunnable = () -> {
++                GBApplication.deviceService().onSetMusicInfo(musicSpec);
++                if (stateSpec != null) {
++                    GBApplication.deviceService().onSetMusicState(stateSpec);
+                 }
+-                mSetMusicStateRunnable = new Runnable() {
+-                    @Override
+-                    public void run() {
+-                        GBApplication.deviceService().onSetMusicState(stateSpec);
+-                    }
+-                };
+-            }
+-            mHandler.postDelayed(mSetMusicStateRunnable, 100);
++            };
++            mHandler.postDelayed(mSetMusicInfoRunnable, 100);
+ 
+             return true;
+         } catch (final NullPointerException | SecurityException e) {
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/AbstractApiTokenSetupBottomSheet.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/AbstractApiTokenSetupBottomSheet.kt
+index 04380532ec..62183fe651 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/AbstractApiTokenSetupBottomSheet.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/AbstractApiTokenSetupBottomSheet.kt
+@@ -35,6 +35,7 @@ import kotlinx.coroutines.withContext
+ import nodomain.freeyourgadget.gadgetbridge.GBApplication
+ import nodomain.freeyourgadget.gadgetbridge.R
+ import nodomain.freeyourgadget.gadgetbridge.util.GB
++import nodomain.freeyourgadget.gadgetbridge.util.sheets.BottomSheetCapping
+ 
+ /**
+  * Setup wizard for a service the user authenticates to with a token they paste in, optionally
+@@ -83,6 +84,13 @@ abstract class AbstractApiTokenSetupBottomSheet(
+         savedInstanceState: Bundle?
+     ): View = inflater.inflate(layoutRes, container, false)
+ 
++    override fun onStart() {
++        super.onStart()
++        // These sheets hold a title, a server field, a token field and a button; keep them clear of
++        // the status bar instead of letting them grow over the camera.
++        BottomSheetCapping.capBelowStatusBar(this)
++    }
++
+     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+         super.onViewCreated(view, savedInstanceState)
+         view.findViewById<TextView>(R.id.title)?.text =
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/endurain/EndurainSetupBottomSheet.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/endurain/EndurainSetupBottomSheet.kt
+index 1b7e98e57a..266a4e421f 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/endurain/EndurainSetupBottomSheet.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalservices/endurain/EndurainSetupBottomSheet.kt
+@@ -41,6 +41,7 @@ import nodomain.freeyourgadget.gadgetbridge.R
+ import nodomain.freeyourgadget.gadgetbridge.externalservices.externalServiceLoginResultKey
+ import nodomain.freeyourgadget.gadgetbridge.util.GB
+ import nodomain.freeyourgadget.gadgetbridge.util.InternetUtils
++import nodomain.freeyourgadget.gadgetbridge.util.sheets.BottomSheetCapping
+ import org.slf4j.LoggerFactory
+ 
+ class EndurainSetupBottomSheet : BottomSheetDialogFragment() {
+@@ -81,6 +82,12 @@ class EndurainSetupBottomSheet : BottomSheetDialogFragment() {
+         }
+     }
+ 
++    override fun onStart() {
++        super.onStart()
++        // The setup wizard is tall; keep its top edge below the status bar and the camera.
++        BottomSheetCapping.capBelowStatusBar(this)
++    }
++
+     override fun onCreateView(
+         inflater: LayoutInflater,
+         container: ViewGroup?,
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSupport.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSupport.java
+index 00438ebad0..f02a60bf79 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSupport.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/XiaomiSupport.java
+@@ -275,7 +275,9 @@ public class XiaomiSupport extends AbstractBluetoothDeviceSupport {
+ 
+     @Override
+     public void onSetTime() {
+-        systemService.setCurrentTime();
++        // Explicit request (time/timezone change, periodic DST sync, settings toggle): always send,
++        // regardless of the per-connection flag used by the device-state fallback.
++        systemService.syncNow();
+ 
+         if (getCoordinator().supportsCalendarEvents(getDevice())) {
+             // TODO this should not be done here
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java
+index 5012265871..2008d6624c 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java
+@@ -111,9 +111,10 @@ public class XiaomiMusicService extends AbstractXiaomiService {
+     }
+ 
+     public void onSetMusicState(final MusicStateSpec stateSpec) {
+-        if (mediaManager.onSetMusicState(stateSpec)) {
+-            sendMusicStateToDevice();
+-        }
++        mediaManager.onSetMusicState(stateSpec);
++        // Always push a full snapshot, so a metadata update and a state update never race and the
++        // watch always gets a consistent (state + track + artist + position + duration) picture.
++        sendMusicStateToDevice();
+     }
+ 
+     public void onSetPhoneVolume(final float ignoredVolume) {
+@@ -121,8 +122,31 @@ public class XiaomiMusicService extends AbstractXiaomiService {
+     }
+ 
+     public void onSetMusicInfo(final MusicSpec musicSpec) {
+-        if (mediaManager.onSetMusicInfo(musicSpec)) {
+-            sendMusicStateToDevice();
++        mediaManager.onSetMusicInfo(musicSpec);
++        // Metadata and playback state arrive in separate callbacks. Always send the complete
++        // snapshot built from the current buffer so the newest track/artist/duration goes out
++        // together with the still-current state, instead of "new title + old state / 0:00".
++        sendMusicStateToDevice();
++    }
++
++    /**
++     * Maps a {@link MusicStateSpec} to the wire value expected in {@code MusicInfo.state}:
++     * 0 = not playing, 1 = playing, 2 = paused.
++     */
++    private static int toProtoState(final MusicStateSpec musicStateSpec) {
++        if (musicStateSpec == null) {
++            return STATE_NOTHING;
++        }
++        switch (musicStateSpec.getState()) {
++            case MusicStateSpec.STATE_PLAYING:
++                return STATE_PLAYING;
++            case MusicStateSpec.STATE_PAUSED:
++                return STATE_PAUSED;
++            case MusicStateSpec.STATE_STOPPED:
++                return STATE_NOTHING;
++            default:
++                // STATE_UNKNOWN and anything unexpected: do not claim it is playing.
++                return STATE_NOTHING;
+         }
+     }
+ 
+@@ -130,23 +154,30 @@ public class XiaomiMusicService extends AbstractXiaomiService {
+         final MusicSpec musicSpec = mediaManager.getBufferMusicSpec();
+         final MusicStateSpec musicStateSpec = mediaManager.getBufferMusicStateSpec();
+ 
+-        final var musicInfo = MusicInfo.newBuilder()
+-                .setVolume(mediaManager.getPhoneVolume());
++        final MusicInfo.Builder musicInfo = MusicInfo.newBuilder()
++                .setVolume(mediaManager.getPhoneVolume())
++                .setState(toProtoState(musicStateSpec));
+ 
+-        if (musicSpec == null || musicStateSpec == null) {
+-            musicInfo.setState(STATE_NOTHING);
+-        } else {
+-            if (musicStateSpec.getState() == MusicStateSpec.STATE_PLAYING) {
+-                musicInfo.setState(STATE_PLAYING);
+-            } else {
+-                musicInfo.setState(STATE_PAUSED);
++        if (musicSpec != null) {
++            // Only send non-empty strings: proto fields are optional and an empty track would
++            // blank out the title the watch is currently showing.
++            final String track = musicSpec.getTrack();
++            if (track != null && !track.isEmpty()) {
++                musicInfo.setTrack(track);
++            }
++            final String artist = musicSpec.getArtist();
++            if (artist != null && !artist.isEmpty()) {
++                musicInfo.setArtist(artist);
+             }
++            // duration is in seconds; MUSIC_UNKNOWN is -1, which is invalid for a uint32 field.
++            if (musicSpec.getDuration() > 0) {
++                musicInfo.setDuration(musicSpec.getDuration());
++            }
++        }
+ 
+-            musicInfo.setVolume(mediaManager.getPhoneVolume())
+-                    .setTrack(musicSpec.getTrack() != null ? musicSpec.getTrack() : "")
+-                    .setArtist(musicSpec.getArtist() != null ? musicSpec.getArtist() : "")
+-                    .setPosition(musicStateSpec.getPosition())
+-                    .setDuration(musicSpec.getDuration());
++        if (musicStateSpec != null && musicStateSpec.getPosition() >= 0) {
++            // position is already in seconds; skip the -1 (STATE_UNKNOWN) sentinel.
++            musicInfo.setPosition(musicStateSpec.getPosition());
+         }
+ 
+         final var music = Music.newBuilder()
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiSystemService.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiSystemService.java
+index 676179eefe..4dfc79fdff 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiSystemService.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiSystemService.java
+@@ -114,6 +114,10 @@ public class XiaomiSystemService extends AbstractXiaomiService implements Xiaomi
+     private BatteryState currentBatteryState = BatteryState.UNKNOWN;
+     private SleepState currentSleepDetectionState = SleepState.UNKNOWN;
+ 
++    // Set once the clock has been (re)sent after a device-state reply on this connection, so that
++    // the periodic battery poll, which also requests the device state, does not keep re-sending it.
++    private boolean timeSyncedThisConnection = false;
++
+     private final XiaomiVibrationManager vibrationManager;
+ 
+     public XiaomiSystemService(final XiaomiSupport support) {
+@@ -128,6 +132,9 @@ public class XiaomiSystemService extends AbstractXiaomiService implements Xiaomi
+         currentWearingState = WearingState.UNKNOWN;
+         currentBatteryState = BatteryState.UNKNOWN;
+         currentSleepDetectionState = SleepState.UNKNOWN;
++        // initialize() runs once per (re)connection, right after authentication, so this is where
++        // the per-connection "already synced the clock after a device-state reply" flag resets.
++        timeSyncedThisConnection = false;
+ 
+         // Request device info and configs
+         getSupport().sendCommand("get device info", COMMAND_TYPE, CMD_DEVICE_INFO);
+@@ -354,6 +361,36 @@ public class XiaomiSystemService extends AbstractXiaomiService implements Xiaomi
+         );
+     }
+ 
++    /**
++     * Explicit "sync time now" entry point, so callers that do not go through the generic
++     * {@code GBApplication.deviceService().onSetTime()} path can trigger a clock update directly.
++     */
++    public void syncNow() {
++        LOG.debug("Syncing time now (explicit request)");
++        setCurrentTime();
++    }
++
++    /**
++     * Re-send the time once per connection after the watch has answered a device-state request.
++     *
++     * <p>XiaomiSupport#onAuthSuccess() already sends the clock, but that happens right after
++     * the handshake, while the watch may still be finishing its own startup, and it is never
++     * retried. A device-state reply proves the command channel is actually processing traffic, so
++     * sending the clock here gives it a reliable second chance on every (re)connection. The boolean
++     * guard keeps the periodic battery/state polling from re-sending it over and over.
++     */
++    private void syncTimeOncePerConnection() {
++        if (timeSyncedThisConnection) {
++            return;
++        }
++        timeSyncedThisConnection = true;
++
++        if (GBApplication.getPrefs().syncTime()) {
++            LOG.debug("Device state received, syncing time for this connection");
++            setCurrentTime();
++        }
++    }
++
+     private void handleDeviceInfo(final XiaomiSystem.DeviceInfo deviceInfo) {
+         LOG.debug("Got device info: fw={} hw={} sn={}", deviceInfo.getFirmware(), deviceInfo.getModel(), deviceInfo.getSerialNumber());
+ 
+@@ -827,6 +864,10 @@ public class XiaomiSystemService extends AbstractXiaomiService implements Xiaomi
+ 
+         // TODO: handle activity state
+ 
++        // The device just proved its command channel works by answering the state request, so this
++        // is a good moment to (re)send the clock once per connection.
++        syncTimeOncePerConnection();
++
+         // reset battery level refresh timer
+         rearmBatteryStateRequestTimer();
+     }
+@@ -865,6 +906,9 @@ public class XiaomiSystemService extends AbstractXiaomiService implements Xiaomi
+ 
+         // request battery state to request battery level and charger state on supported models
+         getSupport().sendCommand("request battery state", COMMAND_TYPE, CMD_BATTERY);
++
++        // Same per-connection clock (re)send as handleBasicDeviceState, once the channel is proven.
++        syncTimeOncePerConnection();
+     }
+ 
+     private void handleWidgetScreens(final XiaomiSystem.WidgetScreens widgetScreens) {
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbComponents.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbComponents.kt
+index 2d5d3e1f28..6e693a0294 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbComponents.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbComponents.kt
+@@ -20,6 +20,7 @@ package nodomain.freeyourgadget.gadgetbridge.ui.compose.components
+ 
+ import androidx.compose.animation.core.animateFloatAsState
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -375,7 +376,15 @@ fun GbSettingRow(
+     onClick: (() -> Unit)? = null,
+ ) {
+     androidx.compose.material3.ListItem(
+-        modifier = modifier,
++        // A row with an action must actually be tappable: the whole row is the click target, which
++        // is what callers (e.g. the backup folder picker) expect from GbSettingRow(onClick = ...).
++        modifier = if (onClick != null) {
++            modifier
++                .fillMaxWidth()
++                .clickable(onClick = onClick)
++        } else {
++            modifier
++        },
+         headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
+         supportingContent = supporting?.let { { Text(it, style = MaterialTheme.typography.bodyMedium) } },
+         leadingContent = leading,
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbSheetBody.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbSheetBody.kt
+new file mode 100644
+index 0000000000..ce389b89da
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbSheetBody.kt
+@@ -0,0 +1,60 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.ui.compose.components
++
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.WindowInsets
++import androidx.compose.foundation.layout.asPaddingValues
++import androidx.compose.foundation.layout.heightIn
++import androidx.compose.foundation.layout.statusBars
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.dp
++
++/** Room kept between the top edge of a sheet and the bottom edge of the status bar. */
++private val SHEET_TOP_GAP = 16.dp
++
++/** Room reserved above the body for the drag handle, so it is never pushed out of the window. */
++private val SHEET_DRAG_HANDLE = 40.dp
++
++/** A sheet body never gets shorter than this, however small the window is. */
++private val SHEET_MIN_BODY = 160.dp
++
++/**
++ * Hands [content] a modifier that caps the height of a bottom sheet body so that the sheet stops
++ * below the status bar instead of reaching it.
++ *
++ * A Material 3 bottom sheet grows until its content fills the window, which on a phone with a
++ * punch-hole camera puts the drag handle and the rounded top edge right over the camera and reads
++ * as a broken layout. Capping the body instead keeps the sheet's top edge under the status bar, so
++ * the status bar and the camera stay visible above it, and the body scrolls when it is taller.
++ *
++ * The available height is the one the sheet itself was measured with, so this works for a sheet
++ * opened from any screen and on any window size, and the check happens again on rotation.
++ */
++@Composable
++fun GbSheetBody(
++    modifier: Modifier = Modifier,
++    content: @Composable (Modifier) -> Unit,
++) {
++    BoxWithConstraints {
++        val statusBar = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
++        val cap = (maxHeight - statusBar - SHEET_TOP_GAP - SHEET_DRAG_HANDLE)
++            .coerceAtLeast(SHEET_MIN_BODY)
++        content(modifier.heightIn(max = cap))
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
+index 703fb46403..95a374de5f 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
+@@ -59,6 +59,7 @@ import androidx.compose.material3.SegmentedButton
+ import androidx.compose.material3.SegmentedButtonDefaults
+ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+ import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.getValue
+@@ -258,6 +259,16 @@ fun OnOpenBackupSettingsScreen(
+                         refresh()
+                     },
+                     onPickFolder = { folderPicker.launch(null) },
++                    onResetFolder = {
++                        OnOpenBackupPrefs.setLocation(null)
++                        refresh()
++                        GB.toast(
++                            context,
++                            context.getString(R.string.backup_on_open_reset_default_done),
++                            Toast.LENGTH_SHORT,
++                            GB.INFO,
++                        )
++                    },
+                     onRetentionChange = {
+                         OnOpenBackupPrefs.setRetentionDays(it)
+                         refresh()
+@@ -293,6 +304,7 @@ private fun BackupPreferencesCard(
+     state: BackupUiState,
+     onEnabledChange: (Boolean) -> Unit,
+     onPickFolder: () -> Unit,
++    onResetFolder: () -> Unit,
+     onRetentionChange: (Int) -> Unit,
+ ) {
+     GbTonalCard(
+@@ -314,8 +326,9 @@ private fun BackupPreferencesCard(
+ 
+             BackupCardDivider()
+ 
+-            // The folder and the retention are only useful while the feature is on, like the
+-            // android:dependency the preference XML used to declare
++            // The folder can be picked even while the feature is off: the choice is remembered for
++            // when the switch is turned back on, so it should never be blocked. It is only drawn as
++            // a secondary row in that case.
+             GbSettingRow(
+                 title = stringResource(R.string.pref_title_backup_on_open_location),
+                 supporting = state.locationSummary,
+@@ -333,10 +346,23 @@ private fun BackupPreferencesCard(
+                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                     )
+                 },
+-                onClick = if (state.enabled) onPickFolder else null,
+-                modifier = Modifier.alpha(if (state.enabled) 1f else DISABLED_ALPHA),
++                onClick = onPickFolder,
++                modifier = Modifier.alpha(if (state.enabled) 1f else SECONDARY_ALPHA),
+             )
+ 
++            if (state.hasCustomLocation) {
++                Row(
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .padding(horizontal = 8.dp),
++                    horizontalArrangement = Arrangement.End,
++                ) {
++                    TextButton(onClick = onResetFolder) {
++                        Text(stringResource(R.string.backup_on_open_reset_default))
++                    }
++                }
++            }
++
+             BackupCardDivider()
+ 
+             RetentionRow(
+@@ -601,6 +627,9 @@ private fun RowTitle(icon: ImageVector, title: String) {
+ /** Opacity of the rows that the enable switch turns off, the same the Material components use. */
+ private const val DISABLED_ALPHA = 0.38f
+ 
++/** Opacity of a row that is still actionable while the feature is off, e.g. the backup folder. */
++private const val SECONDARY_ALPHA = 0.7f
++
+ @StringRes
+ private fun retentionLabelRes(days: Int): Int = when (days) {
+     3 -> R.string.backup_on_open_retention_3_days
+@@ -616,6 +645,7 @@ private fun retentionLabelRes(days: Int): Int = when (days) {
+ private data class BackupUiState(
+     val enabled: Boolean,
+     val locationSummary: String,
++    val hasCustomLocation: Boolean,
+     val defaultLocationPath: String,
+     val retentionDays: Int,
+     val lastRun: Long,
+@@ -646,6 +676,7 @@ private fun readBackupState(context: Context): BackupUiState {
+     return BackupUiState(
+         enabled = OnOpenBackupPrefs.isEnabled(),
+         locationSummary = locationSummary,
++        hasCustomLocation = location != null,
+         defaultLocationPath = defaultLocationPath,
+         retentionDays = OnOpenBackupPrefs.retentionDays(),
+         lastRun = OnOpenBackupPrefs.lastRun(),
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsRefresh.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsRefresh.kt
+new file mode 100644
+index 0000000000..96c1f65ab8
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsRefresh.kt
+@@ -0,0 +1,45 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.ui.compose.screens.settings.prefs
++
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.setValue
++
++/**
++ * A process-wide revision counter for the Compose settings renderer.
++ *
++ * The renderer re-reads the preference tree when the [android.content.SharedPreferences] of the screen change, but
++ * some summaries are replaced at runtime without writing a preference: a worker finishes, a background export
++ * updates its status, a dialog changes a summary programmatically. AndroidX [androidx.preference.Preference] only
++ * notifies its own (package private) listeners, so such changes never reach Compose and the visible row keeps showing
++ * the old text until the screen is recreated.
++ *
++ * Code that updates a summary after the screen was composed calls [notifyChanged]; [PrefsSettingsScreen] observes
++ * [revision] and rebuilds its model. Call it on the main thread, where the preference itself was changed.
++ */
++object PrefsRefresh {
++    /** Bumped whenever a preference's rendered state may have changed outside of SharedPreferences. */
++    var revision by mutableIntStateOf(0)
++        private set
++
++    /** Requests the Compose settings screens to read their preferences again. */
++    @JvmStatic
++    fun notifyChanged() {
++        revision++
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
+index 864eef8763..6332e00e62 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
+@@ -103,6 +103,7 @@ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbCardSpacer
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbExpressiveScaffold
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSectionTitle
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSettingRow
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSheetBody
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSwitch
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbTonalCard
+ 
+@@ -159,8 +160,10 @@ fun PrefsSettingsScreen(
+     var pickerRow by remember(tree) { mutableStateOf<PrefRow?>(null) }
+     val bringIntoView = remember(tree) { BringIntoViewRequester() }
+ 
+-    // Reading `revision` here is what makes the model follow the preferences
+-    val model = remember(tree, currentKey, revision) { tree.screenModel(currentKey) }
++    // Reading `revision` here is what makes the model follow the preferences. `externalRevision` covers summaries
++    // that are replaced without a SharedPreferences write, such as a worker reporting a new export status.
++    val externalRevision = PrefsRefresh.revision
++    val model = remember(tree, currentKey, revision, externalRevision) { tree.screenModel(currentKey) }
+ 
+     fun bump() {
+         revision++
+@@ -659,41 +662,44 @@ private fun PrefsPickerSheet(
+         onDismissRequest = onDismiss,
+         sheetState = sheetState,
+     ) {
+-        Column(modifier = Modifier.padding(bottom = 24.dp)) {
+-            Text(
+-                text = row.title,
+-                style = MaterialTheme.typography.titleLarge,
+-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+-            )
+-            Column(
+-                modifier = Modifier
+-                    .heightIn(max = 420.dp)
+-                    .verticalScroll(rememberScrollState()),
+-            ) {
+-                row.choices.forEach { choice ->
+-                    val selected = choice.value == row.value
+-                    Row(
+-                        modifier = Modifier
+-                            .fillMaxWidth()
+-                            .clickable(enabled = row.enabled) { onPick(choice.value) }
+-                            .padding(horizontal = 24.dp, vertical = 12.dp),
+-                        verticalAlignment = Alignment.CenterVertically,
+-                    ) {
+-                        RadioButton(selected = selected, onClick = { onPick(choice.value) })
+-                        Spacer(Modifier.width(8.dp))
+-                        Column(modifier = Modifier.weight(1f)) {
+-                            Text(
+-                                text = choice.title,
+-                                style = MaterialTheme.typography.bodyLarge,
+-                                color = MaterialTheme.colorScheme.onSurface,
+-                            )
+-                            val subtitle = choice.subtitle
+-                            if (subtitle != null) {
++        // Even a long list stops below the status bar rather than reaching up to the camera.
++        GbSheetBody { bodyModifier ->
++            Column(modifier = bodyModifier.padding(bottom = 24.dp)) {
++                Text(
++                    text = row.title,
++                    style = MaterialTheme.typography.titleLarge,
++                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
++                )
++                Column(
++                    modifier = Modifier
++                        .heightIn(max = 420.dp)
++                        .verticalScroll(rememberScrollState()),
++                ) {
++                    row.choices.forEach { choice ->
++                        val selected = choice.value == row.value
++                        Row(
++                            modifier = Modifier
++                                .fillMaxWidth()
++                                .clickable(enabled = row.enabled) { onPick(choice.value) }
++                                .padding(horizontal = 24.dp, vertical = 12.dp),
++                            verticalAlignment = Alignment.CenterVertically,
++                        ) {
++                            RadioButton(selected = selected, onClick = { onPick(choice.value) })
++                            Spacer(Modifier.width(8.dp))
++                            Column(modifier = Modifier.weight(1f)) {
+                                 Text(
+-                                    text = subtitle,
+-                                    style = MaterialTheme.typography.bodyMedium,
+-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                                    text = choice.title,
++                                    style = MaterialTheme.typography.bodyLarge,
++                                    color = MaterialTheme.colorScheme.onSurface,
+                                 )
++                                val subtitle = choice.subtitle
++                                if (subtitle != null) {
++                                    Text(
++                                        text = subtitle,
++                                        style = MaterialTheme.typography.bodyMedium,
++                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                                    )
++                                }
+                             }
+                         }
+                     }
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/sleep/SleepScoreDetailsSheetContent.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/sleep/SleepScoreDetailsSheetContent.kt
+index 530376613f..942bd4c8ae 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/sleep/SleepScoreDetailsSheetContent.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/sleep/SleepScoreDetailsSheetContent.kt
+@@ -61,6 +61,7 @@ import kotlinx.coroutines.launch
+ import nodomain.freeyourgadget.gadgetbridge.R
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSectionTitle
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSettingRow
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSheetBody
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbTonalCard
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbWavyBar
+ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
+@@ -219,7 +220,14 @@ fun SleepScoreDetailsSheetContent(
+         // The body applies the navigation bar inset itself, so the sheet must not apply it twice.
+         contentWindowInsets = { WindowInsets(0) },
+     ) {
+-        SleepScoreSheetBody(model = model, onClose = animateOutAndDismiss)
++        // Keep the sheet's top edge under the status bar instead of over the punch-hole camera.
++        GbSheetBody { bodyModifier ->
++            SleepScoreSheetBody(
++                model = model,
++                onClose = animateOutAndDismiss,
++                modifier = bodyModifier,
++            )
++        }
+     }
+ }
+ 
+@@ -227,6 +235,7 @@ fun SleepScoreDetailsSheetContent(
+ private fun SleepScoreSheetBody(
+     model: SleepScoreUiModel,
+     onClose: () -> Unit,
++    modifier: Modifier = Modifier,
+ ) {
+     val colorScheme = MaterialTheme.colorScheme
+     // The score counts up from zero with the Expressive spring motion, and the wavy ring follows the
+@@ -240,7 +249,7 @@ private fun SleepScoreSheetBody(
+     )
+ 
+     Column(
+-        modifier = Modifier
++        modifier = modifier
+             .fillMaxWidth()
+             .navigationBarsPadding()
+             .verticalScroll(rememberScrollState())
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/MediaManager.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/MediaManager.java
+index cefed57a63..7fe4bcf9ba 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/MediaManager.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/MediaManager.java
+@@ -76,11 +76,11 @@ public class MediaManager {
+      */
+     public boolean onSetMusicInfo(MusicSpec musicSpec) {
+         if (musicSpec != null && !musicSpec.equals(bufferMusicSpec)) {
++            // Only the metadata changed. Do NOT touch the playback state or position here: forcing
++            // STATE_PLAYING / position 0 made every metadata update look like "playing from 0:00",
++            // which desynchronized the state and progress shown on the watch. The real state and
++            // position arrive separately via onSetMusicState() from the playback state callback.
+             bufferMusicSpec = musicSpec;
+-            if (bufferMusicStateSpec != null) {
+-                bufferMusicStateSpec.setState((byte) 0);
+-                bufferMusicStateSpec.setPosition(0);
+-            }
+             return true;
+         }
+         return false;
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt
+index df7b2ecf9e..12d89c691b 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupPrefs.kt
+@@ -83,7 +83,15 @@ object OnOpenBackupPrefs {
+     fun location(): String? = prefs().getString(LOCATION, null)?.takeIf { it.isNotBlank() }
+ 
+     fun setLocation(uri: String?) {
+-        prefs().preferences.edit().putString(LOCATION, uri).apply()
++        // A null/blank value means "use the default directory": remove the key instead of storing
++        // an empty string, so location() falls back to the default and no stale uri is left behind.
++        val editor = prefs().preferences.edit()
++        if (uri.isNullOrBlank()) {
++            editor.remove(LOCATION)
++        } else {
++            editor.putString(LOCATION, uri)
++        }
++        editor.apply()
+     }
+ 
+     /** Stores the retention in days, clamped to the range [retentionDays] reads back. */
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sheets/BottomSheetCapping.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sheets/BottomSheetCapping.kt
+new file mode 100644
+index 0000000000..2d6234a4ce
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sheets/BottomSheetCapping.kt
+@@ -0,0 +1,73 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.sheets
++
++import android.view.View
++import androidx.core.view.ViewCompat
++import androidx.core.view.WindowInsetsCompat
++import com.google.android.material.bottomsheet.BottomSheetBehavior
++import com.google.android.material.bottomsheet.BottomSheetDialog
++import com.google.android.material.bottomsheet.BottomSheetDialogFragment
++
++/**
++ * Keeps the top edge of a Material bottom sheet below the status bar.
++ *
++ * A sheet without a height limit grows until its content fills the window, and with edge-to-edge
++ * windows that puts the drag handle and the rounded top edge over the status bar, right on top of a
++ * punch-hole camera. Limiting the behaviour to the window height minus the status bar leaves the
++ * status bar and the camera visible above the sheet; the sheet keeps anchoring at the bottom, so a
++ * tall body simply gets scrolled by the content inside it.
++ */
++object BottomSheetCapping {
++    /** Room kept between the top edge of the sheet and the bottom edge of the status bar. */
++    private const val TOP_GAP_DP = 16
++
++    /** Applies the limit to [sheet]. Call it after the dialog was shown, from `onStart` or a show listener. */
++    @JvmStatic
++    fun capBelowStatusBar(sheet: BottomSheetDialog) {
++        val behavior = sheet.behavior
++        val decor = sheet.window?.decorView ?: return
++        val gap = (TOP_GAP_DP * decor.resources.displayMetrics.density).toInt()
++
++        fun apply(statusBarTop: Int, windowHeight: Int) {
++            if (windowHeight <= 0) {
++                return
++            }
++            // Never cap so hard that the sheet becomes a sliver on a very short window.
++            val cap = (windowHeight - statusBarTop - gap).coerceAtLeast(windowHeight / 3)
++            if (behavior.maxHeight != cap) {
++                behavior.maxHeight = cap
++            }
++        }
++
++        decor.post { apply(insetsTop(decor), decor.height) }
++        ViewCompat.setOnApplyWindowInsetsListener(decor) { view, insets ->
++            apply(insets.getInsets(WindowInsetsCompat.Type.statusBars()).top, view.height)
++            insets
++        }
++        decor.requestApplyInsets()
++    }
++
++    /** Applies the limit to the dialog of a [BottomSheetDialogFragment]. */
++    @JvmStatic
++    fun capBelowStatusBar(sheet: BottomSheetDialogFragment) {
++        (sheet.dialog as? BottomSheetDialog)?.let { capBelowStatusBar(it) }
++    }
++
++    private fun insetsTop(view: View): Int =
++        ViewCompat.getRootWindowInsets(view)?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
++}
+diff --git a/app/src/main/res/layout/fragment_sleepchart.xml b/app/src/main/res/layout/fragment_sleepchart.xml
+index c50ffda9eb..e531349ed7 100644
+--- a/app/src/main/res/layout/fragment_sleepchart.xml
++++ b/app/src/main/res/layout/fragment_sleepchart.xml
+@@ -37,6 +37,20 @@
+             android:background="?attr/selectableItemBackgroundBorderless"
+             android:scaleType="fitStart" />
+ 
++        <!-- Shown only when the ring has a score breakdown behind it, so the tap target is discoverable. -->
++        <TextView
++            android:id="@+id/sleep_score_details_hint"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_gravity="center"
++            android:layout_marginTop="-16dp"
++            android:layout_marginBottom="8dp"
++            android:gravity="center"
++            android:text="@string/sleep_score_details_hint"
++            android:textColor="?attr/textColorSecondary"
++            android:textSize="12sp"
++            android:visibility="gone" />
++
+         <LinearLayout
+             android:id="@+id/sleep_legend_stats_container"
+             android:layout_width="match_parent"
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index b6f6067894..08d5fbc86f 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -6022,4 +6022,5 @@
+     <string name="pref_summary_age_based_sleep_score">当设备未报告评分时，根据你的睡眠阶段估算评分，并按你所在年龄段的睡眠需求进行调整</string>
+     <string name="pref_title_age_based_sleep_score">基于年龄的睡眠评分</string>
+     <string name="sleep_score_value_age_adjusted">评分：%1d（按年龄调整）</string>
++    <string name="sleep_score_details_hint">点按圆环查看评分构成</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index 0f1f62565e..7f95a2385b 100644
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -3415,4 +3415,5 @@
+     <string name="prefs_online_fitness_trackers_summary">設定如何連線及使用線上健身追蹤器</string>
+     <string name="prefs_online_fitness_trackers_title">線上健身追蹤器</string>
+     <string name="sleep_score_value_age_adjusted">分數：%1d（依年齡調整）</string>
++    <string name="sleep_score_details_hint">點按圓環查看分數構成</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index bb47485135..21249d3a1c 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1341,6 +1341,8 @@
+     <string name="sleep_score_value">Score: %1d</string>
+     <string name="sleep_score_value_age_adjusted">Score: %1d (age-adjusted)</string>
+     <string name="sleep_score_details">Sleep score details</string>
++    <!-- Hint under the sleep ring, which opens the score breakdown when tapped. -->
++    <string name="sleep_score_details_hint">Tap the ring to see how the score is made up</string>
+     <string name="sleep_score_estimated_for_age">Age-adjusted estimate for age %1$d</string>
+     <string name="sleep_score_target_range">Recommended sleep for your age: %1$s – %2$s</string>
+     <string name="sleep_score_breakdown_duration">Sleep duration</string>
+@@ -6911,4 +6913,7 @@ The result is the average of all the measurements.</string>
+     <string name="backup_on_open_retention_7_days">7 days</string>
+     <string name="backup_on_open_retention_14_days">14 days</string>
+     <string name="backup_on_open_retention_30_days">30 days</string>
++    <string name="pref_header_backup">Backup</string>
++    <string name="backup_on_open_reset_default">Reset to default folder</string>
++    <string name="backup_on_open_reset_default_done">Backup folder reset to the default</string>
+ </resources>
+diff --git a/app/src/main/res/xml/automations_settings.xml b/app/src/main/res/xml/automations_settings.xml
+index 7e4880452c..18c001361c 100644
+--- a/app/src/main/res/xml/automations_settings.xml
++++ b/app/src/main/res/xml/automations_settings.xml
+@@ -36,14 +36,6 @@
+                 android:targetPackage="@string/applicationId" />
+         </Preference>
+ 
+-        <Preference
+-            android:icon="@drawable/ic_save"
+-            android:title="@string/pref_header_backup_on_open">
+-            <intent
+-                android:targetClass="nodomain.freeyourgadget.gadgetbridge.activities.automations.OnOpenBackupSettingsActivity"
+-                android:targetPackage="@string/applicationId" />
+-        </Preference>
+-
+     </PreferenceCategory>
+ 
+     <PreferenceCategory android:title="@string/pref_header_auto_fetch">
+diff --git a/app/src/main/res/xml/preferences.xml b/app/src/main/res/xml/preferences.xml
+index f1f7480334..dee8d316a9 100644
+--- a/app/src/main/res/xml/preferences.xml
++++ b/app/src/main/res/xml/preferences.xml
+@@ -326,6 +326,19 @@
+         android:summary="@string/pref_description_automations"
+         android:title="@string/pref_header_automations" />
+ 
++    <PreferenceCategory
++        android:key="pref_screen_backup"
++        android:title="@string/pref_header_backup">
++
++        <Preference
++            android:icon="@drawable/ic_save"
++            android:title="@string/pref_header_backup_on_open">
++            <intent
++                android:targetClass="nodomain.freeyourgadget.gadgetbridge.activities.automations.OnOpenBackupSettingsActivity"
++                android:targetPackage="@string/applicationId" />
++        </Preference>
++    </PreferenceCategory>
++
+     <Preference
+         android:icon="@drawable/ic_settings_remote"
+         android:key="pref_screen_quick_settings"

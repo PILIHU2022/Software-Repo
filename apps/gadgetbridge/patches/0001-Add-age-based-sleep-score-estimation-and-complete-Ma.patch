@@ -1,0 +1,1739 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sun, 15 Nov 2026 08:21:15 +0800
+Subject: [PATCH] Add age-based sleep score estimation and complete Material 3
+ migration
+
+Sleep score:
+- Add AgeSleepScoreCalculator, a transparent 0-100 sleep score that follows the sleep duration recommended for the user's age, age-adjusted deep sleep targets, REM share and sleep efficiency.
+- Use the estimate in the sleep charts (day and period), the dashboard day summary and the sleep widgets when a device does not report a native score.
+- Add a Material 3 bottom sheet with the score breakdown, opened by tapping the age-adjusted score gauge.
+- Add a Charts preference to disable the age-based estimate.
+
+Material 3:
+- Migrate the remaining MaterialComponents filter chip, dialog, translucent and text input styles to their Material 3 equivalents.
+- Add Material 3 bottom sheet styles and component styles for the new score details sheet.
+---
+ app/src/main/AndroidManifest.xml              |   4 +-
+ .../charts/DefaultChartsProvider.kt           |  28 +-
+ .../activities/charts/SleepDailyFragment.java |  46 +-
+ .../activities/charts/SleepFragment.java      |  28 +-
+ .../charts/SleepPeriodFragment.java           |  17 +-
+ .../charts/SleepScoreDetailsSheet.kt          | 170 +++++++
+ .../util/sleep/AgeSleepScore.java             |  55 +++
+ .../util/sleep/AgeSleepScoreCalculator.java   | 414 ++++++++++++++++++
+ .../widgets/impl/SleepScoreWidget.kt          |  87 +++-
+ .../gadgetbridge/widgets/impl/SleepWidget.kt  |   9 +-
+ app/src/main/res/layout/activity_auth_key.xml |   4 +-
+ .../res/layout/activity_installer_gpx.xml     |   2 +-
+ .../layout/fragment_sleep_score_details.xml   | 231 ++++++++++
+ .../main/res/layout/fragment_sleepchart.xml   |   1 +
+ app/src/main/res/values/strings.xml           |  13 +
+ app/src/main/res/values/styles.xml            |  34 +-
+ app/src/main/res/xml/charts_preferences.xml   |   8 +
+ .../sleep/AgeSleepScoreCalculatorTest.java    | 203 +++++++++
+ 18 files changed, 1328 insertions(+), 26 deletions(-)
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepScoreDetailsSheet.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java
+ create mode 100644 app/src/main/res/layout/fragment_sleep_score_details.xml
+ create mode 100644 app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculatorTest.java
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 160485cbad..9ded9abd11 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -1125,7 +1125,7 @@
+             android:name=".activities.WidgetAlarmsActivity"
+             android:excludeFromRecents="true"
+             android:launchMode="singleInstance"
+-            android:theme="@style/Theme.AppCompat.Light.Dialog" />
++            android:theme="@style/Theme.App.Dialog.Dark" />
+ 
+         <activity android:name=".activities.WidgetConfigurationActivity"
+             android:exported="false">
+@@ -1484,7 +1484,7 @@
+             android:name=".activities.quicksettings.QuickSettingsTilesActivity"
+             android:exported="false"
+             android:label="@string/qs_tile_activity_title"
+-            android:theme="@style/Theme.AppCompat.Light.Dialog" />
++            android:theme="@style/Theme.App.Dialog" />
+ 
+         <!-- Settings screen for Quick Settings tiles and Device Controls. -->
+         <activity
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
+index 0d3b3a74f0..9b47d5484f 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
+@@ -22,6 +22,7 @@ import nodomain.freeyourgadget.gadgetbridge.model.TemperatureUnit
+ import nodomain.freeyourgadget.gadgetbridge.model.WeightUnit
+ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
+ import nodomain.freeyourgadget.gadgetbridge.util.FormatUtils
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore
+ import java.text.DecimalFormat
+ import java.text.NumberFormat
+ import java.time.Instant
+@@ -291,13 +292,26 @@ open class DefaultChartsProvider : DeviceChartsProvider {
+             // Sleep - score (if available), followed by sleep time
+             "sleep" -> {
+                 val minutes = DailyTotals.getDailyTotalsForDevice(device, calendarOf(timestamp), db).sleep
+-                val score = if (coordinator.supportsSleepScore(device)) {
+-                    coordinator.getSleepScoreProvider(device, db.daoSession)
+-                        ?.getAllSamples(start, end)
+-                        ?.lastOrNull()
+-                        ?.sleepScore
+-                } else {
+-                    null
++                val score = when {
++                    coordinator.supportsSleepScore(device) -> {
++                        coordinator.getSleepScoreProvider(device, db.daoSession)
++                            ?.getAllSamples(start, end)
++                            ?.lastOrNull()
++                            ?.sleepScore
++                    }
++
++                    AgeSleepScore.isEnabled() && coordinator.supportsSleepMeasurement(device) -> {
++                        // No native score: estimate one from the recorded stages, adjusted for age.
++                        val sessions = coordinator.getSleepSessionProvider(device, db.daoSession)
++                            .getSleepSessionsEndingIn(tsStart, tsEnd)
++                        if (sessions.isEmpty()) {
++                            null
++                        } else {
++                            AgeSleepScore.calculate(sessions).score.takeIf { it > 0 }
++                        }
++                    }
++
++                    else -> null
+                 }
+                 val sleepTime = DateTimeUtils.formatDurationHoursMinutes(minutes, TimeUnit.MINUTES)
+                 if (minutes > 0) {
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
+index 4a52f0cd9d..0e79c4a320 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
+@@ -83,6 +83,8 @@ import nodomain.freeyourgadget.gadgetbridge.util.Accumulator;
+ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils;
+ import nodomain.freeyourgadget.gadgetbridge.util.Prefs;
+ import nodomain.freeyourgadget.gadgetbridge.util.SleepRangeUtils;
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore;
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScoreCalculator;
+ 
+ 
+ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChartsData> {
+@@ -295,11 +297,16 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+         }
+ 
+         int sleepScore = 0;
++        AgeSleepScoreCalculator.Result sleepScoreResult = null;
+         if (!sleepScoreSamples.isEmpty()) {
+             sleepScore = sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore();
++        } else if (AgeSleepScore.isEnabled() && !sleepSessions.isEmpty()) {
++            // No native score: estimate one from the recorded stages, adjusted for the user's age.
++            sleepScoreResult = AgeSleepScore.calculate(sleepSessions);
++            sleepScore = sleepScoreResult.getScore();
+         }
+ 
+-        return new MySleepChartsData(sleepSessions, totalSeconds, awakeSleepDuration, remSleepDuration, deepSleepDuration, lightSleepDuration, sleepScore);
++        return new MySleepChartsData(sleepSessions, totalSeconds, awakeSleepDuration, remSleepDuration, deepSleepDuration, lightSleepDuration, sleepScore, sleepScoreResult);
+     }
+ 
+     protected void sleepStagesGaugeUpdate(MySleepChartsData pieData) {
+@@ -322,8 +329,12 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+                 GBApplication.getContext().getResources().getDisplayMetrics()
+         );
+         String lowerText = "";
+-        if (supportsSleepScore()) {
+-            lowerText = GBApplication.getContext().getString(R.string.sleep_score_value, pieData.getSleepScore());
++        if (pieData.getSleepScore() > 0) {
++            final boolean ageAdjusted = pieData.getSleepScoreResult() != null;
++            lowerText = GBApplication.getContext().getString(
++                    ageAdjusted ? R.string.sleep_score_value_age_adjusted : R.string.sleep_score_value,
++                    pieData.getSleepScore()
++            );
+         }
+         binding.sleepStagesGauge.setImageBitmap(GaugeDrawer.drawCircleGaugeSegmented(
+                 width,
+@@ -335,6 +346,24 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+                 lowerText,
+                 getContext()
+         ));
++
++        final AgeSleepScoreCalculator.Result details = pieData.getSleepScoreResult();
++        if (details != null && pieData.getSleepScore() > 0) {
++            binding.sleepStagesGauge.setClickable(true);
++            binding.sleepStagesGauge.setContentDescription(
++                    getString(R.string.sleep_score_value_age_adjusted, pieData.getSleepScore()));
++            binding.sleepStagesGauge.setOnClickListener(v -> {
++                // Guard against a double tap opening the sheet twice.
++                if (getChildFragmentManager().findFragmentByTag("sleep_score_details") == null) {
++                    SleepScoreDetailsSheet.newInstance(details)
++                            .show(getChildFragmentManager(), "sleep_score_details");
++                }
++            });
++        } else {
++            binding.sleepStagesGauge.setClickable(false);
++            binding.sleepStagesGauge.setContentDescription(null);
++            binding.sleepStagesGauge.setOnClickListener(null);
++        }
+     }
+ 
+     private String timeStringFormat(long seconds) {
+@@ -643,9 +672,10 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+         private final long totalDeep;
+         private final long totalLight;
+         private final int sleepScore;
++        private final AgeSleepScoreCalculator.Result sleepScoreResult;
+         private final List<SleepSession> sleepSessions;
+ 
+-        public MySleepChartsData(List<SleepSession> sleepSessions, long totalSleep, long totalAwake, long totalRem, long totalDeep, long totalLight, int sleepScore) {
++        public MySleepChartsData(List<SleepSession> sleepSessions, long totalSleep, long totalAwake, long totalRem, long totalDeep, long totalLight, int sleepScore, AgeSleepScoreCalculator.Result sleepScoreResult) {
+             this.sleepSessions = sleepSessions;
+             this.totalAwake = totalAwake;
+             this.totalSleep = totalSleep;
+@@ -653,6 +683,7 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+             this.totalDeep = totalDeep;
+             this.totalLight = totalLight;
+             this.sleepScore = sleepScore;
++            this.sleepScoreResult = sleepScoreResult;
+         }
+ 
+         public long getTotalSleep() {
+@@ -679,6 +710,13 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
+             return sleepScore;
+         }
+ 
++        /**
++         * The age-based score breakdown, or {@code null} when the score was reported by the device.
++         */
++        public AgeSleepScoreCalculator.Result getSleepScoreResult() {
++            return sleepScoreResult;
++        }
++
+         public List<SleepSession> getSleepSessions() {
+             return sleepSessions;
+         }
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java
+index 513b23fcb5..356a9ebd0d 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java
+@@ -1,14 +1,17 @@
+ package nodomain.freeyourgadget.gadgetbridge.activities.charts;
+ 
+ import java.util.Calendar;
++import java.util.Collections;
+ import java.util.List;
+ 
+ import nodomain.freeyourgadget.gadgetbridge.R;
+ import nodomain.freeyourgadget.gadgetbridge.database.DBHandler;
++import nodomain.freeyourgadget.gadgetbridge.devices.DeviceCoordinator;
+ import nodomain.freeyourgadget.gadgetbridge.devices.TimeSampleProvider;
+ import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice;
+ import nodomain.freeyourgadget.gadgetbridge.model.ActivitySample;
+ import nodomain.freeyourgadget.gadgetbridge.model.SleepScoreSample;
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore;
+ 
+ abstract class SleepFragment<D extends ChartsData> extends AbstractActivityChartFragment<D> {
+     @Override
+@@ -21,17 +24,37 @@ abstract class SleepFragment<D extends ChartsData> extends AbstractActivityChart
+         return super.getAllSamples(db, device, tsFrom, tsTo);
+     }
+ 
++    /**
++     * Whether a score can be shown: either the device reports one, or it can be estimated from the
++     * recorded sleep sessions when age-based scores are enabled.
++     */
+     public boolean supportsSleepScore() {
+         final GBDevice device = getChartsHost().getDevice();
+-        return device.getDeviceCoordinator().supportsSleepScore(device);
++        final DeviceCoordinator coordinator = device.getDeviceCoordinator();
++        if (coordinator.supportsSleepScore(device)) {
++            return true;
++        }
++        return AgeSleepScore.isEnabled() && coordinator.supportsSleepMeasurement(device);
+     }
+ 
+     protected List<SleepScoreSample> getSleepScoreSamples(DBHandler db, GBDevice device, int tsFrom, int tsTo) {
++        // Devices without native score support have no provider; the caller falls back to the
++        // age-based estimation from the sleep sessions instead.
++        if (!device.getDeviceCoordinator().supportsSleepScore(device)) {
++            return Collections.emptyList();
++        }
+         TimeSampleProvider<? extends SleepScoreSample> provider = device.getDeviceCoordinator().getSleepScoreProvider(device, db.getDaoSession());
++        if (provider == null) {
++            return Collections.emptyList();
++        }
+         return (List<SleepScoreSample>) provider.getAllSamples(tsFrom * 1000L, tsTo * 1000L);
+     }
+ 
+     protected List<SleepScoreSample> getSleepScoreSamples(DBHandler db, GBDevice device, Calendar day) {
++        if (!device.getDeviceCoordinator().supportsSleepScore(device)) {
++            return Collections.emptyList();
++        }
++
+         int startTs;
+         int endTs;
+ 
+@@ -44,6 +67,9 @@ abstract class SleepFragment<D extends ChartsData> extends AbstractActivityChart
+         endTs = startTs + 24 * 60 * 60 - 1;
+ 
+         TimeSampleProvider<? extends SleepScoreSample> provider = device.getDeviceCoordinator().getSleepScoreProvider(device, db.getDaoSession());
++        if (provider == null) {
++            return Collections.emptyList();
++        }
+         return (List<SleepScoreSample>) provider.getAllSamples(startTs * 1000L, endTs * 1000L);
+     }
+ 
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
+index 9ca790768e..3d7c5f465d 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
+@@ -61,6 +61,7 @@ import nodomain.freeyourgadget.gadgetbridge.model.SleepSession;
+ import nodomain.freeyourgadget.gadgetbridge.util.Accumulator;
+ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils;
+ import nodomain.freeyourgadget.gadgetbridge.util.SleepRangeUtils;
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore;
+ 
+ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyChartsData> {
+     protected static final Logger LOG = LoggerFactory.getLogger(SleepPeriodFragment.class);
+@@ -299,14 +300,22 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
+             stageMinutes.add(getTotalsForSessions(daySessions, showRemSleep, showAwakeSleep));
+             epochDays[counter] = LocalDate.of(day.get(Calendar.YEAR), day.get(Calendar.MONTH) + 1, day.get(Calendar.DAY_OF_MONTH)).toEpochDay();
+             // Sleep score
++            int sleepScore = 0;
+             if (supportsSleepScore()) {
+                 List<? extends SleepScoreSample> sleepScoreSamples = getSleepScoreSamples(db, device, day);
+-                if (!sleepScoreSamples.isEmpty() && sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore() > 0) {
+-                    int sleepScore = sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore();
+-                    sleepScoreAccumulator.add(sleepScore);
+-                    sleepScores[counter] = sleepScore;
++                if (!sleepScoreSamples.isEmpty()) {
++                    sleepScore = sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore();
+                 }
+             }
++            if (sleepScore <= 0 && AgeSleepScore.isEnabled() && !daySessions.isEmpty()) {
++                // No native score for this day: estimate one from the recorded stages, adjusted
++                // for the user's age.
++                sleepScore = AgeSleepScore.calculate(daySessions).getScore();
++            }
++            if (sleepScore > 0) {
++                sleepScoreAccumulator.add(sleepScore);
++                sleepScores[counter] = sleepScore;
++            }
+             day.add(Calendar.DATE, 1);
+         }
+ 
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepScoreDetailsSheet.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepScoreDetailsSheet.kt
+new file mode 100644
+index 0000000000..8c76a68978
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepScoreDetailsSheet.kt
+@@ -0,0 +1,170 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.activities.charts
++
++import android.os.Bundle
++import android.view.LayoutInflater
++import android.view.View
++import android.view.ViewGroup
++import android.widget.TextView
++import com.google.android.material.bottomsheet.BottomSheetDialogFragment
++import com.google.android.material.progressindicator.LinearProgressIndicator
++import nodomain.freeyourgadget.gadgetbridge.R
++import nodomain.freeyourgadget.gadgetbridge.databinding.FragmentSleepScoreDetailsBinding
++import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScoreCalculator
++import java.util.concurrent.TimeUnit
++
++/**
++ * Material 3 bottom sheet with the breakdown of an age-adjusted sleep score. Only estimated
++ * scores can be opened, since a score reported by the device has no transparent breakdown.
++ */
++class SleepScoreDetailsSheet : BottomSheetDialogFragment() {
++    private var _binding: FragmentSleepScoreDetailsBinding? = null
++    private val binding get() = _binding!!
++
++    override fun getTheme() = R.style.ThemeOverlay_App_SleepScoreSheet
++
++    override fun onCreateView(
++        inflater: LayoutInflater,
++        container: ViewGroup?,
++        savedInstanceState: Bundle?,
++    ): View {
++        _binding = FragmentSleepScoreDetailsBinding.inflate(inflater, container, false)
++        return binding.root
++    }
++
++    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
++        super.onViewCreated(view, savedInstanceState)
++        val args = requireArguments()
++        val score = args.getInt(ARG_SCORE)
++        val age = args.getInt(ARG_AGE)
++        val minMinutes = args.getInt(ARG_MIN_MINUTES)
++        val maxMinutes = args.getInt(ARG_MAX_MINUTES)
++
++        binding.sleepScoreValue.text = score.toString()
++        binding.sleepScoreBand.setText(bandOf(score))
++        binding.sleepScoreSubtitle.text = getString(R.string.sleep_score_estimated_for_age, age)
++        binding.sleepScoreTarget.text = getString(
++            R.string.sleep_score_target_range,
++            formatMinutes(minMinutes),
++            formatMinutes(maxMinutes),
++        )
++
++        bindRow(
++            binding.sleepScoreDurationRow,
++            binding.sleepScoreDurationBar,
++            binding.sleepScoreDurationPoints,
++            args.getInt(ARG_DURATION_SCORE),
++            args.getInt(ARG_DURATION_WEIGHT),
++        )
++        bindRow(
++            binding.sleepScoreDeepRow,
++            binding.sleepScoreDeepBar,
++            binding.sleepScoreDeepPoints,
++            args.getInt(ARG_DEEP_SCORE),
++            args.getInt(ARG_DEEP_WEIGHT),
++        )
++        bindRow(
++            binding.sleepScoreRemRow,
++            binding.sleepScoreRemBar,
++            binding.sleepScoreRemPoints,
++            args.getInt(ARG_REM_SCORE),
++            args.getInt(ARG_REM_WEIGHT),
++        )
++        bindRow(
++            binding.sleepScoreContinuityRow,
++            binding.sleepScoreContinuityBar,
++            binding.sleepScoreContinuityPoints,
++            args.getInt(ARG_CONTINUITY_SCORE),
++            args.getInt(ARG_CONTINUITY_WEIGHT),
++        )
++
++        binding.sleepScoreNote.setText(R.string.sleep_score_estimated_note)
++        binding.sleepScoreClose.setOnClickListener { dismiss() }
++    }
++
++    override fun onDestroyView() {
++        _binding = null
++        super.onDestroyView()
++    }
++
++    private fun bindRow(
++        row: View,
++        bar: LinearProgressIndicator,
++        points: TextView,
++        score: Int,
++        weight: Int,
++    ) {
++        if (weight <= 0) {
++            row.visibility = View.GONE
++            bar.visibility = View.GONE
++            return
++        }
++        row.visibility = View.VISIBLE
++        bar.visibility = View.VISIBLE
++        points.text = getString(R.string.sleep_score_points, score, weight)
++        bar.max = weight
++        bar.setProgressCompat(score, false)
++    }
++
++    private fun formatMinutes(minutes: Int): String =
++        DateTimeUtils.formatDurationHoursMinutes(minutes.toLong(), TimeUnit.MINUTES)
++
++    private fun bandOf(score: Int): Int = when {
++        score >= 90 -> R.string.sleep_score_excellent
++        score >= 80 -> R.string.sleep_score_good
++        score >= 60 -> R.string.sleep_score_fair
++        else -> R.string.sleep_score_poor
++    }
++
++    companion object {
++        private const val ARG_SCORE = "score"
++        private const val ARG_AGE = "age"
++        private const val ARG_MIN_MINUTES = "min_minutes"
++        private const val ARG_MAX_MINUTES = "max_minutes"
++        private const val ARG_DURATION_SCORE = "duration_score"
++        private const val ARG_DURATION_WEIGHT = "duration_weight"
++        private const val ARG_DEEP_SCORE = "deep_score"
++        private const val ARG_DEEP_WEIGHT = "deep_weight"
++        private const val ARG_REM_SCORE = "rem_score"
++        private const val ARG_REM_WEIGHT = "rem_weight"
++        private const val ARG_CONTINUITY_SCORE = "continuity_score"
++        private const val ARG_CONTINUITY_WEIGHT = "continuity_weight"
++
++        @JvmStatic
++        fun newInstance(result: AgeSleepScoreCalculator.Result): SleepScoreDetailsSheet {
++            val recommendation = result.recommendation
++            return SleepScoreDetailsSheet().apply {
++                arguments = Bundle().apply {
++                    putInt(ARG_SCORE, result.score)
++                    putInt(ARG_AGE, result.age)
++                    putInt(ARG_MIN_MINUTES, recommendation.minMinutes)
++                    putInt(ARG_MAX_MINUTES, recommendation.maxMinutes)
++                    putInt(ARG_DURATION_SCORE, result.durationScore)
++                    putInt(ARG_DURATION_WEIGHT, result.durationWeight)
++                    putInt(ARG_DEEP_SCORE, result.deepSleepScore)
++                    putInt(ARG_DEEP_WEIGHT, result.deepSleepWeight)
++                    putInt(ARG_REM_SCORE, result.remSleepScore)
++                    putInt(ARG_REM_WEIGHT, result.remSleepWeight)
++                    putInt(ARG_CONTINUITY_SCORE, result.continuityScore)
++                    putInt(ARG_CONTINUITY_WEIGHT, result.continuityWeight)
++                }
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
+new file mode 100644
+index 0000000000..785c538449
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
+@@ -0,0 +1,55 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.sleep;
++
++import androidx.annotation.NonNull;
++
++import java.util.List;
++
++import nodomain.freeyourgadget.gadgetbridge.GBApplication;
++import nodomain.freeyourgadget.gadgetbridge.model.ActivityUser;
++import nodomain.freeyourgadget.gadgetbridge.model.SleepSession;
++
++/**
++ * Glue between the age-based sleep score calculator, the user's profile and the stored preference.
++ */
++public final class AgeSleepScore {
++    /**
++     * Whether a score should be estimated from the recorded sleep sessions when the device does
++     * not report one. Defaults to on; the calculation only uses data that is already stored.
++     */
++    public static final String PREF_AGE_BASED_SLEEP_SCORE = "charts_age_based_sleep_score";
++
++    private AgeSleepScore() {
++    }
++
++    public static boolean isEnabled() {
++        return GBApplication.getPrefs().getBoolean(PREF_AGE_BASED_SLEEP_SCORE, true);
++    }
++
++    /**
++     * The user's current age, normalized to a plausible value if their date of birth is unset.
++     */
++    public static int getAge() {
++        return AgeSleepScoreCalculator.normalizeAge(new ActivityUser().getAge());
++    }
++
++    @NonNull
++    public static AgeSleepScoreCalculator.Result calculate(@NonNull final List<SleepSession> sessions) {
++        return AgeSleepScoreCalculator.calculate(getAge(), sessions);
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java
+new file mode 100644
+index 0000000000..04816ccf70
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java
+@@ -0,0 +1,414 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.sleep;
++
++import androidx.annotation.NonNull;
++
++import java.util.List;
++import java.util.Locale;
++
++import nodomain.freeyourgadget.gadgetbridge.model.SleepSession;
++
++/**
++ * Computes a 0-100 sleep score from the recorded sleep stages, adjusted for the sleep needs of
++ * the user's age.
++ *
++ * <p>Devices usually compute their score with a proprietary algorithm, which makes scores from
++ * different devices incomparable and leaves devices without a native score with no score at all.
++ * This calculator provides a transparent, age-aware estimate instead:
++ *
++ * <ul>
++ *     <li><b>Sleep duration (50 points)</b> - scored against the age-appropriate sleep duration
++ *     range recommended by the AASM / National Sleep Foundation. Sleeping inside the range scores
++ *     full points, sleeping less decays faster than sleeping more.</li>
++ *     <li><b>Deep sleep (20 points)</b> - deep sleep naturally declines with age, so the target
++ *     ratio follows the age bracket instead of using a single target for everyone.</li>
++ *     <li><b>REM sleep (15 points)</b> - scored against a 22% REM share, which is comparatively
++ *     stable across adult ages.</li>
++ *     <li><b>Sleep continuity (15 points)</b> - time asleep divided by time in bed, compared to an
++ *     age-appropriate efficiency target.</li>
++ * </ul>
++ *
++ * <p>Components that the device did not record (for example a session without awake stages) are
++ * left out and the remaining components are renormalized to 0-100, so a missing stage breakdown
++ * does not silently produce a bad score.
++ */
++public final class AgeSleepScoreCalculator {
++    public static final int WEIGHT_DURATION = 50;
++    public static final int WEIGHT_DEEP_SLEEP = 20;
++    public static final int WEIGHT_REM_SLEEP = 15;
++    public static final int WEIGHT_CONTINUITY = 15;
++
++    /**
++     * Used when the user's date of birth is unset, invalid or implausible.
++     */
++    public static final int DEFAULT_AGE = 30;
++
++    public static final double REM_SLEEP_TARGET_RATIO = 0.22;
++
++    private AgeSleepScoreCalculator() {
++    }
++
++    /**
++     * The sleep duration range recommended for {@code age}, in minutes.
++     */
++    @NonNull
++    public static Recommendation recommendationForAge(final int age) {
++        if (age >= 1 && age <= 2) {
++            return new Recommendation(11 * 60, 14 * 60);
++        } else if (age >= 3 && age <= 5) {
++            return new Recommendation(10 * 60, 13 * 60);
++        } else if (age >= 6 && age <= 12) {
++            return new Recommendation(9 * 60, 12 * 60);
++        } else if (age >= 13 && age <= 17) {
++            return new Recommendation(8 * 60, 10 * 60);
++        } else if (age >= 18 && age <= 25) {
++            return new Recommendation(7 * 60, 9 * 60);
++        } else if (age >= 26 && age <= 64) {
++            return new Recommendation(7 * 60, 9 * 60);
++        } else if (age >= 65) {
++            return new Recommendation(7 * 60, 8 * 60);
++        }
++        // Infants, or an unknown age: use the adult recommendation rather than failing.
++        return new Recommendation(7 * 60, 9 * 60);
++    }
++
++    /**
++     * The share of total sleep that deep sleep should ideally make up at {@code age}.
++     */
++    public static double deepSleepTargetRatio(final int age) {
++        if (age < 30) {
++            return 0.20;
++        } else if (age < 40) {
++            return 0.18;
++        } else if (age < 50) {
++            return 0.16;
++        } else if (age < 60) {
++            return 0.14;
++        } else {
++            return 0.12;
++        }
++    }
++
++    /**
++     * The share of total sleep that REM sleep should ideally make up at {@code age}.
++     */
++    public static double remSleepTargetRatio(final int age) {
++        return REM_SLEEP_TARGET_RATIO;
++    }
++
++    /**
++     * The sleep efficiency (asleep / time in bed) that is typical for {@code age}.
++     */
++    public static double sleepEfficiencyTarget(final int age) {
++        if (age < 40) {
++            return 0.90;
++        } else if (age < 60) {
++            return 0.85;
++        } else {
++            return 0.80;
++        }
++    }
++
++    /**
++     * Calculates the score from aggregated stage durations, all in seconds.
++     */
++    @NonNull
++    public static Result calculate(final int age,
++                                   final long totalSleepSeconds,
++                                   final long deepSleepSeconds,
++                                   final long remSleepSeconds,
++                                   final long awakeSleepSeconds) {
++        final int safeAge = normalizeAge(age);
++        final Recommendation recommendation = recommendationForAge(safeAge);
++        final long asleep = Math.max(0L, totalSleepSeconds);
++        final long deep = Math.max(0L, deepSleepSeconds);
++        final long rem = Math.max(0L, remSleepSeconds);
++        final long awake = Math.max(0L, awakeSleepSeconds);
++
++        if (asleep <= 0L) {
++            return new Result(0, 0, 0, 0, 0,
++                    WEIGHT_DURATION, 0, 0, 0,
++                    safeAge, recommendation, 0, deep, rem, awake);
++        }
++
++        final int durationScore = durationScore(asleep, recommendation);
++
++        int deepWeight = 0;
++        int deepScore = 0;
++        int remWeight = 0;
++        int remScore = 0;
++        // Score each stage only when the device recorded it. Cheaper trackers sometimes only
++        // record deep sleep, and a missing stage must not be mistaken for zero of that stage.
++        if (deep > 0L) {
++            deepWeight = WEIGHT_DEEP_SLEEP;
++            deepScore = ratioScore(deep, asleep, deepSleepTargetRatio(safeAge), WEIGHT_DEEP_SLEEP);
++        }
++        if (rem > 0L) {
++            remWeight = WEIGHT_REM_SLEEP;
++            remScore = ratioScore(rem, asleep, remSleepTargetRatio(safeAge), WEIGHT_REM_SLEEP);
++        }
++
++        int continuityWeight = 0;
++        int continuityScore = 0;
++        if (awake > 0L) {
++            continuityWeight = WEIGHT_CONTINUITY;
++            final double efficiency = (double) asleep / (double) (asleep + awake);
++            continuityScore = clampScore(efficiency / sleepEfficiencyTarget(safeAge), WEIGHT_CONTINUITY);
++        }
++
++        final int totalWeight = WEIGHT_DURATION + deepWeight + remWeight + continuityWeight;
++        final int totalPoints = durationScore + deepScore + remScore + continuityScore;
++        final int score = (int) Math.round(100.0 * totalPoints / totalWeight);
++
++        return new Result(
++                Math.max(0, Math.min(100, score)),
++                durationScore,
++                deepScore,
++                remScore,
++                continuityScore,
++                WEIGHT_DURATION,
++                deepWeight,
++                remWeight,
++                continuityWeight,
++                safeAge,
++                recommendation,
++                asleep,
++                deep,
++                rem,
++                awake
++        );
++    }
++
++    /**
++     * Calculates the score for a night made up of one or more sleep sessions.
++     */
++    @NonNull
++    public static Result calculate(final int age, @NonNull final List<SleepSession> sessions) {
++        long asleep = 0L;
++        long deep = 0L;
++        long rem = 0L;
++        long awake = 0L;
++        for (final SleepSession session : sessions) {
++            asleep += session.getTotalSleepDuration();
++            deep += session.getDeepSleepDuration();
++            rem += session.getRemSleepDuration();
++            awake += session.getAwakeSleepDuration();
++        }
++        return calculate(age, asleep, deep, rem, awake);
++    }
++
++    /**
++     * Drops implausible ages (unset date of birth, future dates) down to {@link #DEFAULT_AGE}.
++     */
++    public static int normalizeAge(final int age) {
++        return age >= 1 && age <= 120 ? age : DEFAULT_AGE;
++    }
++
++    private static int durationScore(final long asleepSeconds, @NonNull final Recommendation recommendation) {
++        final double hours = asleepSeconds / 3600.0;
++        final double minHours = recommendation.minMinutes / 60.0;
++        final double maxHours = recommendation.maxMinutes / 60.0;
++
++        if (hours < minHours) {
++            // Sleeping less than the recommended range decays faster than oversleeping: at half
++            // the minimum the score is roughly 40% of the duration weight.
++            return (int) Math.round(WEIGHT_DURATION * Math.pow(hours / minHours, 1.2));
++        }
++        if (hours > maxHours) {
++            // Oversleeping is penalized more gently, reaching 0 at twice the upper bound.
++            return (int) Math.round(WEIGHT_DURATION * Math.max(0.0, 1.0 - (hours - maxHours) / (2.0 * maxHours)));
++        }
++        return WEIGHT_DURATION;
++    }
++
++    private static int ratioScore(final long part, final long total, final double targetRatio, final int weight) {
++        if (total <= 0L || targetRatio <= 0.0) {
++            return 0;
++        }
++        return clampScore((part / (double) total) / targetRatio, weight);
++    }
++
++    private static int clampScore(final double ratio, final int weight) {
++        return (int) Math.round(weight * Math.max(0.0, Math.min(1.0, ratio)));
++    }
++
++    /**
++     * The age-appropriate sleep duration range, in minutes.
++     */
++    public static final class Recommendation {
++        private final int minMinutes;
++        private final int maxMinutes;
++
++        public Recommendation(final int minMinutes, final int maxMinutes) {
++            this.minMinutes = minMinutes;
++            this.maxMinutes = maxMinutes;
++        }
++
++        public int getMinMinutes() {
++            return minMinutes;
++        }
++
++        public int getMaxMinutes() {
++            return maxMinutes;
++        }
++
++        public int getTargetMinutes() {
++            return (minMinutes + maxMinutes) / 2;
++        }
++
++        @NonNull
++        @Override
++        public String toString() {
++            return String.format(Locale.ROOT, "%d-%d min", minMinutes, maxMinutes);
++        }
++    }
++
++    /**
++     * The score and its components. Weights are 0 for components that were not available.
++     */
++    public static final class Result {
++        private final int score;
++        private final int durationScore;
++        private final int deepSleepScore;
++        private final int remSleepScore;
++        private final int continuityScore;
++        private final int durationWeight;
++        private final int deepSleepWeight;
++        private final int remSleepWeight;
++        private final int continuityWeight;
++        private final int age;
++        private final Recommendation recommendation;
++        private final long totalSleepSeconds;
++        private final long deepSleepSeconds;
++        private final long remSleepSeconds;
++        private final long awakeSleepSeconds;
++
++        Result(final int score,
++               final int durationScore,
++               final int deepSleepScore,
++               final int remSleepScore,
++               final int continuityScore,
++               final int durationWeight,
++               final int deepSleepWeight,
++               final int remSleepWeight,
++               final int continuityWeight,
++               final int age,
++               @NonNull final Recommendation recommendation,
++               final long totalSleepSeconds,
++               final long deepSleepSeconds,
++               final long remSleepSeconds,
++               final long awakeSleepSeconds) {
++            this.score = score;
++            this.durationScore = durationScore;
++            this.deepSleepScore = deepSleepScore;
++            this.remSleepScore = remSleepScore;
++            this.continuityScore = continuityScore;
++            this.durationWeight = durationWeight;
++            this.deepSleepWeight = deepSleepWeight;
++            this.remSleepWeight = remSleepWeight;
++            this.continuityWeight = continuityWeight;
++            this.age = age;
++            this.recommendation = recommendation;
++            this.totalSleepSeconds = totalSleepSeconds;
++            this.deepSleepSeconds = deepSleepSeconds;
++            this.remSleepSeconds = remSleepSeconds;
++            this.awakeSleepSeconds = awakeSleepSeconds;
++        }
++
++        public int getScore() {
++            return score;
++        }
++
++        public int getDurationScore() {
++            return durationScore;
++        }
++
++        public int getDeepSleepScore() {
++            return deepSleepScore;
++        }
++
++        public int getRemSleepScore() {
++            return remSleepScore;
++        }
++
++        public int getContinuityScore() {
++            return continuityScore;
++        }
++
++        public int getDurationWeight() {
++            return durationWeight;
++        }
++
++        public int getDeepSleepWeight() {
++            return deepSleepWeight;
++        }
++
++        public int getRemSleepWeight() {
++            return remSleepWeight;
++        }
++
++        public int getContinuityWeight() {
++            return continuityWeight;
++        }
++
++        public int getAge() {
++            return age;
++        }
++
++        @NonNull
++        public Recommendation getRecommendation() {
++            return recommendation;
++        }
++
++        public long getTotalSleepSeconds() {
++            return totalSleepSeconds;
++        }
++
++        public long getDeepSleepSeconds() {
++            return deepSleepSeconds;
++        }
++
++        public long getRemSleepSeconds() {
++            return remSleepSeconds;
++        }
++
++        public long getAwakeSleepSeconds() {
++            return awakeSleepSeconds;
++        }
++
++        public boolean hasStageBreakdown() {
++            return deepSleepWeight > 0 || remSleepWeight > 0;
++        }
++
++        public int getTotalWeight() {
++            return durationWeight + deepSleepWeight + remSleepWeight + continuityWeight;
++        }
++
++        @NonNull
++        @Override
++        public String toString() {
++            return String.format(Locale.ROOT,
++                    "SleepScore{score=%d, age=%d, duration=%d/%d, deep=%d/%d, rem=%d/%d, continuity=%d/%d}",
++                    score, age,
++                    durationScore, durationWeight,
++                    deepSleepScore, deepSleepWeight,
++                    remSleepScore, remSleepWeight,
++                    continuityScore, continuityWeight);
++        }
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
+index d42ba69d6b..b1f762cd36 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
+@@ -16,7 +16,10 @@ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetColors
+ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetHistory
+ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetDataScope
+ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetConfig
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScoreCalculator
+ import org.slf4j.LoggerFactory
++import java.time.Instant
+ import java.time.LocalDate
+ 
+ /**
+@@ -34,7 +37,8 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
+     override val chartTab = "sleep"
+ 
+     override fun isSupportedBy(device: GBDevice): Boolean =
+-        device.deviceCoordinator.supportsSleepScore(device)
++        device.deviceCoordinator.supportsSleepScore(device) ||
++            (AgeSleepScore.isEnabled() && device.deviceCoordinator.supportsSleepMeasurement(device))
+ 
+     override suspend fun loadData(scope: WidgetDataScope, config: WidgetConfig): Data = Data(
+         latestScore(scope),
+@@ -116,9 +120,44 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
+         } catch (e: Exception) {
+             LOG.error("Could not get sleep score", e)
+         }
++        if (AgeSleepScore.isEnabled()) {
++            try {
++                return localScoreForDay(scope)
++            } catch (e: Exception) {
++                LOG.error("Could not estimate the sleep score", e)
++            }
++        }
+         return -1
+     }
+ 
++    /**
++     * Estimates the score of the selected day from the recorded sleep stages, adjusted for the
++     * user's age. Returns -1 when the day has no sleep sessions.
++     */
++    private suspend fun localScoreForDay(scope: WidgetDataScope): Int {
++        val age = AgeSleepScore.getAge()
++        val dayStart = scope.dayStart.toInt()
++        val dayEnd = minOf(
++            scope.day.plusDays(1).atStartOfDay(scope.zone).toEpochSecond().toInt(),
++            scope.query.timeTo,
++        )
++        if (dayEnd <= dayStart) {
++            return -1
++        }
++        val score = scope.db { db ->
++            var best = 0
++            for (dev in scope.devices.filter { it.deviceCoordinator.supportsSleepMeasurement(it) }) {
++                val sessions = dev.deviceCoordinator.getSleepSessionProvider(dev, db.daoSession)
++                    .getSleepSessionsEndingIn(dayStart, dayEnd)
++                if (sessions.isNotEmpty()) {
++                    best = maxOf(best, AgeSleepScoreCalculator.calculate(age, sessions).score)
++                }
++            }
++            best
++        }
++        return if (score > 0) score else -1
++    }
++
+     private suspend fun nights(scope: WidgetDataScope): FloatArray {
+         val from = scope.dayStartMinusDays(NIGHTS - 1) * 1000L
+         val samples = try {
+@@ -135,7 +174,51 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
+             LOG.error("Could not get sleep score history", e)
+             emptyList()
+         }
+-        return WidgetHistory.dailyLatest(samples, scope.day, NIGHTS, scope.zone)
++        if (!AgeSleepScore.isEnabled()) {
++            return WidgetHistory.dailyLatest(samples, scope.day, NIGHTS, scope.zone)
++        }
++        // Estimated scores only fill days without a native score, so a device-reported score is
++        // never silently replaced by the local estimate.
++        val nativeDays = samples
++            .map { Instant.ofEpochSecond(it.seconds).atZone(scope.zone).toLocalDate() }
++            .toSet()
++        val local = localNightScores(scope).filter {
++            Instant.ofEpochSecond(it.seconds).atZone(scope.zone).toLocalDate() !in nativeDays
++        }
++        return WidgetHistory.dailyLatest(samples + local, scope.day, NIGHTS, scope.zone)
++    }
++
++    /**
++     * One estimated score per night of the last [NIGHTS] days, timestamped at the end of the day.
++     */
++    private suspend fun localNightScores(scope: WidgetDataScope): List<TimedValue> {
++        val age = AgeSleepScore.getAge()
++        return scope.db { db ->
++            val result = mutableListOf<TimedValue>()
++            for (daysAgo in (NIGHTS - 1) downTo 0) {
++                val day = scope.day.minusDays(daysAgo.toLong())
++                val start = day.atStartOfDay(scope.zone).toEpochSecond().toInt()
++                val end = minOf(
++                    day.plusDays(1).atStartOfDay(scope.zone).toEpochSecond().toInt(),
++                    scope.query.timeTo,
++                )
++                if (end <= start) {
++                    continue
++                }
++                var best = 0
++                for (dev in scope.devices.filter { it.deviceCoordinator.supportsSleepMeasurement(it) }) {
++                    val sessions = dev.deviceCoordinator.getSleepSessionProvider(dev, db.daoSession)
++                        .getSleepSessionsEndingIn(start, end)
++                    if (sessions.isNotEmpty()) {
++                        best = maxOf(best, AgeSleepScoreCalculator.calculate(age, sessions).score)
++                    }
++                }
++                if (best > 0) {
++                    result.add(TimedValue(end.toLong(), best.toFloat()))
++                }
++            }
++            result
++        }
+     }
+ 
+     /**
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt
+index 31bee093a4..4eef2fbff3 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt
+@@ -4,6 +4,7 @@ import android.content.Context
+ import nodomain.freeyourgadget.gadgetbridge.R
+ import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice
+ import nodomain.freeyourgadget.gadgetbridge.model.ActivityUser
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore
+ import nodomain.freeyourgadget.gadgetbridge.widgets.GaugeSpec
+ import nodomain.freeyourgadget.gadgetbridge.widgets.HypnogramSegment
+ import nodomain.freeyourgadget.gadgetbridge.widgets.LegendRow
+@@ -61,7 +62,13 @@ object SleepWidget : MetricWidget<SleepWidget.Data>() {
+             total,
+             scope.sleepGoalFactor(total),
+             scope.sleepStageMinutes(),
+-            if (scope.devices.any { it.deviceCoordinator.supportsSleepScore(it) }) SleepScoreWidget.latestScore(scope) else -1,
++            if (scope.devices.any { it.deviceCoordinator.supportsSleepScore(it) } ||
++                (AgeSleepScore.isEnabled() && scope.devices.any { it.deviceCoordinator.supportsSleepMeasurement(it) })
++            ) {
++                SleepScoreWidget.latestScore(scope)
++            } else {
++                -1
++            },
+             if (config.isFullWidth || config.isTall) scope.sleepStretches() else null,
+             StageSupport.of(scope.devices),
+         )
+diff --git a/app/src/main/res/layout/activity_auth_key.xml b/app/src/main/res/layout/activity_auth_key.xml
+index e5463217f7..ff489f8b48 100644
+--- a/app/src/main/res/layout/activity_auth_key.xml
++++ b/app/src/main/res/layout/activity_auth_key.xml
+@@ -22,7 +22,7 @@
+ 
+     <com.google.android.material.textfield.TextInputLayout
+         android:id="@+id/auth_key_input_layout"
+-        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
++        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+         android:layout_width="0dp"
+         android:layout_height="wrap_content"
+         android:layout_marginTop="16dp"
+@@ -40,7 +40,7 @@
+ 
+     <com.google.android.material.textfield.TextInputLayout
+         android:id="@+id/secondary_auth_key_input_layout"
+-        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
++        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+         android:layout_width="0dp"
+         android:layout_height="wrap_content"
+         android:layout_marginTop="16dp"
+diff --git a/app/src/main/res/layout/activity_installer_gpx.xml b/app/src/main/res/layout/activity_installer_gpx.xml
+index 4562aa76ac..9f130f966f 100644
+--- a/app/src/main/res/layout/activity_installer_gpx.xml
++++ b/app/src/main/res/layout/activity_installer_gpx.xml
+@@ -71,7 +71,7 @@
+ 
+         <com.google.android.material.textfield.TextInputLayout
+             android:id="@+id/track_name_input_layout"
+-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
++            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
+             android:layout_below="@+id/gpx_map_view"
+diff --git a/app/src/main/res/layout/fragment_sleep_score_details.xml b/app/src/main/res/layout/fragment_sleep_score_details.xml
+new file mode 100644
+index 0000000000..f9a75897c3
+--- /dev/null
++++ b/app/src/main/res/layout/fragment_sleep_score_details.xml
+@@ -0,0 +1,231 @@
++<?xml version="1.0" encoding="utf-8"?>
++<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:fillViewport="true">
++
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:orientation="vertical"
++        android:paddingStart="24dp"
++        android:paddingTop="8dp"
++        android:paddingEnd="24dp"
++        android:paddingBottom="32dp">
++
++        <com.google.android.material.bottomsheet.BottomSheetDragHandleView
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_gravity="center_horizontal"
++            android:layout_marginBottom="8dp" />
++
++        <TextView
++            android:id="@+id/sleep_score_title"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:text="@string/sleep_score_details"
++            android:textAppearance="?attr/textAppearanceTitleMedium"
++            android:textColor="?attr/colorOnSurface" />
++
++        <TextView
++            android:id="@+id/sleep_score_value"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="4dp"
++            android:textAppearance="?attr/textAppearanceDisplayMedium"
++            android:textColor="?attr/colorPrimary" />
++
++        <TextView
++            android:id="@+id/sleep_score_band"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:textAppearance="?attr/textAppearanceTitleMedium"
++            android:textColor="?attr/colorOnSurface" />
++
++        <TextView
++            android:id="@+id/sleep_score_subtitle"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="8dp"
++            android:textAppearance="?attr/textAppearanceBodyMedium"
++            android:textColor="?attr/colorOnSurfaceVariant" />
++
++        <TextView
++            android:id="@+id/sleep_score_target"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="2dp"
++            android:textAppearance="?attr/textAppearanceBodyMedium"
++            android:textColor="?attr/colorOnSurfaceVariant" />
++
++        <View
++            android:layout_width="match_parent"
++            android:layout_height="1dp"
++            android:layout_marginTop="16dp"
++            android:layout_marginBottom="8dp"
++            android:background="?attr/colorOutlineVariant" />
++
++        <!-- Sleep duration -->
++        <LinearLayout
++            android:id="@+id/sleep_score_duration_row"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="8dp"
++            android:gravity="center_vertical"
++            android:orientation="horizontal">
++
++            <TextView
++                android:id="@+id/sleep_score_duration_label"
++                android:layout_width="0dp"
++                android:layout_height="wrap_content"
++                android:layout_weight="1"
++                android:text="@string/sleep_score_breakdown_duration"
++                android:textAppearance="?attr/textAppearanceBodyLarge"
++                android:textColor="?attr/colorOnSurface" />
++
++            <TextView
++                android:id="@+id/sleep_score_duration_points"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:textAppearance="?attr/textAppearanceLabelLarge"
++                android:textColor="?attr/colorOnSurfaceVariant" />
++        </LinearLayout>
++
++        <com.google.android.material.progressindicator.LinearProgressIndicator
++            android:id="@+id/sleep_score_duration_bar"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="4dp"
++            app:indicatorColor="?attr/colorPrimary"
++            app:trackColor="?attr/colorSurfaceContainerHighest"
++            app:trackCornerRadius="4dp"
++            app:trackThickness="8dp" />
++
++        <!-- Deep sleep -->
++        <LinearLayout
++            android:id="@+id/sleep_score_deep_row"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="16dp"
++            android:gravity="center_vertical"
++            android:orientation="horizontal">
++
++            <TextView
++                android:id="@+id/sleep_score_deep_label"
++                android:layout_width="0dp"
++                android:layout_height="wrap_content"
++                android:layout_weight="1"
++                android:text="@string/sleep_score_breakdown_deep"
++                android:textAppearance="?attr/textAppearanceBodyLarge"
++                android:textColor="?attr/colorOnSurface" />
++
++            <TextView
++                android:id="@+id/sleep_score_deep_points"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:textAppearance="?attr/textAppearanceLabelLarge"
++                android:textColor="?attr/colorOnSurfaceVariant" />
++        </LinearLayout>
++
++        <com.google.android.material.progressindicator.LinearProgressIndicator
++            android:id="@+id/sleep_score_deep_bar"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="4dp"
++            app:indicatorColor="?attr/colorPrimary"
++            app:trackColor="?attr/colorSurfaceContainerHighest"
++            app:trackCornerRadius="4dp"
++            app:trackThickness="8dp" />
++
++        <!-- REM sleep -->
++        <LinearLayout
++            android:id="@+id/sleep_score_rem_row"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="16dp"
++            android:gravity="center_vertical"
++            android:orientation="horizontal">
++
++            <TextView
++                android:id="@+id/sleep_score_rem_label"
++                android:layout_width="0dp"
++                android:layout_height="wrap_content"
++                android:layout_weight="1"
++                android:text="@string/sleep_score_breakdown_rem"
++                android:textAppearance="?attr/textAppearanceBodyLarge"
++                android:textColor="?attr/colorOnSurface" />
++
++            <TextView
++                android:id="@+id/sleep_score_rem_points"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:textAppearance="?attr/textAppearanceLabelLarge"
++                android:textColor="?attr/colorOnSurfaceVariant" />
++        </LinearLayout>
++
++        <com.google.android.material.progressindicator.LinearProgressIndicator
++            android:id="@+id/sleep_score_rem_bar"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="4dp"
++            app:indicatorColor="?attr/colorPrimary"
++            app:trackColor="?attr/colorSurfaceContainerHighest"
++            app:trackCornerRadius="4dp"
++            app:trackThickness="8dp" />
++
++        <!-- Continuity -->
++        <LinearLayout
++            android:id="@+id/sleep_score_continuity_row"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="16dp"
++            android:gravity="center_vertical"
++            android:orientation="horizontal">
++
++            <TextView
++                android:id="@+id/sleep_score_continuity_label"
++                android:layout_width="0dp"
++                android:layout_height="wrap_content"
++                android:layout_weight="1"
++                android:text="@string/sleep_score_breakdown_continuity"
++                android:textAppearance="?attr/textAppearanceBodyLarge"
++                android:textColor="?attr/colorOnSurface" />
++
++            <TextView
++                android:id="@+id/sleep_score_continuity_points"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:textAppearance="?attr/textAppearanceLabelLarge"
++                android:textColor="?attr/colorOnSurfaceVariant" />
++        </LinearLayout>
++
++        <com.google.android.material.progressindicator.LinearProgressIndicator
++            android:id="@+id/sleep_score_continuity_bar"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="4dp"
++            app:indicatorColor="?attr/colorPrimary"
++            app:trackColor="?attr/colorSurfaceContainerHighest"
++            app:trackCornerRadius="4dp"
++            app:trackThickness="8dp" />
++
++        <TextView
++            android:id="@+id/sleep_score_note"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="20dp"
++            android:textAppearance="?attr/textAppearanceBodySmall"
++            android:textColor="?attr/colorOnSurfaceVariant" />
++
++        <com.google.android.material.button.MaterialButton
++            android:id="@+id/sleep_score_close"
++            style="@style/Widget.Material3.Button.TextButton"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_gravity="end"
++            android:layout_marginTop="12dp"
++            android:text="@android:string/ok" />
++
++    </LinearLayout>
++</androidx.core.widget.NestedScrollView>
+diff --git a/app/src/main/res/layout/fragment_sleepchart.xml b/app/src/main/res/layout/fragment_sleepchart.xml
+index c7550ed0e1..c50ffda9eb 100644
+--- a/app/src/main/res/layout/fragment_sleepchart.xml
++++ b/app/src/main/res/layout/fragment_sleepchart.xml
+@@ -34,6 +34,7 @@
+             android:layout_width="180dp"
+             android:layout_height="180dp"
+             android:layout_gravity="center"
++            android:background="?attr/selectableItemBackgroundBorderless"
+             android:scaleType="fitStart" />
+ 
+         <LinearLayout
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index a821d30899..d658101e8f 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1339,6 +1339,17 @@
+     <string name="sleep_stages">Sleep Stages</string>
+     <string name="sleep_score">Sleep Score</string>
+     <string name="sleep_score_value">Score: %1d</string>
++    <string name="sleep_score_value_age_adjusted">Score: %1d (age-adjusted)</string>
++    <string name="sleep_score_details">Sleep score details</string>
++    <string name="sleep_score_estimated_for_age">Age-adjusted estimate for age %1$d</string>
++    <string name="sleep_score_target_range">Recommended sleep for your age: %1$s – %2$s</string>
++    <string name="sleep_score_breakdown_duration">Sleep duration</string>
++    <string name="sleep_score_breakdown_deep">Deep sleep</string>
++    <string name="sleep_score_breakdown_rem">REM sleep</string>
++    <string name="sleep_score_breakdown_continuity">Sleep continuity</string>
++    <string name="sleep_score_points">%1$d / %2$d</string>
++    <string name="sleep_score_estimated_note">Estimated on this device from the recorded sleep stages and the sleep duration recommended for your age.</string>
++    <string name="sleep_score_reported_by_device">Reported by your device</string>
+     <string name="stats_empty_value">-</string>
+     <string name="time_empty_value" translatable="false">--:--</string>
+     <string name="date_placeholders__date__time">%1$s, %2$s</string>
+@@ -1594,6 +1605,8 @@
+     <string name="weeksleepchart_sleep_a_week_or_month">Sleep per week/month</string>
+     <string name="pref_title_chart_sleep_rolling_24_hour">Sleep range</string>
+     <string name="pref_summary_chart_sleep_range">Determines which day a sleep session is assigned to</string>
++    <string name="pref_title_age_based_sleep_score">Age-based sleep score</string>
++    <string name="pref_summary_age_based_sleep_score">Estimate a score from your sleep stages, adjusted for the sleep needs of your age, when your device does not report one</string>
+     <string name="pref_title_chart_sleep_day_chart">Sleep chart</string>
+     <string name="pref_chart_sleep_day_chart_hypnogram">Hypnogram</string>
+     <string name="pref_chart_sleep_day_chart_legacy">Legacy hypnogram</string>
+diff --git a/app/src/main/res/values/styles.xml b/app/src/main/res/values/styles.xml
+index 0bb39c0681..d51db984c2 100644
+--- a/app/src/main/res/values/styles.xml
++++ b/app/src/main/res/values/styles.xml
+@@ -613,7 +613,7 @@
+          chips). Background stays transparent in both states; selection is shown only via the
+          accent-colored text and border, rather than the default Choice chip's background recolor
+          (often very saturated in this app's accent themes). -->
+-    <style name="Widget.App.Chip.Chart" parent="Widget.MaterialComponents.Chip.Choice">
++    <style name="Widget.App.Chip.Chart" parent="Widget.Material3.Chip.Filter">
+         <item name="chipBackgroundColor">@color/chart_chip_background</item>
+         <item name="chipStrokeColor">@color/chart_chip_stroke</item>
+         <item name="chipStrokeWidth">1dp</item>
+@@ -671,6 +671,25 @@
+         <item name="cornerSizeBottomRight">0dp</item>
+     </style>
+ 
++    <!-- Material 3 bottom sheet with the age-based sleep score breakdown -->
++    <style name="ThemeOverlay.App.SleepScoreSheet" parent="ThemeOverlay.Material3.BottomSheetDialog">
++        <item name="bottomSheetStyle">@style/Widget.App.SleepScoreSheet</item>
++        <item name="android:backgroundDimAmount">0.6</item>
++    </style>
++
++    <style name="Widget.App.SleepScoreSheet" parent="Widget.Material3.BottomSheet.Modal">
++        <item name="backgroundTint">?attr/colorSurfaceContainerLow</item>
++        <item name="shapeAppearance">@style/ShapeAppearance.App.SleepScoreSheet</item>
++    </style>
++
++    <style name="ShapeAppearance.App.SleepScoreSheet" parent="">
++        <item name="cornerFamily">rounded</item>
++        <item name="cornerSizeTopLeft">28dp</item>
++        <item name="cornerSizeTopRight">28dp</item>
++        <item name="cornerSizeBottomLeft">0dp</item>
++        <item name="cornerSizeBottomRight">0dp</item>
++    </style>
++
+     <style name="Widget.App.ChartTypeSegment" parent="Widget.Material3.Button.OutlinedButton">
+         <item name="android:minWidth">0dp</item>
+         <item name="android:minHeight">0dp</item>
+@@ -1002,13 +1021,24 @@
+         <item name="iconTint">@color/gallery_viewer_action</item>
+     </style>
+ 
+-    <style name="Theme.App.Translucent" parent="Theme.AppCompat.NoActionBar">
++    <!-- Material 3 base for the invisible widget configuration activities. -->
++    <style name="Theme.App.Translucent" parent="Theme.Material3.DayNight.NoActionBar">
+         <item name="android:windowIsTranslucent">true</item>
+         <item name="android:windowBackground">@android:color/transparent</item>
+         <item name="android:windowAnimationStyle">@null</item>
+         <item name="android:backgroundDimEnabled">false</item>
+     </style>
+ 
++    <!-- Material 3 dialog activities (widget alarms, Quick Settings tiles). -->
++    <style name="Theme.App.Dialog" parent="Theme.Material3.DayNight.Dialog">
++        <item name="windowNoTitle">true</item>
++    </style>
++
++    <!-- The widget alarm layout is dark, so keep a matching dark dialog surface. -->
++    <style name="Theme.App.Dialog.Dark" parent="Theme.Material3.Dark.Dialog">
++        <item name="windowNoTitle">true</item>
++    </style>
++
+     <style name="ThemeOverlay.App.Translucent" parent="">
+         <item name="windowActionBar">false</item>
+         <item name="windowNoTitle">true</item>
+diff --git a/app/src/main/res/xml/charts_preferences.xml b/app/src/main/res/xml/charts_preferences.xml
+index 27e13722c8..27909db96e 100644
+--- a/app/src/main/res/xml/charts_preferences.xml
++++ b/app/src/main/res/xml/charts_preferences.xml
+@@ -71,6 +71,14 @@
+             android:title="@string/pref_title_charts_average"
+             app:iconSpaceReserved="false" />
+ 
++        <SwitchPreferenceCompat
++            android:defaultValue="true"
++            android:key="charts_age_based_sleep_score"
++            android:layout="@layout/preference_checkbox"
++            android:summary="@string/pref_summary_age_based_sleep_score"
++            android:title="@string/pref_title_age_based_sleep_score"
++            app:iconSpaceReserved="false" />
++
+         <MultiSelectListPreference
+             android:defaultValue="@array/pref_chart_weight_body_composition_default"
+             android:dialogTitle="@string/pref_title_chart_weight_body_composition"
+diff --git a/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculatorTest.java b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculatorTest.java
+new file mode 100644
+index 0000000000..c6b15b5943
+--- /dev/null
++++ b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculatorTest.java
+@@ -0,0 +1,203 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.sleep;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++import java.util.Arrays;
++import java.util.Collections;
++
++import nodomain.freeyourgadget.gadgetbridge.model.ActivityKind;
++import nodomain.freeyourgadget.gadgetbridge.model.SleepSession;
++import nodomain.freeyourgadget.gadgetbridge.model.SleepStage;
++
++public class AgeSleepScoreCalculatorTest {
++    private static final long HOUR = 60 * 60;
++    private static final long MINUTE = 60;
++
++    @Test
++    public void recommendedDurationFollowsAge() {
++        assertEquals(8 * 60, AgeSleepScoreCalculator.recommendationForAge(16).getMinMinutes());
++        assertEquals(10 * 60, AgeSleepScoreCalculator.recommendationForAge(16).getMaxMinutes());
++        assertEquals(7 * 60, AgeSleepScoreCalculator.recommendationForAge(30).getMinMinutes());
++        assertEquals(9 * 60, AgeSleepScoreCalculator.recommendationForAge(30).getMaxMinutes());
++        assertEquals(7 * 60, AgeSleepScoreCalculator.recommendationForAge(70).getMinMinutes());
++        assertEquals(8 * 60, AgeSleepScoreCalculator.recommendationForAge(70).getMaxMinutes());
++        // An unknown age must not produce an empty or invalid range.
++        assertEquals(7 * 60, AgeSleepScoreCalculator.recommendationForAge(0).getMinMinutes());
++        assertEquals(9 * 60, AgeSleepScoreCalculator.recommendationForAge(0).getMaxMinutes());
++    }
++
++    @Test
++    public void deepSleepTargetDeclinesWithAge() {
++        assertTrue(AgeSleepScoreCalculator.deepSleepTargetRatio(20)
++                > AgeSleepScoreCalculator.deepSleepTargetRatio(45));
++        assertTrue(AgeSleepScoreCalculator.deepSleepTargetRatio(45)
++                > AgeSleepScoreCalculator.deepSleepTargetRatio(70));
++    }
++
++    @Test
++    public void adequateSleepScoresHigh() {
++        final AgeSleepScoreCalculator.Result result = AgeSleepScoreCalculator.calculate(
++                30, 8 * HOUR, (long) (8 * HOUR * 0.20), (long) (8 * HOUR * 0.22), 20 * MINUTE);
++        assertTrue(result.getScore() >= 90);
++        assertEquals(50, result.getDurationScore());
++    }
++
++    @Test
++    public void shortSleepScoresLowerThanAdequateSleep() {
++        final AgeSleepScoreCalculator.Result eightHours = AgeSleepScoreCalculator.calculate(30, 8 * HOUR, 0, 0, 0);
++        final AgeSleepScoreCalculator.Result fiveHours = AgeSleepScoreCalculator.calculate(30, 5 * HOUR, 0, 0, 0);
++
++        assertTrue(fiveHours.getScore() < eightHours.getScore());
++    }
++
++    @Test
++    public void oversleepingIsPenalizedButLessThanUndersleeping() {
++        final AgeSleepScoreCalculator.Result adequate = AgeSleepScoreCalculator.calculate(30, 8 * HOUR, 0, 0, 0);
++        final AgeSleepScoreCalculator.Result oversleeping = AgeSleepScoreCalculator.calculate(30, 12 * HOUR, 0, 0, 0);
++        final AgeSleepScoreCalculator.Result undersleeping = AgeSleepScoreCalculator.calculate(30, 4 * HOUR, 0, 0, 0);
++
++        assertTrue(oversleeping.getScore() < adequate.getScore());
++        assertTrue(oversleeping.getScore() > undersleeping.getScore());
++    }
++
++    @Test
++    public void sameSleepStagesScoreDifferentlyForDifferentAges() {
++        // 13% deep sleep is normal for an older adult, but low for a young adult.
++        final long asleep = 8 * HOUR;
++        final long deep = (long) (asleep * 0.13);
++        final long rem = (long) (asleep * 0.22);
++        final AgeSleepScoreCalculator.Result younger = AgeSleepScoreCalculator.calculate(25, asleep, deep, rem, 0);
++        final AgeSleepScoreCalculator.Result older = AgeSleepScoreCalculator.calculate(70, asleep, deep, rem, 0);
++
++        assertTrue(older.getDeepSleepScore() > younger.getDeepSleepScore());
++        assertTrue(older.getScore() > younger.getScore());
++    }
++
++    @Test
++    public void missingStageBreakdownFallsBackToDuration() {
++        final AgeSleepScoreCalculator.Result result = AgeSleepScoreCalculator.calculate(30, 8 * HOUR, 0, 0, 0);
++
++        assertEquals(0, result.getDeepSleepWeight());
++        assertEquals(0, result.getRemSleepWeight());
++        assertEquals(0, result.getContinuityWeight());
++        assertEquals(100, result.getScore());
++    }
++
++    @Test
++    public void missingSingleStageIsNotScoredAsZero() {
++        // A tracker that records deep sleep but no REM must not be penalized for the missing stage.
++        final AgeSleepScoreCalculator.Result deepOnly = AgeSleepScoreCalculator.calculate(
++                30, 8 * HOUR, (long) (8 * HOUR * 0.20), 0, 0);
++        assertEquals(20, deepOnly.getDeepSleepWeight());
++        assertEquals(0, deepOnly.getRemSleepWeight());
++        assertEquals(100, deepOnly.getScore());
++
++        final AgeSleepScoreCalculator.Result remOnly = AgeSleepScoreCalculator.calculate(
++                30, 8 * HOUR, 0, (long) (8 * HOUR * 0.22), 0);
++        assertEquals(0, remOnly.getDeepSleepWeight());
++        assertEquals(15, remOnly.getRemSleepWeight());
++        assertEquals(100, remOnly.getScore());
++    }
++
++    @Test
++    public void missingAwakeStageDoesNotAwardContinuityPoints() {
++        final AgeSleepScoreCalculator.Result result = AgeSleepScoreCalculator.calculate(
++                30, 8 * HOUR, (long) (8 * HOUR * 0.20), (long) (8 * HOUR * 0.22), 0);
++
++        assertEquals(0, result.getContinuityWeight());
++        assertEquals(0, result.getContinuityScore());
++    }
++
++    @Test
++    public void continuityScoreUsesSleepEfficiency() {
++        final AgeSleepScoreCalculator.Result result = AgeSleepScoreCalculator.calculate(
++                30, 8 * HOUR, (long) (8 * HOUR * 0.20), (long) (8 * HOUR * 0.22), 2 * HOUR);
++
++        assertEquals(15, result.getContinuityWeight());
++        // 8h asleep / 10h in bed = 80%, against a 90% target.
++        assertEquals(13, result.getContinuityScore());
++    }
++
++    @Test
++    public void emptyNightScoresZero() {
++        assertEquals(0, AgeSleepScoreCalculator.calculate(30, 0, 0, 0, 0).getScore());
++        assertEquals(0, AgeSleepScoreCalculator.calculate(30, Collections.emptyList()).getScore());
++    }
++
++    @Test
++    public void scoreIsAlwaysWithinBounds() {
++        final long[][] nights = {
++                {0, 0, 0, 0},
++                {1 * HOUR, 0, 0, 0},
++                {20 * HOUR, 20 * HOUR, 20 * HOUR, 20 * HOUR},
++                {8 * HOUR, 8 * HOUR, 8 * HOUR, 8 * HOUR},
++        };
++        for (final long[] night : nights) {
++            final AgeSleepScoreCalculator.Result result = AgeSleepScoreCalculator.calculate(
++                    30, night[0], night[1], night[2], night[3]);
++            assertTrue(result.getScore() >= 0);
++            assertTrue(result.getScore() <= 100);
++        }
++    }
++
++    @Test
++    public void sessionsAreAggregatedIntoOneNight() {
++        final SleepSession first = session(4 * HOUR, 0.20, 0.22, 0);
++        final SleepSession second = session(4 * HOUR, 0.20, 0.22, 0);
++        final AgeSleepScoreCalculator.Result result = AgeSleepScoreCalculator.calculate(30, Arrays.asList(first, second));
++
++        assertEquals(8 * HOUR, result.getTotalSleepSeconds());
++        assertEquals((long) (8 * HOUR * 0.20), result.getDeepSleepSeconds());
++        assertTrue(result.getScore() >= 90);
++    }
++
++    @Test
++    public void defaultAgeIsUsedForImplausibleAges() {
++        assertEquals(AgeSleepScoreCalculator.DEFAULT_AGE, AgeSleepScoreCalculator.normalizeAge(-5));
++        assertEquals(AgeSleepScoreCalculator.DEFAULT_AGE, AgeSleepScoreCalculator.normalizeAge(0));
++        assertEquals(AgeSleepScoreCalculator.DEFAULT_AGE, AgeSleepScoreCalculator.normalizeAge(200));
++        assertEquals(42, AgeSleepScoreCalculator.normalizeAge(42));
++    }
++
++    private static SleepSession session(final long totalSeconds,
++                                        final double deepRatio,
++                                        final double remRatio,
++                                        final long awakeSeconds) {
++        final long deepSeconds = (long) (totalSeconds * deepRatio);
++        final long remSeconds = (long) (totalSeconds * remRatio);
++        final long lightSeconds = totalSeconds - deepSeconds - remSeconds;
++
++        final long start = 1_700_000_000_000L;
++        long cursor = start;
++        final java.util.List<SleepStage> stages = new java.util.ArrayList<>();
++        stages.add(new SleepStage(ActivityKind.LIGHT_SLEEP, cursor, cursor + lightSeconds * 1000L));
++        cursor += lightSeconds * 1000L;
++        stages.add(new SleepStage(ActivityKind.DEEP_SLEEP, cursor, cursor + deepSeconds * 1000L));
++        cursor += deepSeconds * 1000L;
++        stages.add(new SleepStage(ActivityKind.REM_SLEEP, cursor, cursor + remSeconds * 1000L));
++        cursor += remSeconds * 1000L;
++        if (awakeSeconds > 0) {
++            stages.add(new SleepStage(ActivityKind.AWAKE_SLEEP, cursor, cursor + awakeSeconds * 1000L));
++        }
++        return new SleepSession(stages);
++    }
++}

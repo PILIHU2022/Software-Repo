@@ -6,10 +6,11 @@
 
 # Software-Repo —— Patchwork 构建叠加仓库
 
-这是一个面向五个 Android 应用——**ScreenTime**、**RecurringExpenseTracker**、
-**Fcitx5 for Android**、**BasicSync** 与 **BaiduNetGo Android 客户端**——一个桌面应用
+这是一个面向六个 Android 应用——**ScreenTime**、**RecurringExpenseTracker**、
+**Fcitx5 for Android**、**BasicSync**、**Gadgetbridge** 与
+**BaiduNetGo Android 客户端**——一个桌面应用
 **BaiduNetGo**，以及一个内置源码应用
-**[DataArk](dataark/README.md)** 的个人构建仓库。前五个走补丁队列；DataArk 的
+**[DataArk](dataark/README.md)** 的个人构建仓库。前六个走补丁队列；DataArk 的
 完整源码直接提交在 [`dataark/`](dataark/)（原创 Kotlin/Compose 应用数据备份工具，
 支持 Root / Shizuku / Dhizuku 三种特权来源，GPL-3.0-or-later，图标来自
 Android-DataBackup），其 CI（[.github/workflows/dataark.yml](.github/workflows/dataark.yml)）
@@ -50,6 +51,7 @@ issue，而不是继续发布过期代码。
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 17 | `0.1.3-patchwork`（11207，arm64-v8a） |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `74b1dea` | 4 | `3.29-patchwork`（25604800，arm64-v8a） |
+| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `93d4d79` | 5 | `2026.11.1-patchwork`（25700） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 48 | `0.8.3.48` —— 上游 `0.8.3` + 48 个补丁（linux/windows x86、Arch 包；Release + feed） |
 | BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 48 | `0.8.3-patchwork`（80348 —— 上游 803 × 100 + 48 个补丁） |
 
@@ -90,6 +92,26 @@ Rime 配置」，也可用
 另一个补丁让 `build-logic` 读取下游的 `PATCHWORK_REVISION` 环境变量；该变量未
 设置时行为与上游完全一致，官方/F-Droid 构建不受影响。只发布 `arm64-v8a`
 （上游按 ABI 拆包、没有 universal APK），APK 约 52 MB。
+
+**Gadgetbridge** —— 不用厂商应用也能用手环/手表。补丁队列在上游之上加五个补丁：
+
+* **界面迁移到 Jetpack Compose + Material 3 Expressive**：设置树（首页、每个子页面、
+  搜索）、首次运行引导、关于页与睡眠评分面板都是 Compose 渲染，其余仍走 XML 的
+  页面则通过统一的 Expressive 圆角叠加获得同样的观感，改主题/强调色时两套界面一致；
+* **基于年龄的睡眠评分**：设备自己不上报评分时，用已记录的睡眠阶段对照该年龄建议的
+  睡眠时长打分（含深睡占比、REM 占比与睡眠效率），显示在日/周图表与仪表板小组件里，
+  **点圆环可展开评分构成**，并可在图表设置里关闭；
+* **每次打开应用都备份**——那是进程一定还活着、一定允许写的时刻——有独立的设置
+  分类、保留天数、可更改的备份文件夹与「恢复默认目录」，不再只依赖被国产 ROM
+  经常跳过的 WorkManager；
+* **数据库导出先写临时文件**、校验 SQLite 头，通过后才写入目标，因此授权失效、
+  文档被移动等失败不会再截断上一份备份，导出位置为空时也会明确报错；
+* **小米协议的音乐与校时不再自相矛盾**：每次变化只下发一份完整快照（播放状态、
+  标题、歌手、进度、时长），不再是元数据包与状态包互相覆盖；Release 构建由环境变量
+  提供的密钥签名；连接后手环回一次设备状态再补发一次时间。
+
+Release APK 由本仓库签名而不是上游：`PATCHWORK_SIGN_*` 交给队列里的一个小构建补丁，
+所以 F-Droid 仓库里的包名与官方一致、签名不同。
 
 **BasicSync** —— 在 Android 上运行 Syncthing 的小型 Kotlin/Compose 外壳，它本身
 只决定 Syncthing *什么时候*运行。补丁队列在 3.29 之上加四个补丁：
@@ -269,6 +291,7 @@ versionName = "<上游 versionName>-patchwork"
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112`（arm64-v8a）/ `"0.1.3"` | 7 | `11207` / `"0.1.3-patchwork"` |
 | BasicSync | `256048` / `"3.29"` | 1 | `25604800` / `"3.29-patchwork"` |
+| Gadgetbridge | `257` / `"2026.11.1"` | 5 | `25700` / `"2026.11.1-patchwork"` |
 
 fcitx5 的上游 versionCode 本身就按 ABI 区分（`baseVersionCode × 10 + ABI id`，
 arm64-v8a 的 id 为 2），所以完整公式是：

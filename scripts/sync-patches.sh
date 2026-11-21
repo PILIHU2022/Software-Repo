@@ -6,12 +6,15 @@
 #   scripts/sync-patches.sh [--check]
 #
 # Source repositories (override with environment variables):
-#   SCREENTIME_DIR     default: <repo>/../ScreenTime
-#   EXPENSES_DIR       default: <repo>/../RecurringExpenseTracker
-#   FCITX5_DIR         default: <repo>/../fcitx5-android
-#   FCITX5_PATCHES_DIR default: <repo>/../.toolchain/tmp/fcitx5-patches
+#   SCREENTIME_DIR     default: <repo>/apps/ScreenTime
+#   EXPENSES_DIR       default: <repo>/apps/RecurringExpenseTracker
+#   FCITX5_DIR         default: <repo>/apps/fcitx5-android
+#   FCITX5_PATCHES_DIR default: <repo>/.toolchain/tmp/fcitx5-patches
 #   FCITX5_BRANCH      default: feat/typing-heatmap
 #   FCITX5_BASE        default: master
+#   GADGETBRIDGE_DIR   default: <repo>/gadgetbridge
+#   GADGETBRIDGE_BRANCH default: patchwork
+#   GADGETBRIDGE_BASE  default: origin/master
 #
 # When a working tree has no .patchwork/patches (for example because the
 # clone is on a feature branch), the files are read from its `patchwork`
@@ -23,12 +26,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCREENTIME_DIR="${SCREENTIME_DIR:-$ROOT/../ScreenTime}"
-EXPENSES_DIR="${EXPENSES_DIR:-$ROOT/../RecurringExpenseTracker}"
-FCITX5_DIR="${FCITX5_DIR:-$ROOT/../fcitx5-android}"
-FCITX5_PATCHES_DIR="${FCITX5_PATCHES_DIR:-$ROOT/../.toolchain/tmp/fcitx5-patches}"
+SCREENTIME_DIR="${SCREENTIME_DIR:-$ROOT/apps/ScreenTime}"
+EXPENSES_DIR="${EXPENSES_DIR:-$ROOT/apps/RecurringExpenseTracker}"
+FCITX5_DIR="${FCITX5_DIR:-$ROOT/apps/fcitx5-android}"
+FCITX5_PATCHES_DIR="${FCITX5_PATCHES_DIR:-$ROOT/.toolchain/tmp/fcitx5-patches}"
 FCITX5_BRANCH="${FCITX5_BRANCH:-feat/typing-heatmap}"
 FCITX5_BASE="${FCITX5_BASE:-master}"
+GADGETBRIDGE_DIR="${GADGETBRIDGE_DIR:-$ROOT/gadgetbridge}"
+GADGETBRIDGE_BRANCH="${GADGETBRIDGE_BRANCH:-patchwork}"
+GADGETBRIDGE_BASE="${GADGETBRIDGE_BASE:-origin/master}"
 
 usage() {
     cat <<'EOF'
@@ -42,11 +48,11 @@ Options:
   -h, --help   show this help
 
 Environment:
-  SCREENTIME_DIR     ScreenTime authoring clone (default: ../ScreenTime)
-  EXPENSES_DIR       RecurringExpenseTracker clone (default: ../RecurringExpenseTracker)
-  FCITX5_DIR         fcitx5-android clone (default: ../fcitx5-android)
+  SCREENTIME_DIR     ScreenTime authoring clone (default: apps/ScreenTime)
+  EXPENSES_DIR       RecurringExpenseTracker clone (default: apps/RecurringExpenseTracker)
+  FCITX5_DIR         fcitx5-android clone (default: apps/fcitx5-android)
   FCITX5_PATCHES_DIR staged fcitx5 queue used when the clone is missing
-                     (default: ../.toolchain/tmp/fcitx5-patches)
+                     (default: .toolchain/tmp/fcitx5-patches)
   FCITX5_BRANCH      feature branch holding the fcitx5 queue
                      (default: feat/typing-heatmap)
   FCITX5_BASE        upstream base of that branch (default: master)
@@ -117,6 +123,22 @@ resolve_fcitx5_patches() {
     return 1
 }
 
+# Gadgetbridge is authored in a plain upstream clone (kept out of this
+# repository by .gitignore); its queue is the `patchwork` branch, anchored on
+# the upstream commit it was last rebased to, so export it with format-patch.
+resolve_gadgetbridge_patches() {
+    local tmp="$1"
+    if [[ -d "$GADGETBRIDGE_DIR" ]] \
+        && git -C "$GADGETBRIDGE_DIR" rev-parse --verify --quiet "refs/heads/$GADGETBRIDGE_BRANCH" >/dev/null 2>&1; then
+        mkdir -p "$tmp"
+        git -C "$GADGETBRIDGE_DIR" format-patch --no-signature --zero-commit --no-numbered \
+            "$GADGETBRIDGE_BASE..$GADGETBRIDGE_BRANCH" -o "$tmp" >/dev/null
+        printf '%s\n' "$tmp"
+        return 0
+    fi
+    return 1
+}
+
 status=0
 
 sync_one() {
@@ -174,6 +196,12 @@ sync_one expenses "$src"
 src="$(resolve_fcitx5_patches "$TMP_DIR/fcitx5")" \
     || die "no fcitx5 queue: neither $FCITX5_DIR ($FCITX5_BRANCH) nor $FCITX5_PATCHES_DIR"
 sync_one fcitx5 "$src"
+
+if src="$(resolve_gadgetbridge_patches "$TMP_DIR/gadgetbridge")"; then
+    sync_one gadgetbridge "$src"
+else
+    echo "==> gadgetbridge: authoring clone or '$GADGETBRIDGE_BRANCH' branch not found, keeping apps/gadgetbridge/patches" >&2
+fi
 
 if [[ "$CHECK" -eq 1 ]]; then
     if [[ "$status" -eq 0 ]]; then

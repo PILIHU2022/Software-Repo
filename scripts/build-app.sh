@@ -660,6 +660,13 @@ elif [[ "$SIGNING_STYLE" == "fcitx5" ]]; then
     export SIGN_KEY_FILE="$KEYSTORE"
     export SIGN_KEY_PWD="$STORE_PASSWORD"
     export SIGN_KEY_ALIAS="$KEY_ALIAS"
+elif [[ "$SIGNING_STYLE" == "gadgetbridge" ]]; then
+    # Upstream does not sign the release build, so the patch queue reads the
+    # keystore from PATCHWORK_SIGN_* and creates the signing config itself.
+    export PATCHWORK_SIGN_KEYSTORE="$KEYSTORE"
+    export PATCHWORK_SIGN_STORE_PASSWORD="$STORE_PASSWORD"
+    export PATCHWORK_SIGN_KEY_ALIAS="$KEY_ALIAS"
+    export PATCHWORK_SIGN_KEY_PASSWORD="$KEY_PASSWORD"
 elif [[ "$SIGNING_STYLE" == "basicsync" ]]; then
     # BasicSync reads RELEASE_KEYSTORE and friends from the environment and
     # only enables the release signing config when the keystore is set.
