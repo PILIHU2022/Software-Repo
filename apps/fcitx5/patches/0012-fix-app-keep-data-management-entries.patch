@@ -1,0 +1,211 @@
+From 840d39285554de2bb777e8f1550d0084c1a428ec Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 10:53:47 +0800
+Subject: [PATCH 1/2] fix(app): keep the data-management entries reachable from
+ Compose advanced
+
+The Compose rewrite of the settings UI replaced the Advanced page with the
+managed-preference list, which does not cover the custom rows the legacy
+AdvancedSettingsFragment hosts: export/import user data, automatic backups,
+all-files access, browse user data directory and the Syncthing Rime profile.
+
+Append a 'Classic advanced settings' row to the Compose Advanced page and map
+the advanced route to SettingsRoute.Advanced in MainActivity.nativeRouteFor.
+
+Also send NativeSettingsActivity an ACTION_RUN intent when a route is known:
+ACTION_MAIN drops the route extra and, while a setup page is pending (Fcitx5
+not the default IME), detours through SetupActivity instead of opening the
+requested page.
+---
+ .../fcitx5/android/ui/main/MainActivity.kt    | 13 ++++++--
+ .../ui/main/compose/screens/Preferences.kt    | 31 +++++++++++++++++--
+ .../main/res/values-zh-rCN/strings_home.xml   |  2 ++
+ .../main/res/values-zh-rTW/strings_home.xml   |  2 ++
+ app/src/main/res/values/strings_home.xml      |  2 ++
+ 5 files changed, 46 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
+index 6a86dd8e..a31eb68e 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/MainActivity.kt
+@@ -65,9 +65,14 @@ class MainActivity : ComponentActivity() {
+     }
+ 
+     private fun openNativeSettings(route: String) {
++        val nativeRoute = nativeRouteFor(route)
+         val intent = Intent(this, NativeSettingsActivity::class.java).apply {
+-            setAction(Intent.ACTION_MAIN)
+-            nativeRouteFor(route)?.let { putExtra(EXTRA_SETTINGS_ROUTE, it) }
++            // ACTION_RUN makes NativeSettingsActivity navigate straight to the requested
++            // fragment. ACTION_MAIN would drop the route and (when a setup page is still
++            // pending, e.g. Fcitx5 is not the default IME) send the user to SetupActivity
++            // instead of the page they tapped.
++            setAction(Intent.ACTION_RUN)
++            if (nativeRoute != null) putExtra(EXTRA_SETTINGS_ROUTE, nativeRoute)
+         }
+         startActivity(intent)
+     }
+@@ -85,6 +90,10 @@ class MainActivity : ComponentActivity() {
+         "developer" -> SettingsRoute.Developer
+         "about" -> SettingsRoute.About
+         "license" -> SettingsRoute.License
++        // The Compose "Advanced" page only renders managed preferences. The legacy page also
++        // hosts the data-management rows (export/import user data, automatic backups, all-files
++        // access, Syncthing Rime profile), so the Compose page links to it explicitly.
++        "advanced" -> SettingsRoute.Advanced
+         else -> null
+     }
+ 
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/Preferences.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/Preferences.kt
+index 4da02311..3ab4779f 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/Preferences.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/Preferences.kt
+@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.foundation.lazy.items
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.rounded.Handyman
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableIntStateOf
+@@ -25,7 +27,9 @@ import org.fcitx.fcitx5.android.R
+ import org.fcitx.fcitx5.android.data.prefs.AppPrefs
+ import org.fcitx.fcitx5.android.data.prefs.ManagedPreferenceProvider
+ import org.fcitx.fcitx5.android.data.prefs.ManagedPreferenceUi
++import org.fcitx.fcitx5.android.ui.main.compose.LocalSettingsNavigator
+ import org.fcitx.fcitx5.android.ui.main.compose.SettingsRoutes
++import org.fcitx.fcitx5.android.ui.main.compose.components.SettingsRow
+ import org.fcitx.fcitx5.android.ui.main.compose.components.SettingsScaffold
+ 
+ /**
+@@ -44,7 +48,11 @@ import org.fcitx.fcitx5.android.ui.main.compose.components.SettingsScaffold
+ fun PreferenceSettingsScreen(route: String) {
+     val provider = remember(route) { providerFor(route) }
+     if (provider != null) {
+-        PreferenceSettingsContent(provider = provider, title = stringResource(titleFor(route)))
++        PreferenceSettingsContent(
++            provider = provider,
++            title = stringResource(titleFor(route)),
++            route = route,
++        )
+     } else {
+         // SettingsDestination only sends the five routes below here; keep the page total anyway.
+         SettingsScaffold(title = route) { padding ->
+@@ -54,8 +62,13 @@ fun PreferenceSettingsScreen(route: String) {
+ }
+ 
+ @Composable
+-private fun PreferenceSettingsContent(provider: ManagedPreferenceProvider, title: String) {
++private fun PreferenceSettingsContent(
++    provider: ManagedPreferenceProvider,
++    title: String,
++    route: String,
++) {
+     val context = LocalContext.current
++    val navigator = LocalSettingsNavigator.current
+     var revision by remember { mutableIntStateOf(0) }
+     var optionSheetKey by remember { mutableStateOf<String?>(null) }
+     var editDialogKey by remember { mutableStateOf<String?>(null) }
+@@ -111,6 +124,20 @@ private fun PreferenceSettingsContent(provider: ManagedPreferenceProvider, title
+                     else -> Unit
+                 }
+             }
++
++            if (route == SettingsRoutes.ADVANCED) {
++                // The managed-preference model does not cover the data-management rows
++                // (export/import, automatic backups, all-files access, Syncthing Rime
++                // profile). Keep a working path to the legacy page that still hosts them.
++                item(key = "legacy_advanced") {
++                    SettingsRow(
++                        title = stringResource(R.string.advanced_legacy_title),
++                        summary = stringResource(R.string.advanced_legacy_summary),
++                        icon = Icons.Rounded.Handyman,
++                        onClick = { navigator.openNative(SettingsRoutes.ADVANCED) },
++                    )
++                }
++            }
+         }
+     }
+ 
+diff --git a/app/src/main/res/values-zh-rCN/strings_home.xml b/app/src/main/res/values-zh-rCN/strings_home.xml
+index a364fa2e..37ef88e2 100644
+--- a/app/src/main/res/values-zh-rCN/strings_home.xml
++++ b/app/src/main/res/values-zh-rCN/strings_home.xml
+@@ -26,4 +26,6 @@
+     <string name="home_summary_about">版本、源码与致谢</string>
+     <string name="home_summary_license">第三方依赖与许可证</string>
+     <string name="settings_title">设置</string>
++    <string name="advanced_legacy_title">经典高级设置</string>
++    <string name="advanced_legacy_summary">导出/导入用户数据、自动备份与所有文件访问</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings_home.xml b/app/src/main/res/values-zh-rTW/strings_home.xml
+index 7c200c93..8186216d 100644
+--- a/app/src/main/res/values-zh-rTW/strings_home.xml
++++ b/app/src/main/res/values-zh-rTW/strings_home.xml
+@@ -20,4 +20,6 @@
+     <string name="home_summary_advanced">實驗性與診斷選項</string>
+ 
+     <string name="home_stats_title">統計與熱力圖</string>
++    <string name="advanced_legacy_title">經典進階設定</string>
++    <string name="advanced_legacy_summary">匯出/匯入使用者資料、自動備份與所有檔案存取</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings_home.xml b/app/src/main/res/values/strings_home.xml
+index b821aa6a..b2f70596 100644
+--- a/app/src/main/res/values/strings_home.xml
++++ b/app/src/main/res/values/strings_home.xml
+@@ -26,4 +26,6 @@
+     <string name="home_summary_about">Version, source code and credits</string>
+     <string name="home_summary_license">Third-party licenses</string>
+     <string name="settings_title">Settings</string>
++    <string name="advanced_legacy_title">Classic advanced settings</string>
++    <string name="advanced_legacy_summary">Export/import user data, backups and all-files access</string>
+ </resources>
+-- 
+2.56.1
+
+
+From 0216351e81da621366fa0c443c7aac755dda9f6b Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 11:03:51 +0800
+Subject: [PATCH 2/2] docs: note the classic advanced escape hatch in the
+ Compose migration doc
+
+---
+ docs/settings-compose-migration.md | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/docs/settings-compose-migration.md b/docs/settings-compose-migration.md
+index 5d860093..405c652d 100644
+--- a/docs/settings-compose-migration.md
++++ b/docs/settings-compose-migration.md
+@@ -21,7 +21,7 @@ The input view (keyboard, candidate bar, popups) is untouched.
+ | Candidates | `candidates` | ✅ Compose (same mechanism) |
+ | Clipboard | `clipboard` | ✅ Compose (same mechanism) |
+ | Emoji & symbols | `symbol` | ✅ Compose (same mechanism) |
+-| Advanced | `advanced` | ✅ Compose (same mechanism) |
++| Advanced | `advanced` | ✅ Compose (same mechanism) + 「Classic advanced settings」row → `SettingsRoute.Advanced` |
+ | About | `about` | ✅ Compose (version, links, build info, credits) |
+ | Licenses | `license` | ✅ Compose via AboutLibraries (`R.raw.aboutlibraries`) |
+ | Plugins | `plugin` | ✅ Compose (loaded/failed plugins, plugin-change detection, `FcitxDaemon.restartFcitx`) |
+@@ -31,6 +31,17 @@ The input view (keyboard, candidate bar, popups) is untouched.
+ | File manager | `files` | ⏳ legacy (`openNative`) |
+ | Quick phrase / punctuation / table IM / pinyin dict editors | — | ⏳ legacy (reachable from RawConfig external actions) |
+ 
++## Legacy escape hatch
++
++The managed-preference model only knows descriptor-driven rows, so the custom rows of
++the old `AdvancedSettingsFragment` (export/import user data, automatic backups,
++all-files access, browse user data directory, Syncthing Rime profile) are not rendered
++in Compose. The Compose `advanced` page therefore ends with a
++**Classic advanced settings** card that calls `SettingsNavigator.openNative("advanced")`
++(`SettingsRoute.Advanced`). `MainActivity.openNativeSettings` now sends
++`Intent.ACTION_RUN` with the route extra: `ACTION_MAIN` dropped the extra and, while a
++setup page was pending (Fcitx5 not the default IME), detoured through `SetupActivity`.
++
+ ## Architecture
+ 
+ - `MainActivity` : `ComponentActivity`, `enableEdgeToEdge()`, `setContent { FcitxSettingsTheme { SettingsApp(...) } }`.
+-- 
+2.56.1
+
