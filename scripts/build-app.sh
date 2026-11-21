@@ -7,7 +7,8 @@
 #   scripts/build-app.sh <app> [--out DIR] [--no-build]
 #
 # <app> is any directory under apps/ with an app.conf (currently expenses,
-# screentime and fcitx5). The list is not hard-coded here.
+# screentime, fcitx5, basicsync and gadgetbridge). The list is not hard-coded
+# here.
 #
 # Environment:
 #   PATCHWORK_REVISION        revision appended after the upstream
@@ -38,7 +39,7 @@ usage() {
 Usage: scripts/build-app.sh <app> [--out DIR] [--no-build]
 
 <app> is any directory under apps/ with an app.conf (expenses, screentime,
-fcitx5). Fetches the upstream branch into .cache/mirror/<app>.git, creates a
+fcitx5, basicsync, gadgetbridge). Fetches the upstream branch into .cache/mirror/<app>.git, creates a
 fresh checkout in .cache/work/<app>, applies apps/<app>/patches/*.patch with
 `git am -3`, sets versionCode/versionName (file rewrite, or environment
 variables for VERSION_STYLE=build-logic), and builds a signed release APK.
