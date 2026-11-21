@@ -1,0 +1,363 @@
+From 359750da0e2a8f6c28a1ccf65986d65ecf8402a6 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 11:41:11 +0800
+Subject: [PATCH 15/17] perf(app): make the release AOT-compilable and cut
+ per-transition work
+
+Android installs debuggable APKs with the 'verify' dexopt filter and never
+AOT-compiles them, so every settings animation ran on JIT-compiled code (the
+pulled package reported [status=run-from-apk]). Release builds are now
+non-debuggable, which lets ART apply speed-profile/speed dexopt.
+
+Alongside that:
+* remember the dynamic ColorScheme, Shapes and MotionScheme in FcitxSettingsTheme
+  instead of rebuilding them on every recomposition;
+* parse RawConfig descriptor trees on Dispatchers.Default (they used to be parsed
+  on the main thread while the page-enter animation was running);
+* give AnimatedContent a null sizeTransform (both pages are full-screen, so the
+  default size animation only cost per-frame measure/clip);
+* mark the home row models @Immutable and remember their click lambdas so rows
+  skip recomposition;
+* throttle TypingStatsManager.refresh() on home re-entry (refreshIfStale) to drop
+  a Room round-trip per back navigation.
+
+Data recovery after a bad deployment now uses Settings -> Advanced -> Classic
+advanced settings (export/import, auto backup) instead of 'adb run-as'.
+---
+ app/build.gradle.kts                          | 11 ++--
+ .../android/data/stats/TypingStatsManager.kt  | 16 +++++
+ .../android/ui/main/compose/SettingsApp.kt    | 45 +++++++-------
+ .../android/ui/main/compose/SettingsTheme.kt  | 62 +++++++++++--------
+ .../ui/main/compose/home/HeatmapCard.kt       |  4 +-
+ .../ui/main/compose/home/HomeScreen.kt        | 16 ++++-
+ .../ui/main/compose/screens/RawConfig.kt      | 16 +++--
+ 7 files changed, 106 insertions(+), 64 deletions(-)
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index e24ced49..40bc664f 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -42,10 +42,13 @@ android {
+ 
+     buildTypes {
+         release {
+-            // Patchwork builds keep the release signature but stay debuggable so
+-            // `adb shell run-as org.fcitx.fcitx5.android` can inspect the Rime
+-            // data dir and recover a bad deployment without reinstalling.
+-            isDebuggable = true
++            // Must stay `false`: Android installs debuggable APKs with the `verify` (interpret
++            // only / JIT) dexopt filter and never AOT-compiles them, which makes every
++            // settings animation and the first keystroke janky. Non-debuggable releases get
++            // `speed-profile`/`speed` dexopt and Jetpack Compose runs smoothly.
++            // Recovery after a bad deployment uses the in-app export/backup entry
++            // (Settings -> Advanced -> Classic advanced settings) instead of `run-as`.
++            isDebuggable = false
+             resValue("mipmap", "app_icon", "@mipmap/ic_launcher")
+             resValue("mipmap", "app_icon_round", "@mipmap/ic_launcher_round")
+             resValue("string", "app_name", "@string/app_name_release")
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt
+index c2d185d5..c470ff06 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/data/stats/TypingStatsManager.kt
+@@ -6,6 +6,7 @@ package org.fcitx.fcitx5.android.data.stats
+ 
+ import android.content.Context
+ import android.os.Handler
++import android.os.SystemClock
+ import android.os.Looper
+ import androidx.annotation.Keep
+ import androidx.room.withTransaction
+@@ -184,15 +185,30 @@ object TypingStatsManager {
+         }
+     }
+ 
++    private var lastRefreshAtMs = 0L
++
+     /** Reload the snapshot from Room, after flushing anything still buffered. */
+     fun refresh() {
+         if (!initialized) return
++        lastRefreshAtMs = SystemClock.elapsedRealtime()
+         scope.launch {
+             write(drainPending())
+             publishSnapshot()
+         }
+     }
+ 
++    /**
++     * Like [refresh], but skips the Room round-trip (and the resulting recomposition of the
++     * home heatmap) when it just ran. The home page calls this every time it re-enters the
++     * composition; hitting the database on every back navigation costs frames for no data.
++     */
++    fun refreshIfStale(minIntervalMs: Long = 2_000L) {
++        if (!initialized) return
++        val now = SystemClock.elapsedRealtime()
++        if (now - lastRefreshAtMs < minIntervalMs) return
++        refresh()
++    }
++
+     /** Drop all recorded statistics and restart the "since install" anchor from now. */
+     fun reset() {
+         if (!initialized) return
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
+index 1094389d..48937f74 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
+@@ -6,11 +6,13 @@ package org.fcitx.fcitx5.android.ui.main.compose
+ 
+ import androidx.activity.compose.BackHandler
+ import androidx.compose.animation.AnimatedContent
++import androidx.compose.animation.ContentTransform
++import androidx.compose.animation.EnterTransition
++import androidx.compose.animation.ExitTransition
+ import androidx.compose.animation.fadeIn
+ import androidx.compose.animation.fadeOut
+ import androidx.compose.animation.slideInHorizontally
+ import androidx.compose.animation.slideOutHorizontally
+-import androidx.compose.animation.togetherWith
+ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+ import androidx.compose.material3.MotionScheme
+ import androidx.compose.runtime.Composable
+@@ -51,29 +53,24 @@ fun SettingsApp(onOpenNativeRoute: (String) -> Unit) {
+                 // started, while the previous page is revealed from the left.
+                 val spatial = motion.defaultSpatialSpec<IntOffset>()
+                 val effects = motion.defaultEffectsSpec<Float>()
+-                if (navigator.lastDirection == NavDirection.Forward) {
+-                    (slideInHorizontally(
+-                        animationSpec = spatial,
+-                        initialOffsetX = { it / 6 },
+-                    ) + fadeIn(animationSpec = effects))
+-                        .togetherWith(
+-                            slideOutHorizontally(
+-                                animationSpec = spatial,
+-                                targetOffsetX = { -it / 8 },
+-                            ) + fadeOut(animationSpec = effects)
+-                        )
+-                } else {
+-                    (slideInHorizontally(
+-                        animationSpec = spatial,
+-                        initialOffsetX = { -it / 6 },
+-                    ) + fadeIn(animationSpec = effects))
+-                        .togetherWith(
+-                            slideOutHorizontally(
+-                                animationSpec = spatial,
+-                                targetOffsetX = { it / 4 },
+-                            ) + fadeOut(animationSpec = effects)
+-                        )
+-                }
++                val forward = navigator.lastDirection == NavDirection.Forward
++                val enter: EnterTransition = slideInHorizontally(
++                    animationSpec = spatial,
++                    initialOffsetX = { if (forward) it / 6 else -it / 6 },
++                ) + fadeIn(animationSpec = effects)
++                val exit: ExitTransition = slideOutHorizontally(
++                    animationSpec = spatial,
++                    targetOffsetX = { if (forward) -it / 8 else it / 4 },
++                ) + fadeOut(animationSpec = effects)
++                // Every page is a full-screen Scaffold, so animating the container size only
++                // re-measures and clips both pages on every frame. A null sizeTransform keeps
++                // the slide+fade but drops that per-frame work.
++                ContentTransform(
++                    targetContentEnter = enter,
++                    initialContentExit = exit,
++                    targetContentZIndex = 0f,
++                    sizeTransform = null,
++                )
+             },
+             label = "settings-page",
+         ) { route ->
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsTheme.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsTheme.kt
+index ca8c1219..f16ef671 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsTheme.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsTheme.kt
+@@ -17,6 +17,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
+ import androidx.compose.material3.dynamicLightColorScheme
+ import androidx.compose.material3.lightColorScheme
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.unit.dp
+@@ -38,40 +39,47 @@ fun FcitxSettingsTheme(
+     content: @Composable () -> Unit,
+ ) {
+     val context = LocalContext.current
+-    val colorScheme: ColorScheme = when {
+-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
++    // Wallpaper palettes are expensive to resolve; remember them instead of rebuilding the
++    // whole ColorScheme every time the settings tree recomposes.
++    val colorScheme: ColorScheme = remember(dynamicColor, darkTheme, context) {
++        when {
++            dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
++                if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+ 
+-        darkTheme -> darkColorScheme(
+-            primary = Color(0xFFAEC6FF),
+-            onPrimary = Color(0xFF0A2E5C),
+-            primaryContainer = Color(0xFF2A4A7A),
+-            onPrimaryContainer = Color(0xFFD8E2FF),
+-            secondary = Color(0xFFBDC7DC),
+-            tertiary = Color(0xFFD9BEE0),
+-        )
++            darkTheme -> darkColorScheme(
++                primary = Color(0xFFAEC6FF),
++                onPrimary = Color(0xFF0A2E5C),
++                primaryContainer = Color(0xFF2A4A7A),
++                onPrimaryContainer = Color(0xFFD8E2FF),
++                secondary = Color(0xFFBDC7DC),
++                tertiary = Color(0xFFD9BEE0),
++            )
+ 
+-        else -> lightColorScheme(
+-            primary = Color(0xFF455E91),
+-            onPrimary = Color.White,
+-            primaryContainer = Color(0xFFD8E2FF),
+-            onPrimaryContainer = Color(0xFF001A41),
+-            secondary = Color(0xFF575E71),
+-            tertiary = Color(0xFF725572),
+-        )
++            else -> lightColorScheme(
++                primary = Color(0xFF455E91),
++                onPrimary = Color.White,
++                primaryContainer = Color(0xFFD8E2FF),
++                onPrimaryContainer = Color(0xFF001A41),
++                secondary = Color(0xFF575E71),
++                tertiary = Color(0xFF725572),
++            )
++        }
+     }
+ 
+-    val shapes = Shapes(
+-        extraSmall = RoundedCornerShape(8.dp),
+-        small = RoundedCornerShape(12.dp),
+-        medium = RoundedCornerShape(16.dp),
+-        large = RoundedCornerShape(24.dp),
+-        extraLarge = RoundedCornerShape(28.dp),
+-    )
++    val shapes = remember {
++        Shapes(
++            extraSmall = RoundedCornerShape(8.dp),
++            small = RoundedCornerShape(12.dp),
++            medium = RoundedCornerShape(16.dp),
++            large = RoundedCornerShape(24.dp),
++            extraLarge = RoundedCornerShape(28.dp),
++        )
++    }
++    val motionScheme = remember { MotionScheme.expressive() }
+ 
+     MaterialExpressiveTheme(
+         colorScheme = colorScheme,
+-        motionScheme = MotionScheme.expressive(),
++        motionScheme = motionScheme,
+         shapes = shapes,
+         content = content,
+     )
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HeatmapCard.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HeatmapCard.kt
+index 7ebc3ef7..6ffb00b2 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HeatmapCard.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HeatmapCard.kt
+@@ -113,7 +113,9 @@ fun HeatmapCard(onClick: () -> Unit) {
+     // Idempotent: TypingStatsManager.init uses a double-checked lock; refresh() reloads Room.
+     LaunchedEffect(Unit) {
+         TypingStatsManager.init(context)
+-        TypingStatsManager.refresh()
++        // Throttled: the card is re-composed on every back navigation; a Room round-trip per
++        // entry only costs frames.
++        TypingStatsManager.refreshIfStale()
+     }
+     val snapshot by TypingStatsManager.snapshot.collectAsStateWithLifecycle()
+ 
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HomeScreen.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HomeScreen.kt
+index 66bb7e2f..c7e0be93 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HomeScreen.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/home/HomeScreen.kt
+@@ -38,6 +38,8 @@ import androidx.compose.material3.Text
+ import androidx.compose.material3.TopAppBarDefaults
+ import androidx.compose.material3.rememberTopAppBarState
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.Immutable
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.input.nestedscroll.nestedScroll
+@@ -50,6 +52,7 @@ import org.fcitx.fcitx5.android.ui.main.compose.SettingsRoutes
+ import org.fcitx.fcitx5.android.ui.main.compose.components.SectionLabel
+ import org.fcitx.fcitx5.android.ui.main.compose.components.SettingsRow
+ 
++@Immutable
+ private data class HomeEntry(
+     val route: String,
+     val titleRes: Int,
+@@ -57,6 +60,7 @@ private data class HomeEntry(
+     val icon: ImageVector,
+ )
+ 
++@Immutable
+ private data class HomeSection(val titleRes: Int, val entries: List<HomeEntry>)
+ 
+ private val sections = listOf(
+@@ -187,15 +191,23 @@ fun HomeScreen() {
+                 bottom = 32.dp,
+             ),
+         ) {
+-            item { HeatmapCard(onClick = { navigator.navigate(SettingsRoutes.STATS) }) }
++            item {
++                val openStats = remember(navigator) {
++                    { navigator.navigate(SettingsRoutes.STATS) }
++                }
++                HeatmapCard(onClick = openStats)
++            }
+             sections.forEach { section ->
+                 item { SectionLabel(stringResource(section.titleRes)) }
+                 items(section.entries, key = { it.route }) { entry ->
++                    val open = remember(entry.route, navigator) {
++                        { navigator.navigate(entry.route) }
++                    }
+                     SettingsRow(
+                         title = stringResource(entry.titleRes),
+                         summary = stringResource(entry.summaryRes),
+                         icon = entry.icon,
+-                        onClick = { navigator.navigate(entry.route) },
++                        onClick = open,
+                     )
+                 }
+             }
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/RawConfig.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/RawConfig.kt
+index e68f77f7..9edf974e 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/RawConfig.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/RawConfig.kt
+@@ -45,8 +45,10 @@ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.lifecycle.viewmodel.compose.viewModel
+ import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
+ import kotlinx.coroutines.sync.Mutex
+ import kotlinx.coroutines.sync.withLock
+ import org.fcitx.fcitx5.android.R
+@@ -579,12 +581,14 @@ private suspend fun loadRawConfigPage(
+         }
+     }
+ 
+-    val desc = ConfigDescriptor.parseTopLevel(descRaw).fold({ throw it }, { it })
+-    return RawConfigPage(
+-        title = resolvePageTitle(fcitx, spec, context),
+-        desc = desc,
+-        cfg = cfg,
+-    )
++    // Parsing a descriptor tree (Global Options has ~100 items, addons far more) and building
++    // the Compose row models is pure CPU work: doing it on the main thread stalls the page
++    // enter animation for dozens of milliseconds.
++    val title = resolvePageTitle(fcitx, spec, context)
++    return withContext(Dispatchers.Default) {
++        val desc = ConfigDescriptor.parseTopLevel(descRaw).fold({ throw it }, { it })
++        RawConfigPage(title = title, desc = desc, cfg = cfg)
++    }
+ }
+ 
+ /** Readable page title when the daemon has the addon/IME metadata, else the unique name. */
+-- 
+2.56.1
+

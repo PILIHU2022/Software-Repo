@@ -1,0 +1,87 @@
+From 41974245f6d6ff7a268f76453df33266a727eea2 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 12:09:13 +0800
+Subject: [PATCH 17/17] perf(app): switch page transitions to a single moving
+ layer
+
+The slide+fade transition alpha-blended two full-screen pages for the whole
+~400ms animation, which cost 11-17ms of GPU time per frame at 60Hz (measured
+with dumpsys gfxinfo). Use a cover transition instead: pushing slides the new
+page in over the static previous one, popping slides the current page out to
+reveal the previous one. One moving layer, no blending.
+
+gfxinfo on the PJF110 (60Hz, AOT-compiled release): janky frames 7.1%/11.4% ->
+6.9%/7.0%, p90 18.1/26.4ms -> 15.2/21.0ms, GPU p90 11-13ms -> 6.2/6.7ms.
+---
+ .../android/ui/main/compose/SettingsApp.kt    | 47 +++++++++----------
+ 1 file changed, 22 insertions(+), 25 deletions(-)
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
+index 48937f74..5b5f609e 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
+@@ -9,8 +9,6 @@ import androidx.compose.animation.AnimatedContent
+ import androidx.compose.animation.ContentTransform
+ import androidx.compose.animation.EnterTransition
+ import androidx.compose.animation.ExitTransition
+-import androidx.compose.animation.fadeIn
+-import androidx.compose.animation.fadeOut
+ import androidx.compose.animation.slideInHorizontally
+ import androidx.compose.animation.slideOutHorizontally
+ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+@@ -47,30 +45,29 @@ fun SettingsApp(onOpenNativeRoute: (String) -> Unit) {
+         AnimatedContent(
+             targetState = navigator.currentRoute,
+             transitionSpec = {
+-                // Directional transitions: pushing slides the new page in from the right and
+-                // the old one out to the left; popping (back gesture / back arrow) plays the
+-                // reverse — the deeper page returns toward the right edge where the swipe
+-                // started, while the previous page is revealed from the left.
++                // Cover transition instead of slide+fade: only one full-screen page moves and
++                // nothing is alpha-blended. Cross-fading two full-screen layers was the reason
++                // the transitions dropped frames on a 60 Hz panel (both pages were drawn with
++                // alpha for ~400 ms).
++                //
++                // Push: the new page slides in from the right over the previous (static) page.
++                // Pop:  the current page slides out to the right, revealing the previous page.
+                 val spatial = motion.defaultSpatialSpec<IntOffset>()
+-                val effects = motion.defaultEffectsSpec<Float>()
+-                val forward = navigator.lastDirection == NavDirection.Forward
+-                val enter: EnterTransition = slideInHorizontally(
+-                    animationSpec = spatial,
+-                    initialOffsetX = { if (forward) it / 6 else -it / 6 },
+-                ) + fadeIn(animationSpec = effects)
+-                val exit: ExitTransition = slideOutHorizontally(
+-                    animationSpec = spatial,
+-                    targetOffsetX = { if (forward) -it / 8 else it / 4 },
+-                ) + fadeOut(animationSpec = effects)
+-                // Every page is a full-screen Scaffold, so animating the container size only
+-                // re-measures and clips both pages on every frame. A null sizeTransform keeps
+-                // the slide+fade but drops that per-frame work.
+-                ContentTransform(
+-                    targetContentEnter = enter,
+-                    initialContentExit = exit,
+-                    targetContentZIndex = 0f,
+-                    sizeTransform = null,
+-                )
++                if (navigator.lastDirection == NavDirection.Forward) {
++                    ContentTransform(
++                        targetContentEnter = slideInHorizontally(animationSpec = spatial) { it },
++                        initialContentExit = ExitTransition.None,
++                        targetContentZIndex = 1f,
++                        sizeTransform = null,
++                    )
++                } else {
++                    ContentTransform(
++                        targetContentEnter = EnterTransition.None,
++                        initialContentExit = slideOutHorizontally(animationSpec = spatial) { it },
++                        targetContentZIndex = 0f,
++                        sizeTransform = null,
++                    )
++                }
+             },
+             label = "settings-page",
+         ) { route ->
+-- 
+2.56.1
+
