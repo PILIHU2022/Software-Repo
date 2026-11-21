@@ -1,0 +1,157 @@
+From d6b838cebd47b4f7c0115a125c890cb6c2bc705d Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 11:19:21 +0800
+Subject: [PATCH 13/14] feat(app): declare the patch build on the About page
+
+A self-built APK should not look like an official release. Add a
+'Patchwork build' badge to the About header plus Build type / Upstream base rows
+and a note explaining what the local patches are and that the APK is not
+published by the Fcitx5 for Android project (en / zh-CN / zh-TW).
+---
+ .../ui/main/compose/screens/DataScreens.kt    | 67 +++++++++++++++++++
+ .../main/res/values-zh-rCN/strings_home.xml   |  6 ++
+ .../main/res/values-zh-rTW/strings_home.xml   |  6 ++
+ app/src/main/res/values/strings_home.xml      |  6 ++
+ 4 files changed, 85 insertions(+)
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/DataScreens.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/DataScreens.kt
+index 8d15b044..b76ba5f3 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/DataScreens.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/screens/DataScreens.kt
+@@ -587,7 +587,21 @@ private fun AboutScreen() {
+                     value = buildTime,
+                 )
+             }
++            item {
++                InfoRow(
++                    title = stringResource(R.string.about_patch_build_type_title),
++                    value = stringResource(R.string.about_patch_build_type_value),
++                )
++            }
++            item {
++                InfoRow(
++                    title = stringResource(R.string.about_patch_upstream_title),
++                    value = stringResource(R.string.about_patch_upstream_value),
++                )
++            }
+ 
++            item { Spacer(Modifier.height(16.dp)) }
++            item { PatchNoticeCard() }
+             item { Spacer(Modifier.height(16.dp)) }
+             item { CreditsCard() }
+         }
+@@ -632,6 +646,19 @@ private fun AboutHeader(appName: String) {
+                         style = MaterialTheme.typography.bodyMedium,
+                         color = scheme.onPrimaryContainer,
+                     )
++                    Spacer(Modifier.height(6.dp))
++                    Surface(
++                        shape = RoundedCornerShape(50),
++                        color = scheme.tertiaryContainer,
++                        contentColor = scheme.onTertiaryContainer,
++                    ) {
++                        Text(
++                            text = stringResource(R.string.about_patch_badge),
++                            style = MaterialTheme.typography.labelMedium,
++                            fontWeight = FontWeight.SemiBold,
++                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
++                        )
++                    }
+                 }
+             }
+             Spacer(Modifier.height(20.dp))
+@@ -645,6 +672,46 @@ private fun AboutHeader(appName: String) {
+     }
+ }
+ 
++/**
++ * Explicit "this APK is a patch build" notice. The version name already carries the
++ * `-patchwork` suffix, but a self-built APK should say so on the About page instead of
++ * looking like an official release.
++ */
++@Composable
++private fun PatchNoticeCard() {
++    val scheme = MaterialTheme.colorScheme
++    Card(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(top = 8.dp),
++        shape = RoundedCornerShape(24.dp),
++        colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerHighest),
++    ) {
++        Column(modifier = Modifier.padding(20.dp)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Surface(
++                    shape = RoundedCornerShape(50),
++                    color = scheme.tertiaryContainer,
++                    contentColor = scheme.onTertiaryContainer,
++                ) {
++                    Text(
++                        text = stringResource(R.string.about_patch_badge),
++                        style = MaterialTheme.typography.labelMedium,
++                        fontWeight = FontWeight.SemiBold,
++                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
++                    )
++                }
++            }
++            Spacer(Modifier.height(10.dp))
++            Text(
++                text = stringResource(R.string.about_patch_note),
++                style = MaterialTheme.typography.bodyMedium,
++                color = scheme.onSurfaceVariant,
++            )
++        }
++    }
++}
++
+ @Composable
+ private fun CreditsCard() {
+     val scheme = MaterialTheme.colorScheme
+diff --git a/app/src/main/res/values-zh-rCN/strings_home.xml b/app/src/main/res/values-zh-rCN/strings_home.xml
+index 37ef88e2..1eae7302 100644
+--- a/app/src/main/res/values-zh-rCN/strings_home.xml
++++ b/app/src/main/res/values-zh-rCN/strings_home.xml
+@@ -28,4 +28,10 @@
+     <string name="settings_title">设置</string>
+     <string name="advanced_legacy_title">经典高级设置</string>
+     <string name="advanced_legacy_summary">导出/导入用户数据、自动备份与所有文件访问</string>
++    <string name="about_patch_badge">补丁版</string>
++    <string name="about_patch_build_type_title">构建类型</string>
++    <string name="about_patch_build_type_value">Patchwork — 非官方，自行构建</string>
++    <string name="about_patch_upstream_title">上游基线</string>
++    <string name="about_patch_upstream_value">fcitx5-android 0.1.3</string>
++    <string name="about_patch_note">本 APK 是在上游 Fcitx5 for Android 0.1.3 基础上应用本地补丁构建的版本（Rime 同步存储、配置文件管理器、输入热力图、Material 3 Expressive 设置界面），不是官方发布，也不代表 Fcitx5 for Android 项目。</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings_home.xml b/app/src/main/res/values-zh-rTW/strings_home.xml
+index 8186216d..389a281f 100644
+--- a/app/src/main/res/values-zh-rTW/strings_home.xml
++++ b/app/src/main/res/values-zh-rTW/strings_home.xml
+@@ -22,4 +22,10 @@
+     <string name="home_stats_title">統計與熱力圖</string>
+     <string name="advanced_legacy_title">經典進階設定</string>
+     <string name="advanced_legacy_summary">匯出/匯入使用者資料、自動備份與所有檔案存取</string>
++    <string name="about_patch_badge">補丁版</string>
++    <string name="about_patch_build_type_title">建置類型</string>
++    <string name="about_patch_build_type_value">Patchwork — 非官方，自行建置</string>
++    <string name="about_patch_upstream_title">上游基線</string>
++    <string name="about_patch_upstream_value">fcitx5-android 0.1.3</string>
++    <string name="about_patch_note">此 APK 是在上游 Fcitx5 for Android 0.1.3 基礎上套用本機補丁建置的版本（Rime 同步儲存、設定檔管理員、輸入熱力圖、Material 3 Expressive 設定介面），並非官方發佈，也不代表 Fcitx5 for Android 專案。</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings_home.xml b/app/src/main/res/values/strings_home.xml
+index b2f70596..97cdcbbf 100644
+--- a/app/src/main/res/values/strings_home.xml
++++ b/app/src/main/res/values/strings_home.xml
+@@ -28,4 +28,10 @@
+     <string name="settings_title">Settings</string>
+     <string name="advanced_legacy_title">Classic advanced settings</string>
+     <string name="advanced_legacy_summary">Export/import user data, backups and all-files access</string>
++    <string name="about_patch_badge">Patchwork build</string>
++    <string name="about_patch_build_type_title">Build type</string>
++    <string name="about_patch_build_type_value">Patchwork — unofficial, self-built</string>
++    <string name="about_patch_upstream_title">Upstream base</string>
++    <string name="about_patch_upstream_value">fcitx5-android 0.1.3</string>
++    <string name="about_patch_note">This APK is a downstream patch build: upstream Fcitx5 for Android 0.1.3 plus local patches (Rime sync storage, config file manager, typing heatmap, Material 3 Expressive settings). It is not an official release and is not published by the Fcitx5 for Android project.</string>
+ </resources>
+-- 
+2.56.1
+

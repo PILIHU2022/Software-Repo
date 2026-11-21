@@ -1,0 +1,55 @@
+From 9a943c32bf2729d0612df5be06d055ac2990ece7 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 11:19:21 +0800
+Subject: [PATCH 14/14] fix(app): keep each settings page's scroll position
+ when navigating back
+
+AnimatedContent disposes the outgoing page once the enter transition ends, so the
+LazyColumn/TopAppBar state created by rememberSaveable inside the page was lost
+and going back (after a moment on the child page) always restarted at the top.
+
+Wrap every destination in a SaveableStateHolder.SaveableStateProvider keyed by
+route so each page keeps its saveable state for as long as it stays on the
+stack. The holder is itself rememberSaveable, so the state also survives an
+activity recreation.
+---
+ .../fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt  | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
+index b1710857..1094389d 100644
+--- a/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
++++ b/app/src/main/java/org/fcitx/fcitx5/android/ui/main/compose/SettingsApp.kt
+@@ -16,6 +16,7 @@ import androidx.compose.material3.MotionScheme
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.remember
++import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+ import androidx.compose.ui.unit.IntOffset
+ import org.fcitx.fcitx5.android.ui.main.compose.home.HomeScreen
+ import org.fcitx.fcitx5.android.ui.main.compose.screens.AddonListScreen
+@@ -31,6 +32,10 @@ import org.fcitx.fcitx5.android.ui.main.compose.screens.UnmigratedScreen
+ fun SettingsApp(onOpenNativeRoute: (String) -> Unit) {
+     val navigator = remember { SettingsNavigator(onOpenNativeRoute) }
+     val motion = MotionScheme.expressive()
++    // Each page keeps its own `rememberSaveable` state (LazyColumn/TopAppBar scroll state,
++    // sheet selections, ...) for as long as the stack keeps the route. Without this, the
++    // AnimatedContent disposes the outgoing page and going back always restarts at the top.
++    val pageStates = rememberSaveableStateHolder()
+ 
+     BackHandler(enabled = navigator.stack.size > 1) {
+         navigator.back()
+@@ -72,7 +77,9 @@ fun SettingsApp(onOpenNativeRoute: (String) -> Unit) {
+             },
+             label = "settings-page",
+         ) { route ->
+-            SettingsDestination(route)
++            pageStates.SaveableStateProvider(route) {
++                SettingsDestination(route)
++            }
+         }
+     }
+ }
+-- 
+2.56.1
+
