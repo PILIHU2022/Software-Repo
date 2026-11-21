@@ -1,13 +1,13 @@
-name: Fcitx5 for Android build
+name: Patchwork build
 
+# The builder of the patchwork overlay. It no longer starts by itself: every app
+# has its own watcher (.github/workflows/<app>.yml, sharing app-watch.yml) that
+# decides when that app needs a build and dispatches this workflow with
+# app=<app> and force=true. A commit that touches one app therefore never starts
+# a build for another, and each app keeps its own 10-day upstream window.
+#
+# Manual use: dispatch with app=<id> (or app=all together with force).
 on:
-  schedule:
-    # One upstream window every 10 days. GitHub crons cannot express "every 10
-    # days" (a `*/10` day-of-month rule fires on the 1st, 11th, 21st and 31st),
-    # so this runs daily and the check job returns early while
-    # .watch-state.json's `android` timestamp is younger than 10 days. Scheduled
-    # runs are best-effort; a delayed day only shifts the window.
-    - cron: '17 4 * * *'
   workflow_dispatch:
     inputs:
       app:
@@ -18,16 +18,6 @@ on:
         description: Build even when upstream has not changed
         type: boolean
         default: false
-  push:
-    branches:
-      - main
-    paths:
-      - 'apps/**'
-      # Gadgetbridge has its own watcher; dispatch this workflow with
-      # app=gadgetbridge instead of building it from a push.
-      - '!apps/gadgetbridge/**'
-      - 'scripts/**'
-      - '.github/workflows/build.yml'
 
 permissions:
   contents: write
@@ -56,107 +46,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Scheduled runs are gated on .watch-state.json so the upstream window is
-      # every 10 days; pushes and manual dispatches always check. The timestamp
-      # is advanced by the record-check job at the end of a clean run (see the
-      # rationale there).
-      - name: Respect the 10-day window
-        id: gate
-        if: github.event_name == 'schedule'
-        run: |
-          set -euo pipefail
-          days="${WATCH_INTERVAL_DAYS:-10}"
-          due=true
-          last="$(jq -r '.android // empty' .watch-state.json 2>/dev/null || true)"
-          if [[ -n "$last" ]]; then
-            if last_epoch="$(date -u -d "$last" +%s 2>/dev/null)"; then
-              age=$(( $(date -u +%s) - last_epoch ))
-              if (( age < days * 86400 )); then
-                due=false
-                echo "::notice::Last upstream window was ${age}s ago; the next one is due in $(( days * 86400 - age ))s."
-              fi
-            else
-              echo "::warning::Unreadable timestamp '$last' in .watch-state.json; checking upstream anyway."
-            fi
-          fi
-          echo "due=$due" >> "$GITHUB_OUTPUT"
-
-      # Decide which apps to build (one runner leg per app that changed):
-      #  * push  -> only the apps whose apps/<app>/** paths changed in this push.
-      #             A shared scripts/** or workflow change alone rebuilds
-      #             nothing: rolling a shared change out to every app is a
-      #             manual dispatch (`force`), so a docs/CI push cannot start
-      #             the expensive fcitx5 leg. A force push whose before-SHA is
-      #             unknown also rebuilds nothing (dispatch if needed).
-      #  * dispatch -> the selected app (or all with force);
-      #  * schedule -> only apps whose upstream SHA changed.
+      # Resolve which app(s) to build. The watchers dispatch this workflow with
+      # app=<id> and force=true; a manual dispatch may also ask for "all".
       - name: Resolve build matrix
         id: check
         env:
-          EVENT: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.event.after }}
           FORCE_INPUT: ${{ inputs.force }}
           APP_INPUT: ${{ inputs.app }}
-          DUE: ${{ steps.gate.outputs.due }}
-          # Gadgetbridge has its own watcher (.github/workflows/gadgetbridge.yml),
-          # which decides when to build it and dispatches this workflow with
-          # app=gadgetbridge. Keeping it out of this matrix means a commit that
-          # does not touch apps/gadgetbridge never starts a Gadgetbridge build.
-          CHECK_UPSTREAM_SKIP: gadgetbridge
         run: |
           set -euo pipefail
-          # A scheduled run outside the 10-day window does nothing: emit an
-          # empty matrix so the build/publish jobs are skipped cleanly.
-          if [[ "$EVENT" == "schedule" && "$DUE" == "false" ]]; then
-            echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
-            echo "any_changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # App list comes from apps/*/app.conf, so adding an app needs no
-          # workflow edit.
-          mapfile -t ALL_APPS < <(find apps -mindepth 2 -maxdepth 2 -name app.conf | LC_ALL=C sort | cut -d/ -f2 | grep -vx gadgetbridge)
           args=()
-          if [[ "$EVENT" == "push" ]]; then
-            selected=""
-            if [[ -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]] \
-               && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-              changed_files="$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" || true)"
-              pick=()
-              shared=()
-              while IFS= read -r path; do
-                case "$path" in
-                  apps/*/*)
-                    app="${path#apps/}"
-                    app="${app%%/*}"
-                    printf '%s\n' "${ALL_APPS[@]}" | grep -Fxq "$app" && pick+=("$app")
-                    ;;
-                  scripts/*|.github/workflows/*) shared+=("$path") ;;
-                esac
-              done <<<"$changed_files"
-              if [[ ${#pick[@]} -gt 0 ]]; then
-                selected="$(printf '%s\n' "${pick[@]}" | sort -u | paste -sd' ' -)"
-              fi
-              if [[ ${#shared[@]} -gt 0 && -z "$selected" ]]; then
-                printf '::notice title=No app rebuilt::Only shared files changed (%s); no apps/<app>/ path did, so nothing is rebuilt. Dispatch "Patchwork build" with force when a shared change must be rolled out.\n' "${shared[*]}"
-              fi
-            else
-              echo "::warning title=No app rebuilt::The pushed commits cannot be diffed (force push or unknown before-SHA); nothing is rebuilt. Run the workflow manually with force if this push changed an app."
-            fi
-            if [[ -z "$selected" ]]; then
-              echo "No app directory changed in this push; skipping every build."
-              echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
-              echo "any_changed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "Push changed these apps: $selected"
-            args=(--apps "$selected")
-          elif [[ "$EVENT" == "workflow_dispatch" ]]; then
-            if [[ -n "${APP_INPUT:-}" && "$APP_INPUT" != "all" ]]; then
-              args=(--apps "$APP_INPUT")
-            elif [[ "$FORCE_INPUT" == "true" ]]; then
-              args=(--all)
-            fi
+          if [[ -n "${APP_INPUT:-}" && "$APP_INPUT" != "all" ]]; then
+            args=(--apps "$APP_INPUT")
+          elif [[ "$FORCE_INPUT" == "true" ]]; then
+            args=(--all)
           fi
           if [[ ${#args[@]} -gt 0 ]]; then
             result="$(./scripts/check-upstream.sh "${args[@]}")"
@@ -611,69 +514,6 @@ jobs:
             echo '- Canonical repo URL once Pages is enabled: https://pilihu2022.github.io/Software-Repo/repo'
             echo '- Fallback while Pages is off: https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  record-check:
-    name: Record the watch time
-    needs:
-      - check
-      - build
-      - publish
-    # Advance the 10-day window after a scheduled run that really checked and
-    # did not fail hard: either nothing changed, or the build and publish jobs
-    # both finished. A fallback (the queue did not apply to the head) counts as
-    # a finished run — F-Droid already keeps the old build state, so the next
-    # window retries the new head. Failed legs or a failed publish leave the
-    # timestamp alone, so the next daily run retries instead of waiting 10
-    # days. Pushes and manual dispatches never move the window.
-    if: >-
-      success() &&
-      github.event_name == 'schedule' &&
-      needs.check.result == 'success' &&
-      needs.check.outputs.due == 'true' &&
-      (needs.check.outputs.any_changed != 'true' ||
-       (needs.build.result == 'success' && needs.publish.result == 'success'))
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 1
-
-      - name: Update the watch state
-        run: |
-          set -euo pipefail
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          tmp="$(mktemp)"
-          jq --arg t "$now" '. + {android: $t}' .watch-state.json >"$tmp"
-          mv "$tmp" .watch-state.json
-          cat .watch-state.json
-
-      - name: Commit the state
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          git config user.name "DeepSeek Harness"
-          git config user.email "noreply@deepseek.com"
-          git add .watch-state.json
-          if git diff --cached --quiet; then
-            echo "No state change to commit"
-            exit 0
-          fi
-          git commit -m "Record the upstream watch [skip ci]"
-          for attempt in 1 2 3; do
-            if git pull --rebase origin main \
-               && git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main; then
-              echo "::notice::Watch state pushed"
-              exit 0
-            fi
-            echo "    push attempt ${attempt}/3 failed; retrying"
-            sleep $(( attempt * 5 ))
-          done
-          echo "::warning title=Watch state commit failed::Could not push .watch-state.json (often HTTP 403: set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions')."
 
   notify-failure:
     name: Report failure

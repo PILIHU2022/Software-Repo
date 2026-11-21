@@ -67,6 +67,14 @@ if ! "$ROOT/scripts/build-app.sh" "$APP" --no-build >"$log" 2>&1; then
     die "the patch queue does not apply to $upstream_head; resolve the conflict by hand (see the worktree named in the log) and regenerate the queue"
 fi
 
+# A fallback means the queue does not apply to the upstream head and build-app.sh
+# retried on the last commit that did work. Re-anchoring there would silently
+# move the queue backwards, so treat it as the conflict it is.
+if grep -qx 'PATCHWORK_RESULT_upstream_fallback=1' "$log"; then
+    cat "$log" >&2
+    die "the patch queue does not apply to $upstream_head (build-app.sh fell back to an older commit); resolve the conflict by hand, then re-run this script"
+fi
+
 work="$(sed -n 's/^PATCHWORK_RESULT_worktree=//p' "$log" | tail -n 1)"
 built_sha="$(sed -n 's/^PATCHWORK_RESULT_upstream_commit=//p' "$log" | tail -n 1)"
 patch_count="$(sed -n 's/^PATCHWORK_RESULT_patch_count=//p' "$log" | tail -n 1)"
@@ -97,8 +105,22 @@ if [[ "$CHECK" -eq 1 ]]; then
     exit 1
 fi
 
-rm -f "$PATCH_DIR"/*.patch
-cp -f "$tmp"/*.patch "$PATCH_DIR/"
+# Keep the file names the queue already had: format-patch names a file after
+# the commit subject, so a re-export would rename every patch whenever a subject
+# is reworded upstream of this repository, burying the real change in renames.
+mapfile -t exported < <(find "$tmp" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
+if (( ${#exported[@]} == ${#PATCHES[@]} )); then
+    staged="$(mktemp -d)"
+    for i in "${!exported[@]}"; do
+        cp -f "${exported[$i]}" "$staged/$(basename "${PATCHES[$i]}")"
+    done
+    rm -f "$PATCH_DIR"/*.patch
+    cp -f "$staged"/*.patch "$PATCH_DIR/"
+    rm -rf "$staged"
+else
+    rm -f "$PATCH_DIR"/*.patch
+    cp -f "$tmp"/*.patch "$PATCH_DIR/"
+fi
 printf '%s\n' "$built_sha" >"$ANCHOR_FILE"
 echo "==> $APP: rebased $patch_count patch(es) onto $built_sha"
 if (( changed == 0 )); then

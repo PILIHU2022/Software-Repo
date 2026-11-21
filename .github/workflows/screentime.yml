@@ -1,0 +1,33 @@
+name: ScreenTime watch
+
+# screentime has its own watcher: a push only starts it when it touches
+# apps/screentime/, a daily cron builds only once the 10-day window has passed and
+# the upstream branch moved, and a manual dispatch always builds. The shared
+# body lives in app-watch.yml; the build itself is the patchwork builder
+# dispatched with app=screentime.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/screentime/**'
+      - '.github/workflows/screentime.yml'
+  schedule:
+    - cron: '29 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+concurrency:
+  group: screentime-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    uses: ./.github/workflows/app-watch.yml
+    with:
+      app: screentime
+      trigger: ${{ github.event_name == 'push' && 'push' || (github.event_name == 'schedule' && 'schedule' || 'manual') }}

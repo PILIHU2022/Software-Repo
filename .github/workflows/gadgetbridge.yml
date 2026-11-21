@@ -1,20 +1,10 @@
 name: Gadgetbridge watch
 
-# Gadgetbridge has its own watcher so that it is built on its own schedule and
-# never because of an unrelated commit:
-#
-#  * a push only starts this workflow when it touches apps/gadgetbridge/ (or
-#    this file); the shared patchwork workflow skips the app
-#    (CHECK_UPSTREAM_SKIP), so no other apps/<app> or docs commit reaches it;
-#  * a daily cron checks the upstream branch, but the build only runs once the
-#    10-day window has passed and upstream actually moved;
-#  * when upstream moved, the queue is rebased onto the new head first (the
-#    patch queue is applied with git am -3, then exported back), and the
-#    rebased queue is committed before the build is dispatched;
-#  * the build itself is the shared patchwork workflow, dispatched with
-#    app=gadgetbridge, so signing, the F-Droid repository, the README table and
-#    Pages stay in one place.
-
+# Gadgetbridge has its own watcher: a push only starts it when it touches
+# apps/gadgetbridge/, a daily cron builds only once the 10-day window has passed
+# and the upstream branch moved, and a manual dispatch always builds. The shared
+# body lives in app-watch.yml; the build itself is the patchwork builder
+# dispatched with app=gadgetbridge.
 on:
   push:
     branches:
@@ -23,7 +13,6 @@ on:
       - 'apps/gadgetbridge/**'
       - '.github/workflows/gadgetbridge.yml'
   schedule:
-    # Checked daily; the gate below only lets a build through every 10 days.
     - cron: '17 4 * * *'
   workflow_dispatch:
 
@@ -36,147 +25,9 @@ concurrency:
   group: gadgetbridge-watch
   cancel-in-progress: false
 
-env:
-  WATCH_INTERVAL_DAYS: '10'
-
 jobs:
   watch:
-    name: Rebase the queue and dispatch the build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    # A commit made by this workflow (the rebased queue, the watch state) must
-    # not start it again; the commit messages also carry [skip ci].
-    if: github.actor != 'github-actions[bot]'
-    outputs:
-      build: ${{ steps.decide.outputs.build }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Resolve the upstream head and the 10-day window
-        id: decide
-        env:
-          EVENT: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          # shellcheck source=/dev/null
-          source apps/gadgetbridge/app.conf
-          head="$(git ls-remote "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH" | awk 'NR == 1 { print $1 }')"
-          if [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::could not resolve $UPSTREAM_URL ($UPSTREAM_BRANCH)"
-            exit 1
-          fi
-          anchor="$(tr -d '[:space:]' < apps/gadgetbridge/upstream.txt 2>/dev/null || true)"
-          moved=false
-          if [[ "$head" != "$anchor" ]]; then
-            moved=true
-          fi
-
-          days="${WATCH_INTERVAL_DAYS:-10}"
-          due=true
-          last="$(jq -r '.gadgetbridge // empty' .watch-state.json 2>/dev/null || true)"
-          if [[ -n "$last" ]] && last_epoch="$(date -u -d "$last" +%s 2>/dev/null)"; then
-            age=$(( $(date -u +%s) - last_epoch ))
-            if (( age < days * 86400 )); then
-              due=false
-              echo "::notice::Last Gadgetbridge window was ${age}s ago; the next one is due in $(( days * 86400 - age ))s."
-            fi
-          fi
-
-          build=false
-          rebase=false
-          case "$EVENT" in
-            push)
-              # The path filter already limited this to apps/gadgetbridge.
-              build=true
-              rebase=true
-              ;;
-            workflow_dispatch)
-              build=true
-              rebase=true
-              ;;
-            schedule)
-              if [[ "$moved" == "true" && "$due" == "true" ]]; then
-                build=true
-                rebase=true
-              fi
-              ;;
-          esac
-
-          echo "upstream=$head"
-          echo "anchor=${anchor:-<unknown>}"
-          echo "moved=$moved due=$due build=$build"
-          {
-            echo "upstream=$head"
-            echo "moved=$moved"
-            echo "build=$build"
-            echo "rebase=$rebase"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Rebase the queue onto the upstream head
-        if: steps.decide.outputs.rebase == 'true'
-        run: |
-          set -euo pipefail
-          ./scripts/rebase-queue.sh gadgetbridge
-          git add apps/gadgetbridge
-          if git diff --cached --quiet; then
-            echo "The stored queue already matches the rebased queue"
-            exit 0
-          fi
-          git config user.name "DeepSeek Harness"
-          git config user.email "noreply@deepseek.com"
-          git commit -m "chore(gadgetbridge): rebase the queue onto $(cat apps/gadgetbridge/upstream.txt | cut -c1-7) [skip ci]"
-          git pull --rebase origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
-
-      - name: Record the upstream window
-        if: steps.decide.outputs.build == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          tmp="$(mktemp)"
-          jq --arg ts "$now" '. + {gadgetbridge: $ts}' .watch-state.json >"$tmp"
-          mv "$tmp" .watch-state.json
-          git add .watch-state.json
-          if git diff --cached --quiet; then
-            exit 0
-          fi
-          git config user.name "DeepSeek Harness"
-          git config user.email "noreply@deepseek.com"
-          git commit -m "Record the Gadgetbridge upstream window [skip ci]"
-          git pull --rebase origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
-
-      - name: Dispatch the patchwork build
-        if: steps.decide.outputs.build == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh workflow run build.yml \
-            --ref "${{ github.ref_name }}" \
-            -f app=gadgetbridge \
-            -f force=true
-          echo "::notice::Dispatched the patchwork build for gadgetbridge"
-
-      - name: Open an issue when the queue no longer rebases
-        if: failure() && steps.decide.outputs.rebase == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ steps.decide.outputs.upstream }}
-        run: |
-          set -euo pipefail
-          title="gadgetbridge: the patch queue does not rebase onto $HEAD_SHA"
-          if gh issue list --state open --search "in:title $title" | grep -q .; then
-            echo "An issue for this commit is already open"
-            exit 0
-          fi
-          gh issue create \
-            --title "$title" \
-            --body "Applying apps/gadgetbridge/patches to \`$HEAD_SHA\` failed, so the queue could not be rebased and nothing was built.
-
-          Resolve the conflict in a local clone (see \`.cache/work/gadgetbridge\` after running \`scripts/rebase-queue.sh gadgetbridge\`), regenerate the queue with \`scripts/rebase-queue.sh gadgetbridge\`, and push the result. The next scheduled run then builds it."
+    uses: ./.github/workflows/app-watch.yml
+    with:
+      app: gadgetbridge
+      trigger: ${{ github.event_name == 'push' && 'push' || (github.event_name == 'schedule' && 'schedule' || 'manual') }}

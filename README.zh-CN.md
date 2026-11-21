@@ -50,7 +50,7 @@ issue，而不是继续发布过期代码。
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `e8ac17f` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `9ac2520` | 11 | `1.4.1-patchwork`（1304，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 17 | `0.1.3-patchwork`（11207，arm64-v8a） |
-| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `74b1dea` | 4 | `3.29-patchwork`（25604800，arm64-v8a） |
+| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `74b1dea` | 4 | `3.29-patchwork`（25604802，arm64-v8a） |
 | Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `93d4d79` | 5 | `2026.11.1-patchwork`（25700） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 48 | `0.8.3.48` —— 上游 `0.8.3` + 48 个补丁（linux/windows x86、Arch 包；Release + feed） |
 | BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 48 | `0.8.3-patchwork`（80348 —— 上游 803 × 100 + 48 个补丁） |
@@ -204,32 +204,30 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 
 ## 自动化流程
 
-`build.yml` 每 **10 天**检查一次上游仓库，只有上游 SHA 与
-`fdroid/.build-state.json` 不同的 app 才会构建。GitHub 的 cron 无法直接表达
-“每 10 天”（`*/10` 的日规则会在 1、11、21、31 号触发），因此工作流每天跑一次
-（`17 4 * * *`），check 任务在 `.watch-state.json` 的 `android` 时间戳距今不足
-10 天时直接退出。它也响应推送到 `main` 且改动涉及 `apps/**`、`scripts/**` 或
-工作流本身的提交，并支持手动触发（可选 `app` / `force` 输入）。改动补丁队列或
-`app.conf` 的提交会立即触发构建，并按下面的版本号规则 +1。
+每个 app 都有自己的监视工作流——`expenses.yml`、`screentime.yml`、`fcitx5.yml`、
+`basicsync.yml`、`gadgetbridge.yml`——共用 `app-watch.yml` 里的逻辑。监视器只为自己
+那个 app 启动：它的 `push` 触发只限 `apps/<app>/**`（加该工作流文件本身），因此改
+A 应用不会启动 B 应用的构建，纯文档或 `scripts/**` 提交则完全不触发 Actions。
 
-随着周期改为 10 天，原先 15 分钟一次的轮询（`upstream-watch.yml`）、它的每小时
-watchdog 和 1 小时轮询窗口都已删除：每天一次的带闸门运行更简单，延迟或漏掉一天
-也只是把窗口顺延一天；而且闸门只在一次定时运行完成之后才前进，硬失败会在第二天
-继续重试，而不是再等 10 天。补丁队列无法应用到新 head 时会回退到上次成功构建的
-上游提交，并在下一个窗口重试新 head。桌面 x86 构建则是另一条独立的
-`baidunetgo.yml`。
+每个监视器每天在自己的分钟数跑一次；GitHub 的 cron 无法直接表达“每 10 天”
+（`*/10` 的日规则会在 1、11、21、31 号触发），所以每次运行自行检查
+`.watch-state.json` 里该 app 的时间戳，只有满 10 天**且**上游 SHA 与
+`fdroid/.build-state.json` 不同才构建。延迟或漏掉一天只是把该 app 的窗口顺延。
 
-构建按 app 分开：推送只重建 `apps/<app>/**` 有改动的那个 app。只改
-`scripts/**` 或工作流不会重建任何 app（需要把共享改动铺到全部 app 时，手动触发并
-勾 `force`）；无法确定 before 的强制推送也不重建，因此文档/CI 推送不会误启动耗时的
-fcitx5 任务。定时运行只重建上游 SHA 变化的 app。手动触发可用 `app` 输入只构建一个
-app，或用 `app=all` + `force` 全量重建。fcitx5 任务还会额外释放约 10 GB runner
-磁盘、安装 `extra-cmake-modules`/`gettext` 以及 NDK 28.0.13004108、CMake 3.31.6、
+上游有提交时，监视器会先重锚队列再构建：`scripts/rebase-queue.sh` 取新的 head、
+用 `git am -3` 应用队列、把应用后的提交导出回 `apps/<app>/patches`（沿用原有文件名）、
+把新锚点写进 `apps/<app>/upstream.txt`，监视器以 `[skip ci]` 提交这次重锚。队列已经
+无法应用时，监视器失败并开 issue，而不是回退到旧提交发布过期代码。随后它记录窗口
+时间戳，并以 `app=<app>` + `force=true` 派发构建器。
+
+因此 `build.yml` 只是构建器：它没有自己的 `push` / `schedule` 触发，这正是“无关提交
+不会启动构建”的来源。手动触发可以用 `app` 指定单个 app，或用 `app=all` + `force`
+全量重建。fcitx5 任务还会额外释放约 10 GB runner 磁盘、安装
+`extra-cmake-modules`/`gettext` 以及 NDK 28.0.13004108、CMake 3.31.6、
 build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 
-1. **check** —— `scripts/check-upstream.sh` 先过 10 天闸门，再对比上游分支的
-   SHA（expenses / screentime 是 `main`，fcitx5 是 `master`）与
-   `fdroid/.build-state.json`，生成构建矩阵；
+1. **check** —— `scripts/check-upstream.sh --apps <id>` 解析监视器派发的那个 app，
+   生成构建矩阵；
 2. **build** —— 每个有变化的应用一个矩阵任务（`fail-fast: false`）：在
    `.cache/mirror/<app>.git` 维护 mirror、创建全新检出、按需递归初始化子模块
    （fcitx5）、用 `git am -3` 应用补丁队列、处理版本号、Gradle release 构建、
@@ -238,9 +236,7 @@ build-tools 36.1.0 等 SDK 包，超时上限为 120 分钟。每次运行：
 3. **publish** —— `publish-fdroid.sh` 每个包最多保留 3 个 APK，按
    `(package, versionCode)` 去重，用 fdroidserver（`fdroid update`）签名索引，把
    `fdroid/repo` 与 `.build-state.json` 以 `[skip ci]` 提交回 `main`，最后部署
-   Pages。失败的矩阵任务保留旧状态，下次运行会重试；`record-check` 任务只在定时
-运行完成之后才推进 10 天窗口（回退构建也算完成：对应 app 保留旧的上游记录，下一
-个窗口再试新 head）；
+   Pages。失败的矩阵任务保留旧状态，该 app 的监视器下次运行会重试；
 4. **failure** —— 打开或评论 **“Patchwork build failed”** issue，附运行链接和本地
    复现命令。
 
@@ -290,7 +286,7 @@ versionName = "<上游 versionName>-patchwork"
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112`（arm64-v8a）/ `"0.1.3"` | 7 | `11207` / `"0.1.3-patchwork"` |
-| BasicSync | `256048` / `"3.29"` | 1 | `25604800` / `"3.29-patchwork"` |
+| BasicSync | `256048` / `"3.29"` | 2 | `25604802` / `"3.29-patchwork"` |
 | Gadgetbridge | `257` / `"2026.11.1"` | 5 | `25700` / `"2026.11.1-patchwork"` |
 
 fcitx5 的上游 versionCode 本身就按 ABI 区分（`baseVersionCode × 10 + ABI id`，

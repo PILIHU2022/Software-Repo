@@ -47,7 +47,7 @@ code.
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `e8ac17f` | 20 | `0.21.4-patchwork` (6812) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `9ac2520` | 11 | `1.4.1-patchwork` (1304, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 17 | `0.1.3-patchwork` (11207, arm64-v8a) |
-| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `74b1dea` | 4 | `3.29-patchwork` (25604800, arm64-v8a) |
+| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `74b1dea` | 4 | `3.29-patchwork` (25604802, arm64-v8a) |
 | Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge) (`master`) | `93d4d79` | 5 | `2026.11.1-patchwork` (25700) |
 | BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 48 | `0.8.3.48` — upstream `0.8.3` + 48 patches (linux/windows x86, Arch package; Release + feed) |
 | BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 48 | `0.8.3-patchwork` (80348 — upstream 803 × 100 + 48 patches) |
@@ -273,39 +273,37 @@ mismatch when the raw URL is used; the content is identical.
 
 ## How automation works
 
-`build.yml` checks the upstream repositories once every 10 days and builds only
-the app(s) whose upstream SHA differs from `fdroid/.build-state.json`. GitHub
-crons cannot express "every 10 days" (a `*/10` day-of-month rule would fire on
-the 1st, 11th, 21st and 31st), so the workflow runs daily (`17 4 * * *`) and the
-check job exits early while `.watch-state.json`'s `android` timestamp is younger
-than 10 days. It also runs on pushes to `main` touching `apps/**`, `scripts/**`
-or the workflow itself, and on manual dispatch (optional `app` / `force`
-inputs). A push that changes a patch queue or an `app.conf` triggers a build
-immediately and that commit bumps `versionCode` as described below.
+Every app has its own watcher workflow — `expenses.yml`, `screentime.yml`,
+`fcitx5.yml`, `basicsync.yml` and `gadgetbridge.yml` — sharing the logic in
+`app-watch.yml`. A watcher only ever starts for its own app: its `push` trigger
+is limited to `apps/<app>/**` (plus that workflow file), so a commit for one app
+never starts a build for another, and nothing at all runs for a docs-only or
+`scripts/**` commit. Each watcher runs daily at its own minute; GitHub crons
+cannot express "every 10 days" (a `*/10` day-of-month rule would fire on the
+1st, 11th, 21st and 31st), so the run gates itself on that app's timestamp in
+`.watch-state.json` and builds only once the 10 days have passed **and** the
+upstream SHA differs from `fdroid/.build-state.json`. A delayed or missed day
+only shifts that app's window.
 
-The old 15-minute poller (`upstream-watch.yml`), its hourly watchdog and their
-one-hour polling windows were removed with the 10-day cadence: a daily gated run
-is simpler, a delayed or missed day only shifts the window by a day, and the
-gate only advances after a scheduled run that finished, so a hard failure is
-retried the next day instead of waiting another 10. When the queue no longer
-applies to the head, the build falls back to the last successful upstream commit
-and the next window retries the new head. The Windows/Linux x86 desktop build is
-the separate `baidunetgo.yml` (see below).
+When the upstream moved, the watcher re-anchors the queue before building:
+`scripts/rebase-queue.sh` fetches the new head, applies the queue with `git am
+-3`, exports the applied commits back into `apps/<app>/patches` (keeping the
+existing file names), records the new anchor in `apps/<app>/upstream.txt`, and
+the watcher commits that with `[skip ci]`. A queue that no longer applies fails
+the watcher and opens an issue instead of publishing stale code — it is never
+anchored backwards onto the fallback commit. The watcher then records the window
+and dispatches the builder with `app=<app>` and `force=true`.
 
-Builds are per app: a push rebuilds only the apps whose `apps/<app>/**` paths
-changed. A shared `scripts/**` or workflow change alone rebuilds nothing
-(dispatch with `force` when a shared change must be rolled out) and a force push
-whose before-SHA is unknown rebuilds nothing, so a docs/CI push cannot start the
-expensive fcitx5 leg by accident. Scheduled runs rebuild only the apps whose
-upstream SHA changed. Manual dispatch can target one app with the `app` input,
-or rebuild everything with `app=all` + `force`. The fcitx5 leg additionally
+`build.yml` is therefore a builder only: it has no `push` or `schedule` trigger
+of its own, which is what keeps an unrelated commit from starting a build. A
+manual dispatch can target one app with the `app` input, or rebuild everything
+with `app=all` + `force`. The fcitx5 leg additionally
 frees ~10 GB of runner disk, installs `extra-cmake-modules`/`gettext` plus the
 NDK 28.0.13004108, CMake 3.31.6 and build-tools 36.1.0 SDK packages, and has a
 120-minute timeout. Each run:
 
-1. **check** — `scripts/check-upstream.sh` compares the upstream branch SHAs
-   (`main` for expenses/screentime, `master` for fcitx5) with
-   `fdroid/.build-state.json` and emits the build matrix, after the 10-day gate;
+1. **check** — `scripts/check-upstream.sh --apps <id>` resolves the app the
+   watcher dispatched and emits the build matrix;
 2. **build** — one matrix leg per changed app (`fail-fast: false`): mirror clone
    in `.cache/mirror/<app>.git`, fresh checkout, optional recursive submodule
    update (fcitx5), `git am -3` over the queue, version handling, Gradle release
@@ -314,10 +312,8 @@ NDK 28.0.13004108, CMake 3.31.6 and build-tools 36.1.0 SDK packages, and has a
 3. **publish** — `publish-fdroid.sh` keeps at most 3 APKs per package, dedupes by
    `(package, versionCode)`, signs the index with fdroidserver (`fdroid update`),
    commits `fdroid/repo` and `.build-state.json` with `[skip ci]`, and deploys
-   Pages. Failed legs keep their old state so the next run retries them, and
-   `record-check` advances the 10-day window only when the scheduled run
-   finished (a fallback build counts: its app keeps the old recorded head, so
-   the next window retries the new upstream);
+   Pages. Failed legs keep their old state, so the app's next watcher run
+   retries them;
 4. **failure** — opens or comments on a **“Patchwork build failed”** issue with
    the run link and a local reproduction command.
 
@@ -373,7 +369,7 @@ every downstream commit bumps `versionCode` even when upstream did not change.
 | ScreenTime | `13` / `"1.4.1"` | 4 | `1304` / `"1.4.1-patchwork"` |
 | RecurringExpenseTracker | `68` / `"0.21.4"` | 11 | `6811` / `"0.21.4-patchwork"` |
 | Fcitx5 for Android | `112` (arm64-v8a) / `"0.1.3"` | 7 | `11207` / `"0.1.3-patchwork"` |
-| BasicSync | `256048` / `"3.29"` | 1 | `25604800` / `"3.29-patchwork"` |
+| BasicSync | `256048` / `"3.29"` | 2 | `25604802` / `"3.29-patchwork"` |
 | Gadgetbridge | `257` / `"2026.11.1"` | 5 | `25700` / `"2026.11.1-patchwork"` |
 
 For fcitx5 the upstream code is itself ABI-dependent

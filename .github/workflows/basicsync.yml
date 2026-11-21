@@ -1,0 +1,33 @@
+name: BasicSync watch
+
+# basicsync has its own watcher: a push only starts it when it touches
+# apps/basicsync/, a daily cron builds only once the 10-day window has passed and
+# the upstream branch moved, and a manual dispatch always builds. The shared
+# body lives in app-watch.yml; the build itself is the patchwork builder
+# dispatched with app=basicsync.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/basicsync/**'
+      - '.github/workflows/basicsync.yml'
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+concurrency:
+  group: basicsync-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    uses: ./.github/workflows/app-watch.yml
+    with:
+      app: basicsync
+      trigger: ${{ github.event_name == 'push' && 'push' || (github.event_name == 'schedule' && 'schedule' || 'manual') }}

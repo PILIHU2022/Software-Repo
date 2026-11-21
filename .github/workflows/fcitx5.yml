@@ -1,0 +1,33 @@
+name: Fcitx5 for Android watch
+
+# fcitx5 has its own watcher: a push only starts it when it touches
+# apps/fcitx5/, a daily cron builds only once the 10-day window has passed and
+# the upstream branch moved, and a manual dispatch always builds. The shared
+# body lives in app-watch.yml; the build itself is the patchwork builder
+# dispatched with app=fcitx5.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/fcitx5/**'
+      - '.github/workflows/fcitx5.yml'
+  schedule:
+    - cron: '35 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+concurrency:
+  group: fcitx5-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    uses: ./.github/workflows/app-watch.yml
+    with:
+      app: fcitx5
+      trigger: ${{ github.event_name == 'push' && 'push' || (github.event_name == 'schedule' && 'schedule' || 'manual') }}

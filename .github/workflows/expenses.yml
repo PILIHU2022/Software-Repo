@@ -1,0 +1,33 @@
+name: RecurringExpenseTracker watch
+
+# expenses has its own watcher: a push only starts it when it touches
+# apps/expenses/, a daily cron builds only once the 10-day window has passed and
+# the upstream branch moved, and a manual dispatch always builds. The shared
+# body lives in app-watch.yml; the build itself is the patchwork builder
+# dispatched with app=expenses.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/expenses/**'
+      - '.github/workflows/expenses.yml'
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+concurrency:
+  group: expenses-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    uses: ./.github/workflows/app-watch.yml
+    with:
+      app: expenses
+      trigger: ${{ github.event_name == 'push' && 'push' || (github.event_name == 'schedule' && 'schedule' || 'manual') }}
