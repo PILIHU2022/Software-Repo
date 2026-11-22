@@ -1,8 +1,8 @@
-From 8cedbc8eaf3cdac2c4ed39da8ce621c2db79e33d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 15:15:01 +0800
-Subject: [PATCH 1/4] Allow the patchwork overlay to pin the version and build
- one ABI
+Subject: [PATCH] Allow the patchwork overlay to pin the version and build one
+ ABI
 
 BasicSync derives versionCode/versionName from git describe, which packs the
 commit count into 5 bits and the ABI into 3 bits. A long-lived patch queue would
@@ -71,6 +71,3 @@ index 6356171..2d184e8 100644
      }
  
      variant.sources.assets!!.addGeneratedSourceDirectory(archive) {
--- 
-2.56.1
-

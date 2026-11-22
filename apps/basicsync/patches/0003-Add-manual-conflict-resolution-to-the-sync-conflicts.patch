@@ -1,7 +1,7 @@
-From 611352d6eba75f76a29fd1f566fb87d2fe23e62d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 15:15:09 +0800
-Subject: [PATCH 3/4] Add manual conflict resolution to the sync conflicts page
+Subject: [PATCH] Add manual conflict resolution to the sync conflicts page
 
 The conflicts page used to be a read-only list that could only open the parent
 directory in DocumentsUI, so conflicts always had to be resolved with a file
@@ -1408,6 +1408,3 @@ index 0000000..11d0095
 +    <!-- Error shown when the conflict entry does not contain enough information to resolve it. -->
 +    <string name="conflict_error_unknown">This conflict cannot be resolved automatically.</string>
 +</resources>
--- 
-2.56.1
-

@@ -1,7 +1,7 @@
-From 8d8a268b5ccfdd2068c3e1f3e506b5b2aab8aeeb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 15:15:06 +0800
-Subject: [PATCH 2/4] Add a navigation drawer and make the web UI the main page
+Subject: [PATCH] Add a navigation drawer and make the web UI the main page
 
 Syncthing's web UI is what the app is used for, but it used to be three taps
 deep in the settings list. Show it directly when the app starts and put the
@@ -1429,6 +1429,3 @@ index 0000000..f44f54b
 +    <!-- Button that starts Syncthing from the sync page. -->
 +    <string name="main_sync_not_running_action">Start Syncthing</string>
 +</resources>
--- 
-2.56.1
-

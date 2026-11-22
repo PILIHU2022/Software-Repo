@@ -1,8 +1,7 @@
-From 435ce78293d93204dca3105fd59e1fb37ced97ce Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 15:15:09 +0800
-Subject: [PATCH 4/4] CHANGELOG: Note the navigation drawer and conflict
- resolution
+Subject: [PATCH] CHANGELOG: Note the navigation drawer and conflict resolution
 
 ---
  CHANGELOG.md | 2 ++
@@ -21,6 +20,3 @@ index d9beacf..a191023 100644
  
  ### Version 3.29
  
--- 
-2.56.1
-
