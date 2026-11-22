@@ -1,8 +1,7 @@
-From 41974245f6d6ff7a268f76453df33266a727eea2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 12:09:13 +0800
-Subject: [PATCH 17/17] perf(app): switch page transitions to a single moving
- layer
+Subject: [PATCH] perf(app): switch page transitions to a single moving layer
 
 The slide+fade transition alpha-blended two full-screen pages for the whole
 ~400ms animation, which cost 11-17ms of GPU time per frame at 60Hz (measured
@@ -82,6 +81,3 @@ index 48937f74..5b5f609e 100644
              },
              label = "settings-page",
          ) { route ->
--- 
-2.56.1
-

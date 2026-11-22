@@ -1,7 +1,7 @@
-From ad6c35d25d770f6285b1505bdaebf54b10254041 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 11:48:58 +0800
-Subject: [PATCH 16/17] perf(app): drop the per-row card shadows
+Subject: [PATCH] perf(app): drop the per-row card shadows
 
 Every SettingsRow / preference / info card carried a 1dp elevation shadow. The
 settings design is tonal, so the shadow is invisible but costs GPU time on
@@ -72,6 +72,3 @@ index ee91d15d..56d4ce54 100644
      ) {
          Column(
              modifier = Modifier.padding(start = 20.dp, top = 14.dp, end = 20.dp, bottom = 10.dp),
--- 
-2.56.1
-

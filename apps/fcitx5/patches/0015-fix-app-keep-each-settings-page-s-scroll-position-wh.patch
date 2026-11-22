@@ -1,8 +1,8 @@
-From 9a943c32bf2729d0612df5be06d055ac2990ece7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 11:19:21 +0800
-Subject: [PATCH 14/14] fix(app): keep each settings page's scroll position
- when navigating back
+Subject: [PATCH] fix(app): keep each settings page's scroll position when
+ navigating back
 
 AnimatedContent disposes the outgoing page once the enter transition ends, so the
 LazyColumn/TopAppBar state created by rememberSaveable inside the page was lost
@@ -50,6 +50,3 @@ index b1710857..1094389d 100644
          }
      }
  }
--- 
-2.56.1
-

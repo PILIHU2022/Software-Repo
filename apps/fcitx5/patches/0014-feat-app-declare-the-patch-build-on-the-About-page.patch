@@ -1,7 +1,7 @@
-From d6b838cebd47b4f7c0115a125c890cb6c2bc705d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 11:19:21 +0800
-Subject: [PATCH 13/14] feat(app): declare the patch build on the About page
+Subject: [PATCH] feat(app): declare the patch build on the About page
 
 A self-built APK should not look like an official release. Add a
 'Patchwork build' badge to the About header plus Build type / Upstream base rows
@@ -152,6 +152,3 @@ index b2f70596..97cdcbbf 100644
 +    <string name="about_patch_upstream_value">fcitx5-android 0.1.3</string>
 +    <string name="about_patch_note">This APK is a downstream patch build: upstream Fcitx5 for Android 0.1.3 plus local patches (Rime sync storage, config file manager, typing heatmap, Material 3 Expressive settings). It is not an official release and is not published by the Fcitx5 for Android project.</string>
  </resources>
--- 
-2.56.1
-

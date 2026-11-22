@@ -1,7 +1,7 @@
-From 359750da0e2a8f6c28a1ccf65986d65ecf8402a6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 11:41:11 +0800
-Subject: [PATCH 15/17] perf(app): make the release AOT-compilable and cut
+Subject: [PATCH] perf(app): make the release AOT-compilable and cut
  per-transition work
 
 Android installs debuggable APKs with the 'verify' dexopt filter and never
@@ -358,6 +358,3 @@ index e68f77f7..9edf974e 100644
  }
  
  /** Readable page title when the daemon has the addon/IME metadata, else the unique name. */
--- 
-2.56.1
-

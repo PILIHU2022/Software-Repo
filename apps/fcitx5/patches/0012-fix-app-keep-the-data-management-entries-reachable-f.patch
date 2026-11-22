@@ -1,7 +1,7 @@
-From 840d39285554de2bb777e8f1550d0084c1a428ec Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: DeepSeek Harness <noreply@deepseek.com>
 Date: Sat, 21 Nov 2026 10:53:47 +0800
-Subject: [PATCH 1/2] fix(app): keep the data-management entries reachable from
+Subject: [PATCH] fix(app): keep the data-management entries reachable from
  Compose advanced
 
 The Compose rewrite of the settings UI replaced the Advanced page with the
@@ -161,51 +161,3 @@ index b821aa6a..b2f70596 100644
 +    <string name="advanced_legacy_title">Classic advanced settings</string>
 +    <string name="advanced_legacy_summary">Export/import user data, backups and all-files access</string>
  </resources>
--- 
-2.56.1
-
-
-From 0216351e81da621366fa0c443c7aac755dda9f6b Mon Sep 17 00:00:00 2001
-From: DeepSeek Harness <noreply@deepseek.com>
-Date: Sat, 21 Nov 2026 11:03:51 +0800
-Subject: [PATCH 2/2] docs: note the classic advanced escape hatch in the
- Compose migration doc
-
----
- docs/settings-compose-migration.md | 13 ++++++++++++-
- 1 file changed, 12 insertions(+), 1 deletion(-)
-
-diff --git a/docs/settings-compose-migration.md b/docs/settings-compose-migration.md
-index 5d860093..405c652d 100644
---- a/docs/settings-compose-migration.md
-+++ b/docs/settings-compose-migration.md
-@@ -21,7 +21,7 @@ The input view (keyboard, candidate bar, popups) is untouched.
- | Candidates | `candidates` | ✅ Compose (same mechanism) |
- | Clipboard | `clipboard` | ✅ Compose (same mechanism) |
- | Emoji & symbols | `symbol` | ✅ Compose (same mechanism) |
--| Advanced | `advanced` | ✅ Compose (same mechanism) |
-+| Advanced | `advanced` | ✅ Compose (same mechanism) + 「Classic advanced settings」row → `SettingsRoute.Advanced` |
- | About | `about` | ✅ Compose (version, links, build info, credits) |
- | Licenses | `license` | ✅ Compose via AboutLibraries (`R.raw.aboutlibraries`) |
- | Plugins | `plugin` | ✅ Compose (loaded/failed plugins, plugin-change detection, `FcitxDaemon.restartFcitx`) |
-@@ -31,6 +31,17 @@ The input view (keyboard, candidate bar, popups) is untouched.
- | File manager | `files` | ⏳ legacy (`openNative`) |
- | Quick phrase / punctuation / table IM / pinyin dict editors | — | ⏳ legacy (reachable from RawConfig external actions) |
- 
-+## Legacy escape hatch
-+
-+The managed-preference model only knows descriptor-driven rows, so the custom rows of
-+the old `AdvancedSettingsFragment` (export/import user data, automatic backups,
-+all-files access, browse user data directory, Syncthing Rime profile) are not rendered
-+in Compose. The Compose `advanced` page therefore ends with a
-+**Classic advanced settings** card that calls `SettingsNavigator.openNative("advanced")`
-+(`SettingsRoute.Advanced`). `MainActivity.openNativeSettings` now sends
-+`Intent.ACTION_RUN` with the route extra: `ACTION_MAIN` dropped the extra and, while a
-+setup page was pending (Fcitx5 not the default IME), detoured through `SetupActivity`.
-+
- ## Architecture
- 
- - `MainActivity` : `ComponentActivity`, `enableEdgeToEdge()`, `setContent { FcitxSettingsTheme { SettingsApp(...) } }`.
--- 
-2.56.1
-
