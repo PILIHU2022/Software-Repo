@@ -12,7 +12,7 @@ Subject: [PATCH] Restore official backups by closing and restarting the
  4 files changed, 92 insertions(+), 16 deletions(-)
 
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index d87ad8b..8c40201 100644
+index 80582d5..be830c3 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -78,6 +78,7 @@ androidComponents {
