@@ -80,9 +80,8 @@ diff --git a/app/browser.go b/app/browser.go
 index 5455998..2613279 100644
 --- a/app/browser.go
 +++ b/app/browser.go
-@@ -142,7 +142,13 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
- 		l.glides = map[int64]rowGlide{}
- 	}
+@@ -138,6 +138,12 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 	now := c.Now()
  	a.listHeader(c, t, p, cols)
 -	list := ui.List(c, &l.list, len(l.files)+1).Grow(1).Padding(0, 10, 16)
 +	// The maker is a row after the files only while files are dragged over
