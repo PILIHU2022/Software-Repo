@@ -52,7 +52,7 @@ issue，而不是继续发布过期代码。
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `ec95b22` | 11 | `1.4.2-patchwork`（1405，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 17 | `0.1.3-patchwork`（11207，arm64-v8a） |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `74b1dea` | 4 | `3.29-patchwork`（25604802，arm64-v8a） |
-| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `93d4d79` | 5 | `2026.11.1-patchwork`（25700） |
+| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `93d4d79` | 6 | `2026.11.1-patchwork`（25700） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 48 | `0.8.3.48` —— 上游 `0.8.3` + 48 个补丁（linux/windows x86、Arch 包；Release + feed） |
 | BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 48 | `0.8.3-patchwork`（80348 —— 上游 803 × 100 + 48 个补丁） |
 
@@ -94,22 +94,32 @@ Rime 配置」，也可用
 设置时行为与上游完全一致，官方/F-Droid 构建不受影响。只发布 `arm64-v8a`
 （上游按 ABI 拆包、没有 universal APK），APK 约 52 MB。
 
-**Gadgetbridge** —— 不用厂商应用也能用手环/手表。补丁队列在上游之上加五个补丁：
+**Gadgetbridge** —— 不用厂商应用也能用手环/手表。补丁队列在上游之上加六个补丁：
 
 * **界面迁移到 Jetpack Compose + Material 3 Expressive**：设置树（首页、每个子页面、
   搜索）、首次运行引导、关于页与睡眠评分面板都是 Compose 渲染，其余仍走 XML 的
   页面则通过统一的 Expressive 圆角叠加获得同样的观感，改主题/强调色时两套界面一致；
+* **首次运行权限页支持一次点击依次申请全部权限**：先批量申请运行时权限，再打开
+  “不限制后台用电”，随后继续通知访问、自启动等特殊权限；每个系统权限仍需逐项确认，
+  如果直接请求电池豁免不可用，会回退到系统的电池优化列表；
 * **基于年龄的睡眠评分**：设备自己不上报评分时，用已记录的睡眠阶段对照该年龄建议的
   睡眠时长打分（含深睡占比、REM 占比与睡眠效率），显示在日/周图表与仪表板小组件里，
-  **点圆环可展开评分构成**，并可在图表设置里关闭；
+  **点圆环可展开评分构成**，并可在图表设置里关闭。睡眠按醒来日归属：21 日
+  23:00 至 22 日 07:00 的一夜计入 22 日；
 * **每次打开应用都备份**——那是进程一定还活着、一定允许写的时刻——有独立的设置
   分类、保留天数、可更改的备份文件夹与「恢复默认目录」，不再只依赖被国产 ROM
   经常跳过的 WorkManager；
 * **数据库导出先写临时文件**、校验 SQLite 头，通过后才写入目标，因此授权失效、
   文档被移动等失败不会再截断上一份备份，导出位置为空时也会明确报错；
-* **小米协议的音乐与校时不再自相矛盾**：每次变化只下发一份完整快照（播放状态、
-  标题、歌手、进度、时长），不再是元数据包与状态包互相覆盖；Release 构建由环境变量
-  提供的密钥签名；连接后手环回一次设备状态再补发一次时间。
+* **小米协议的音乐与校时不再自相矛盾**：播放状态或元数据变化时下发完整快照
+  （播放状态、标题、歌手、进度、时长），未变化的重复包不再发送，只有状态的回调
+  不会再吞掉先到的元数据更新，元数据更新也不会把手环重置成“正在播放、0:00”；
+  Release 构建由环境变量提供的密钥签名；连接后手环回一次设备状态再补发一次时间；
+* **下滑刷新不会永久卡住**：设备未连接、仍在初始化或上一次同步尚未结束时，刷新
+  请求可能被跳过；主界面现在会结束这个等不到完成广播的转圈状态，避免
+  `SwipeRefreshLayout` 吞掉之后的手势。正常完成的取数仍由原有广播收尾；30 秒是
+  等待上限，较慢的同步也可能先隐藏转圈、继续在后台进行。设备就绪后可以直接再次
+  下拉同步。
 
 Release APK 由本仓库签名而不是上游：`PATCHWORK_SIGN_*` 交给队列里的一个小构建补丁，
 所以 F-Droid 仓库里的包名与官方一致、签名不同。
@@ -206,8 +216,10 @@ https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/fdroid/repo
 每个已发布应用的 512×512 图标源在 `fdroid/icons-src/<package>.png`。发布脚本会把它
 复制到 `fdroid/repo/<package>/en-US/icon.png`（index-v2）和
 `fdroid/repo/icons/<package>.<versionCode>.png`（旧 index-v1），随后给 index-v1 补
-`icon` 字段并重新签名——这些 APK 用的是自适应 XML 图标，`fdroid update` 无法直接
-提取，所以图标由仓库提供。新增 app 时记得添加对应的图标源文件。
+`icon` 字段并重新签名。新增包时 `fdroid update` 可能顺带删掉其他包已有的
+content-addressed index-v2 图标，图标脚本会从同一批源文件恢复它们。这些 APK 用的是
+自适应 XML 图标，`fdroid update` 无法直接提取，所以图标由仓库提供。新增 app 时
+记得添加对应的图标源文件。
 
 ## 自动化流程
 

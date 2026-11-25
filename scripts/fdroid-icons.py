@@ -2,9 +2,10 @@
 """Keep the F-Droid index icons in sync with fdroid/icons-src/.
 
 `fdroid update` extracts icons from APKs, but the apps here use adaptive
-(XML) launcher icons, which fdroidserver cannot rasterize.  The per-app
-graphics in repo/<package>/<locale>/icon.png fix index-v2; this script adds the
-legacy index-v1 `icon` field (and `--check` verifies both indexes).
+(XML) launcher icons, which fdroidserver cannot rasterize.  It can also prune
+content-addressed index-v2 icons when a new package is added.  This script
+restores both forms from the per-app icon sources, adds the legacy index-v1
+`icon` field, and lets `--check` verify both indexes.
 
 Usage:
   scripts/fdroid-icons.py --repo fdroid/repo
@@ -12,6 +13,7 @@ Usage:
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -51,7 +53,79 @@ def choose_icon(icons, package, preferred):
     return max(candidates)[1]
 
 
+def icon_source(repo, package, locale):
+    """Return the best source icon for a package and locale."""
+    for path in (
+        repo.parent / "icons-src" / f"{package}.png",
+        repo / package / locale / "icon.png",
+    ):
+        if path.is_file():
+            return path
+    return None
+
+
+def restore_index_v2_icons(repo):
+    """Restore content-addressed icons that fdroid update may have pruned.
+
+    When a new package is added, fdroidserver can drop the existing
+    repo/<package>/<locale>/icon_<hash>.png files while keeping the old
+    references in index-v2.json.  The index is then inconsistent until the
+    files are put back, so copy the source icon to the name and hash the index
+    already expects (or update both when the source changed).
+    """
+    index = repo / "index-v2.json"
+    if not index.is_file():
+        return 0
+
+    data = load(index)
+    changed = 0
+    for package, entry in data.get("packages", {}).items():
+        icon = entry.get("metadata", {}).get("icon")
+        if not isinstance(icon, dict):
+            continue
+        for locale, meta in icon.items():
+            if not isinstance(meta, dict):
+                continue
+            name = meta.get("name")
+            expected = meta.get("sha256")
+            target = repo / name.lstrip("/") if isinstance(name, str) else None
+            if target is not None and target.is_file():
+                if not expected or sha256(target) == expected:
+                    continue
+
+            source = icon_source(repo, package, locale)
+            if source is None:
+                print(f"    no icon source for {package} ({locale})")
+                continue
+
+            content = source.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            if not isinstance(name, str) or digest != expected:
+                encoded = base64.urlsafe_b64encode(
+                    bytes.fromhex(digest)
+                ).decode("ascii")
+                name = f"/{package}/{locale}/icon_{encoded}.png"
+                meta["name"] = name
+                meta["sha256"] = digest
+                meta["size"] = len(content)
+                target = repo / name.lstrip("/")
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            print(f"    restored {package} ({locale}): {target.relative_to(repo)}")
+            changed += 1
+
+    if changed:
+        with index.open("w", encoding="utf-8") as fp:
+            json.dump(data, fp, separators=(",", ":"))
+    else:
+        print("    index-v2 icons already current")
+    return changed
+
+
 def patch(repo):
+    restore_index_v2_icons(repo)
+
     index = repo / "index-v1.json"
     if not index.is_file():
         raise SystemExit(f"missing {index}")
@@ -64,6 +138,17 @@ def patch(repo):
             continue
         name = choose_icon(icons, package, app.get("suggestedVersionCode"))
         if name is None:
+            source = icon_source(repo, package, "en-US")
+            code = app.get("suggestedVersionCode")
+            if source is not None and code:
+                name = f"{package}.{code}.png"
+                target = icons / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+                print(f"    restored legacy icon {package} ({code})")
+                changed += 1
+                app["icon"] = name
+                continue
             print(f"    no icon for {package} (add fdroid/icons-src/{package}.png)")
             continue
         if app.get("icon") != name:

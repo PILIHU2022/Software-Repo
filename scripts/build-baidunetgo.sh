@@ -205,16 +205,30 @@ prepare() {
 }
 
 apply_queue() {
-    local patch
+    local patch filtered
     # --keep-cr: the queue is exported from the authoring clone's main, which
     # now carries the Android client with a CRLF gradlew.bat. Plain `git am`
     # strips every trailing CR (mailinfo treats the patch as CRLF-formatted
     # mail), so the replayed tree would silently diverge from the authoring
     # tree in exactly that file. Patches without CRs are unaffected.
+    #
+    # Markdown files are excluded on purpose. Upstream rewrites its own
+    # AGENTS.md/CLAUDE.md/README.md/CHANGELOG.md regularly, and a stale
+    # documentation hunk must not block a build of code that still applies.
+    # Docs-only patches become empty and `--empty=drop` skips them.
     for patch in "$@"; do
-        if git -C "$WORK" am -q -3 --keep-cr "$patch"; then
+        filtered="$(mktemp)"
+        if awk '
+            /^diff --git / {
+                skip = ($0 ~ / b\/[^ ]+\.md$/)
+            }
+            !skip { print }
+        ' "$patch" >"$filtered" \
+            && git -C "$WORK" am -q -3 --keep-cr --empty=drop "$filtered"; then
+            rm -f "$filtered"
             continue
         fi
+        rm -f "$filtered"
         describe_failure "$patch"
         return 1
     done

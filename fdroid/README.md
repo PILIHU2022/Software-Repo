@@ -17,6 +17,8 @@ Each published package has a 512x512 source icon at
 `fdroid/icons-src/<package>.png`. `scripts/publish-fdroid.sh` copies it to
 `repo/<package>/en-US/icon.png` (index-v2) and
 `repo/icons/<package>.<versionCode>.png` (legacy index-v1) before running
-`fdroid update`, then adds the `icon` field to index-v1 and re-signs both
+`fdroid update`. `fdroid update` may prune the content-addressed icon files
+of packages it did not rebuild, so `scripts/fdroid-icons.py` restores those,
+adds the `icon` field to index-v1, and the publish script re-signs both
 `index-v1.jar` and `entry.jar`. Add an icon source when adding an app: without
 one the pipeline warns, and `scripts/fdroid-icons.py --check` fails.

@@ -46,7 +46,7 @@ filters and FAIL_ON_PROJECT_REPOS), and the Gradle wrapper downloads from the
 Tencent mirror, whose archive is byte-identical to the official one and is still
 verified with the existing sha256.
 ---
- app/build.gradle                              |  24 +
+ app/build.gradle.kts                          |  24 +
  app/src/debug/res/values/strings.xml          |   8 +
  .../activities/AboutActivity.java             |  71 --
  .../gadgetbridge/activities/AboutActivity.kt  |  51 ++
@@ -73,7 +73,7 @@ verified with the existing sha256.
  .../screens/navigation/GbNavigationDrawer.kt  | 271 +++++++
  .../compose/screens/settings/AboutScreen.kt   | 378 +++++++++
  .../screens/settings/ComposeScreenInsets.kt   |  48 ++
- .../settings/OnOpenBackupSettingsScreen.kt    | 691 +++++++++++++++++
+ .../settings/OnOpenBackupSettingsScreen.kt    | 700 +++++++++++++++++
  .../screens/settings/prefs/PrefsModel.kt      | 424 +++++++++++
  .../screens/settings/prefs/PrefsScreen.kt     | 719 ++++++++++++++++++
  .../screens/settings/prefs/PrefsScreenHost.kt |  72 ++
@@ -81,7 +81,7 @@ verified with the existing sha256.
  .../ui/compose/screens/welcome/WelcomeHero.kt | 138 ++++
  .../screens/welcome/WelcomePageIndicator.kt   |  69 ++
  .../compose/screens/welcome/WelcomePages.kt   | 298 ++++++++
- .../screens/welcome/WelcomePermissionsPage.kt | 263 +++++++
+ .../screens/welcome/WelcomePermissionsPage.kt | 338 ++++++++
  .../compose/screens/welcome/WelcomeScreen.kt  | 272 +++++++
  .../screens/welcome/WelcomeThemeSection.kt    |  85 +++
  .../ui/compose/theme/GbColorScheme.kt         | 136 ++++
@@ -114,7 +114,7 @@ verified with the existing sha256.
  gradle/libs.versions.toml                     |  19 +
  gradle/wrapper/gradle-wrapper.properties      |   6 +-
  settings.gradle.kts                           |  26 +-
- 68 files changed, 5907 insertions(+), 1535 deletions(-)
+68 files changed, 5991 insertions(+), 1535 deletions(-)
  create mode 100644 app/src/debug/res/values/strings.xml
  delete mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/AboutActivity.java
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/AboutActivity.kt
@@ -164,22 +164,31 @@ verified with the existing sha256.
  create mode 100644 app/src/main/res/values/strings_compose_welcome.xml
  create mode 100644 app/src/main/res/values/styles_expressive.xml
 
-diff --git a/app/build.gradle b/app/build.gradle
-index 3c6171cb45..55dfa13cf2 100644
---- a/app/build.gradle
-+++ b/app/build.gradle
-@@ -7,6 +7,7 @@ import java.nio.file.Files
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 0ab59e97eb97..5398245eb589 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -9,7 +9,8 @@ plugins {
  plugins {
+     id("gadgetbridge.git")
      alias(libs.plugins.android.application)
      alias(libs.plugins.kotlin.parcelize)
 +    alias(libs.plugins.kotlin.compose)
      alias(libs.plugins.kaitai)
      alias(libs.plugins.ksp)
      alias(libs.plugins.hilt)
-@@ -161,6 +162,13 @@ android {
-         //    proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-         //}
+@@ -92,6 +93,7 @@ android {
+     buildFeatures {
+         aidl = true
+         buildConfig = true
+         viewBinding = true
++        compose = true
+         resValues = true
+     }
+@@ -148,7 +150,14 @@ android {
+     }
  
+     buildTypes {
 +        // The debug build installs under its own application id, so that it can live next to the
 +        // production app (or a nightly) without ever replacing it or touching its data.
 +        getByName("debug") {
@@ -188,18 +197,12 @@ index 3c6171cb45..55dfa13cf2 100644
 +        }
 +
          getByName("release") {
-             minifyEnabled = true
+             isMinifyEnabled = true
              proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-@@ -207,6 +215,7 @@ android {
-         aidl = true
-         buildConfig = true
-         viewBinding = true
-+        compose = true
-         // AGP 9 defaults to false, but we still use it in the androidComponents.onVariants block below
-         resValues = true
-     }
-@@ -283,6 +292,21 @@ dependencies {
- 
+         }
+@@ -279,7 +288,22 @@ dependencies {
+     implementation(libs.androidx.media3.exoplayer)
+     implementation(libs.androidx.media3.ui)
      implementation(libs.material)
      implementation(libs.flexbox)
 +
@@ -217,9 +220,9 @@ index 3c6171cb45..55dfa13cf2 100644
 +    implementation(libs.androidx.lifecycle.viewmodel.compose)
 +    debugImplementation(libs.androidx.compose.ui.tooling)
 +    debugImplementation(libs.androidx.compose.ui.test.manifest)
-     implementation(libs.gson)
  
-     implementation(libs.dfu)
+     // DI & Annotation Processing
+     implementation(libs.hilt.android)
 diff --git a/app/src/debug/res/values/strings.xml b/app/src/debug/res/values/strings.xml
 new file mode 100644
 index 0000000000..4a05742f2b
@@ -3062,7 +3065,7 @@ new file mode 100644
 index 0000000000..703fb46403
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
-@@ -0,0 +1,691 @@
+@@ -0,0 +1,700 @@
 +/*  Copyright (C) 2026 Gadgetbridge contributors
 +
 +    This file is part of Gadgetbridge.
@@ -3219,7 +3222,16 @@ index 0000000000..703fb46403
 +                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
 +            )
 +        } catch (e: SecurityException) {
-+            LOG.warn("Failed to take the persistable uri permission for {}", uri, e)
++            // Some tree providers grant write access without read access. Taking both flags then
++            // fails as a whole, so persist the write grant that the backup actually needs.
++            try {
++                context.contentResolver.takePersistableUriPermission(
++                    uri,
++                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
++                )
++            } catch (writeError: SecurityException) {
++                LOG.warn("Failed to take the persistable uri permission for {}", uri, writeError)
++            }
 +        }
 +
 +        OnOpenBackupPrefs.setLocation(uri.toString())
@@ -6018,10 +6030,10 @@ index 0000000000..6d7875f2e5
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/welcome/WelcomePermissionsPage.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/welcome/WelcomePermissionsPage.kt
 new file mode 100644
-index 0000000000..ffe876d1f1
+index 0000000000..1904271f10
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/welcome/WelcomePermissionsPage.kt
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,338 @@
 +/*  Copyright (C) 2026 Gadgetbridge contributors
 +
 +    This file is part of Gadgetbridge.
@@ -6042,9 +6054,15 @@ index 0000000000..ffe876d1f1
 +
 +package nodomain.freeyourgadget.gadgetbridge.ui.compose.screens.welcome
 +
++import android.Manifest
 +import android.app.Activity
 +import android.content.Context
 +import android.content.ContextWrapper
++import android.content.Intent
++import android.net.Uri
++import android.os.Build
++import android.os.PowerManager
++import android.provider.Settings
 +import androidx.activity.compose.rememberLauncherForActivityResult
 +import androidx.activity.result.contract.ActivityResultContracts
 +import androidx.compose.foundation.layout.Arrangement
@@ -6102,24 +6120,69 @@ index 0000000000..ffe876d1f1
 +    var refreshKey by remember { mutableIntStateOf(0) }
 +    // The special accesses that still have to be requested after the runtime request returns.
 +    var pendingSpecialPermissions by remember { mutableStateOf(emptyList<GBPermission>()) }
++    // True from the first tap until the runtime, battery and special-access steps have been consumed.
++    var allPermissionsRequestPending by remember { mutableStateOf(false) }
++    // Set while the battery exemption screen is in front, so returning does not open it again.
++    var batteryRequestAttempted by remember { mutableStateOf(false) }
 +    val requestQueue = remember { PermissionRequestQueue() }
++
++    val batteryOptimizationLauncher = rememberLauncherForActivityResult(
++        contract = ActivityResultContracts.StartActivityForResult(),
++    ) {
++        refreshKey++
++    }
++
++    fun requestBatteryOptimization(target: Activity): Boolean {
++        if (isBatteryOptimizationIgnored(context)) {
++            return false
++        }
++        val request = Intent(
++            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
++            Uri.parse("package:${target.packageName}"),
++        )
++        if (runCatching { batteryOptimizationLauncher.launch(request) }.isSuccess) {
++            return true
++        }
++        val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
++        return runCatching { batteryOptimizationLauncher.launch(fallback) }.isSuccess
++    }
++
++    fun startSpecialRequests(target: Activity, special: List<GBPermission>) {
++        val pending = special
++            .filterNot { it.isGranted(context) }
++            .filterNot { it.isBatteryOptimizationPermission() }
++        if (!batteryRequestAttempted && !isBatteryOptimizationIgnored(context)) {
++            pendingSpecialPermissions = pending
++            if (requestBatteryOptimization(target)) {
++                batteryRequestAttempted = true
++                return
++            }
++        }
++        batteryRequestAttempted = false
++        pendingSpecialPermissions = emptyList()
++        allPermissionsRequestPending = false
++        if (pending.isNotEmpty()) {
++            requestQueue.start(target, pending)
++        }
++    }
 +
 +    val runtimePermissionLauncher = rememberLauncherForActivityResult(
 +        contract = ActivityResultContracts.RequestMultiplePermissions(),
 +    ) {
 +        refreshKey++
-+        val target = activity
-+        val pending = pendingSpecialPermissions
-+        pendingSpecialPermissions = emptyList()
-+        if (target != null && pending.isNotEmpty()) {
-+            requestQueue.start(target, pending)
-+        }
 +    }
 +
 +    // The special accesses return to the activity, so the chain and the shown state are refreshed here.
 +    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
 +        refreshKey++
-+        activity?.let { requestQueue.resume(it) }
++        activity?.let { target ->
++            if (allPermissionsRequestPending) {
++                startSpecialRequests(target, pendingSpecialPermissions)
++            } else {
++                batteryRequestAttempted = false
++                requestQueue.resume(target)
++            }
++        }
 +    }
 +
 +    val available = remember(context) { GBPermission.entries.filter { it.isAvailable(context) } }
@@ -6129,16 +6192,25 @@ index 0000000000..ffe876d1f1
 +                .thenBy { context.getString(it.title).lowercase() },
 +        )
 +    }
-+    val allGranted = remember(sortedPermissions, refreshKey) {
-+        sortedPermissions.isNotEmpty() && sortedPermissions.all { it.isGranted(context) }
++    val batteryOptimizationGranted = remember(context, refreshKey) {
++        isBatteryOptimizationIgnored(context)
++    }
++    val allGranted = remember(sortedPermissions, refreshKey, batteryOptimizationGranted) {
++        batteryOptimizationGranted && sortedPermissions.all { it.isGranted(context) }
 +    }
 +
 +    /** The runtime permissions to hand to the launcher; already granted ones are skipped by the system. */
 +    fun runtimePermissionsOf(permissions: Collection<GBPermission>): List<String> = permissions
 +        .filterNot { it.isRequestedAlone }
 +        .flatMap { it.androidPermissions }
++        .filterNot { it == Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS }
 +        .filterNot { it in PermissionsUtils.specialPermissions }
 +        .distinct()
++
++    fun specialPermissionsOf(permissions: Collection<GBPermission>): List<GBPermission> = permissions
++        .filterNot { it.isGranted(context) }
++        .filterNot { it.isBatteryOptimizationPermission() }
++        .filter { it.isRequestedAlone }
 +
 +    WelcomePageContent(modifier) {
 +        WelcomeHero(icon = Icons.Filled.Lock)
@@ -6183,13 +6255,15 @@ index 0000000000..ffe876d1f1
 +                onClick = {
 +                    val target = activity
 +                    if (target != null) {
-+                        val special = available.filter { it.isRequestedAlone && !it.isGranted(context) }
++                        val special = specialPermissionsOf(available)
 +                        val runtime = runtimePermissionsOf(available)
++                        allPermissionsRequestPending = true
++                        batteryRequestAttempted = false
++                        pendingSpecialPermissions = special
 +                        if (runtime.isNotEmpty()) {
-+                            pendingSpecialPermissions = special
 +                            runtimePermissionLauncher.launch(runtime.toTypedArray())
-+                        } else if (special.isNotEmpty()) {
-+                            requestQueue.start(target, special)
++                        } else {
++                            startSpecialRequests(target, special)
 +                        }
 +                    }
 +                },
@@ -6209,7 +6283,9 @@ index 0000000000..ffe876d1f1
 +                onRequest = {
 +                    val target = activity
 +                    if (target != null) {
-+                        if (permission.isRequestedAlone) {
++                        if (permission.isBatteryOptimizationPermission()) {
++                            requestBatteryOptimization(target)
++                        } else if (permission.isRequestedAlone) {
 +                            permission.request(target)
 +                        } else {
 +                            val runtime = runtimePermissionsOf(listOf(permission))
@@ -6284,6 +6360,17 @@ index 0000000000..ffe876d1f1
 +        context = context.baseContext
 +    }
 +    return null
++}
++
++private fun GBPermission.isBatteryOptimizationPermission(): Boolean =
++    androidPermissions.any { it == Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS }
++
++private fun isBatteryOptimizationIgnored(context: Context): Boolean {
++    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
++        return true
++    }
++    val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
++    return powerManager.isIgnoringBatteryOptimizations(context.packageName)
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/welcome/WelcomeScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/welcome/WelcomeScreen.kt
 new file mode 100644
@@ -7665,13 +7752,13 @@ index 2bdcc2b656..0000000000
 -</RelativeLayout>
 \ No newline at end of file
 diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
-index 48662e8534..b6f6067894 100644
+index c88c903231..a3217c494b 100644
 --- a/app/src/main/res/values-zh-rCN/strings.xml
 +++ b/app/src/main/res/values-zh-rCN/strings.xml
-@@ -5997,4 +5997,29 @@
-     <string name="ninebot_search_title">搜索滑板车</string>
-     <string name="ninebot_search_summary">每三秒寻找滑板车，一找到就解锁它。使用更多手机电量。</string>
-     <string name="appmanager_everything_up_to_date_message">均为最新</string>
+@@ -6162,4 +6162,29 @@
+     <string name="sennheiser_momentum_3_transparent_pause_title">自动暂停音乐</string>
+     <string name="sennheiser_momentum_3_transparent_pause_summary">透明聆听激活时自动暂停音乐</string>
+     <string name="magic_touch_head_init_title">按摩头初始化</string>
 +    <string name="pref_header_backup">备份</string>
 +    <string name="backup_on_open_reset_default">恢复默认目录</string>
 +    <string name="backup_on_open_reset_default_done">已恢复默认备份目录</string>
@@ -7817,7 +7904,7 @@ index 0000000000..c32a3f8baa
 +    <string name="compose_welcome_overview_devices_title">设备</string>
 +    <string name="compose_welcome_permissions_granted">已授予</string>
 +    <string name="compose_welcome_permissions_all_granted">所有权限均已授予</string>
-+    <string name="compose_welcome_permissions_hint">你可以随时在应用的设置中查看这些权限。</string>
++    <string name="compose_welcome_permissions_hint">一次点击会依次打开系统确认页；电源管理和通知访问等权限仍需逐项确认。你可以随时在应用的设置中查看这些权限。</string>
 +</resources>
 diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
 index 2096bd5d2b..0f1f62565e 100644
@@ -8039,7 +8126,7 @@ index 0000000000..128bb8fdce
 +    <string name="compose_welcome_overview_devices_title">裝置</string>
 +    <string name="compose_welcome_permissions_granted">已授予</string>
 +    <string name="compose_welcome_permissions_all_granted">所有權限均已授予</string>
-+    <string name="compose_welcome_permissions_hint">你可以隨時在應用程式的設定中檢視這些權限。</string>
++    <string name="compose_welcome_permissions_hint">一次點擊會依次開啟系統確認頁；電源管理和通知存取等權限仍需逐項確認。你可以隨時在應用程式的設定中檢視這些權限。</string>
 +</resources>
 diff --git a/app/src/main/res/values/strings_compose_prefs.xml b/app/src/main/res/values/strings_compose_prefs.xml
 new file mode 100644
@@ -8169,7 +8256,7 @@ index 0000000000..7fa120f63b
 +    <string name="compose_welcome_overview_devices_title">Devices</string>
 +    <string name="compose_welcome_permissions_granted">Granted</string>
 +    <string name="compose_welcome_permissions_all_granted">All permissions are granted</string>
-+    <string name="compose_welcome_permissions_hint">You can review these permissions at any time in the settings of the app.</string>
++    <string name="compose_welcome_permissions_hint">One tap starts the sequence, but Android still asks you to confirm battery and notification access individually. You can review these permissions at any time in the app settings.</string>
 +</resources>
 diff --git a/app/src/main/res/values/styles_expressive.xml b/app/src/main/res/values/styles_expressive.xml
 new file mode 100644

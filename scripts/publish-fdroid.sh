@@ -239,10 +239,11 @@ if [[ -n "$GITKEEP_BACKUP" ]]; then
     GITKEEP_BACKUP=""
 fi
 
-# `fdroid update` only fills the icon field from APK raster icons, so patch the
-# legacy index-v1 after it wrote the JSON, then re-sign both index-v1.jar and
-# entry.jar.  index-v2 already points at repo/<package>/<locale>/icon.png.
-echo "==> Patching legacy index-v1 icons"
+# `fdroid update` only fills the icon field from APK raster icons, and adding a
+# new package can prune the content-addressed index-v2 icons of the others.
+# fdroid-icons.py restores those and patches the legacy index-v1 field, then
+# re-sign both index-v1.jar and entry.jar.
+echo "==> Repairing index icons"
 python3 "$ROOT/scripts/fdroid-icons.py" --repo "$REPO_DIR"
 echo "==> Re-signing index-v1 and entry"
 (

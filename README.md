@@ -49,7 +49,7 @@ code.
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `ec95b22` | 11 | `1.4.2-patchwork` (1405, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 17 | `0.1.3-patchwork` (11207, arm64-v8a) |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `74b1dea` | 4 | `3.29-patchwork` (25604802, arm64-v8a) |
-| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge) (`master`) | `93d4d79` | 5 | `2026.11.1-patchwork` (25700) |
+| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge) (`master`) | `93d4d79` | 6 | `2026.11.1-patchwork` (25700) |
 | BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 48 | `0.8.3.48` — upstream `0.8.3` + 48 patches (linux/windows x86, Arch package; Release + feed) |
 | BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 48 | `0.8.3-patchwork` (80348 — upstream 803 × 100 + 48 patches) |
 | DataArk | *in-tree* — source at [`dataark/`](dataark/) (no upstream; GPL-3.0, icon from [Android-DataBackup](https://github.com/XayahSuSuSu/Android-DataBackup)) | — | — | `1.0.0` — full source committed, not a patch queue; CI is dormant (see below) |
@@ -130,18 +130,26 @@ and no universal APK), and the APK is
 about 52 MB.
 
 **Gadgetbridge** — Bluetooth wearables without the vendor's app. The queue
-starts from upstream and adds five patches:
+starts from upstream and adds six patches:
 
 * the **user interface runs on Jetpack Compose + Material 3 Expressive**: the
   settings tree (home, every sub-screen, the search), the first-run guide, the
   About page and the sleep score sheet are Compose, and the remaing XML screens
   inherit the larger Expressive shapes, so a settings change or a theme switch
   looks the same everywhere;
+* the **first-run permissions page starts the full permission sequence with
+  one tap**: it asks for the runtime permissions in one batch, then opens the
+  unrestricted background battery screen and continues with notification
+  access, autostart and the other special accesses. Android still requires each
+  system confirmation; if the direct battery exemption screen is unavailable it
+  falls back to the system battery optimization list;
 * an **age-based sleep score**: when the device reports no score of its own, the
   recorded sleep stages are scored against the sleep duration recommended for
   the user's age (deep sleep share, REM share and efficiency included), shown in
   the day and week charts and in the dashboard widget, with a **breakdown sheet
-  behind the score ring** and a chart setting to turn it off;
+  behind the score ring** and a chart setting to turn it off. A night is
+  attributed to the day it ends on, so a 23:00–07:00 session counts toward the
+  wake-up day;
 * a **backup that runs on every app open** — the one moment the process is
   guaranteed to be alive — with its own settings page, a retention period, a
   changeable folder and a reset action, instead of relying on WorkManager, which
@@ -150,11 +158,19 @@ starts from upstream and adds five patches:
   header and only then replaces the target, so a failing run (a revoked SAF
   grant, a moved document) can no longer truncate the previous backup, and a
   missing location is reported rather than silently skipped;
-* the **Xiaomi music and time paths are made consistent**: one complete music
-  snapshot per change (state, title, artist, position, duration) instead of a
-  metadata packet and a state packet that overwrite each other, a finished
-  release build signed from the environment, and the clock re-sent once per
-  connection after the watch answers a device state request.
+* the **Xiaomi music and time paths are made consistent**: a complete music
+  snapshot (state, title, artist, position, duration) whenever metadata or
+  playback state changes, identical repeats are no longer sent, a state-only
+  callback can no longer drop a pending metadata update, and a metadata update
+  no longer resets the watch to playing at 0:00; a finished release build signed
+  from the environment, and the clock re-sent once per connection after the
+  watch answers a device state request;
+* a **pull-to-refresh that cannot stay stuck**: if a refresh is skipped because
+  the device is disconnected, still initializing or already busy, the dashboard
+  now ends the orphaned spinner instead of letting it consume every later pull;
+  normal fetches still end through the existing completion broadcast, while the
+  30-second bound can also hide the indicator of a slower sync that keeps running
+  in the background.
 
 The release APK is signed here rather than upstream: `PATCHWORK_SIGN_*` feeds a
 small build patch, so the F-Droid repository serves a build whose package name
@@ -276,9 +292,11 @@ Every published app has a 512x512 source icon at
 `fdroid/icons-src/<package>.png`. The publish script copies it to
 `fdroid/repo/<package>/en-US/icon.png` (index-v2) and
 `fdroid/repo/icons/<package>.<versionCode>.png` (legacy index-v1), then adds the
-`icon` field to index-v1 and re-signs it. These APKs use adaptive XML launcher
-icons, which `fdroid update` cannot extract, so the repository ships the icons
-itself. Add the matching icon source when adding an app.
+`icon` field to index-v1 and re-signs it. `fdroid update` can prune existing
+content-addressed index-v2 icons while indexing a newly added package, so the
+icon helper restores those from the same sources. These APKs use adaptive XML
+launcher icons, which `fdroid update` cannot extract, so the repository ships
+the icons itself. Add the matching icon source when adding an app.
 
 ## How automation works
 
