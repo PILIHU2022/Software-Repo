@@ -161,10 +161,11 @@ index 98a84e6..bb6fac0 100644
  	l.sole = 0
  	if files := l.chosen(); len(files) == 1 {
  		l.sole = files[0].FsID
-@@ -154,7 +156,9 @@ func (a *App) bindListState(l *listing) {
+@@ -154,8 +156,10 @@ func (a *App) bindListState(l *listing) {
  	l.list.Header = func(i int) bool { return i == len(files) }
  	l.list.Selected = &l.selected
  	l.list.Selection = &l.sel
+ 	l.list.MoveAnimation = &motionPanel
 -	l.list.DragSelect = true // a drag over the rows chooses them, as in Finder
 +	// MyGo's DragSelect is off: a drag over a row means moving the files,
 +	// and the rubber band chooses rows itself, by the rectangle (marquee).
@@ -172,14 +173,11 @@ index 98a84e6..bb6fac0 100644
  }
  
  func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
-@@ -162,6 +166,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+@@ -163,3 +163,4 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 	a.bindListState(l)
  	now := c.Now()
- 	tops := a.rowTops(l, now)
- 	l.rowsBuilt = map[int64]float32{}
 +	l.rowRects = map[int64]ui.Rect{}
- 	if l.glides == nil {
- 		l.glides = map[int64]rowGlide{}
- 	}
+ 	a.listHeader(c, t, p, cols)
 @@ -265,6 +270,9 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
  				figure(c, when).Width(colTime).TextAlign(ui.End).TextColor(muted)
  			}
@@ -1045,9 +1043,9 @@ index 3f9b7fa..ab0948d 100644
 --- a/app/files.go
 +++ b/app/files.go
 @@ -38,27 +38,45 @@ type listing struct {
- 	sole     int64 // the file chosen alone in the last frame, else 0
- 	refocus  bool  // the files take the focus back, from a name edited
- 	over     bool  // files dragged over the window, which light the maker
+ 	sole     int64   // the file chosen alone in the last frame, else 0
+ 	refocus  bool    // the files take the focus back, from a name edited
+ 	over     bool    // files dragged over the window, which light the maker
 -	// The rubber band: pressing the primary button in the list or the grid
 -	// and dragging shows a rectangle from the press point to the pointer.
 -	// The press comes from ObserveInput (so a drag from the rows' blank
@@ -1108,9 +1106,9 @@ index 3f9b7fa..ab0948d 100644
 +	// are where the breadcrumbs showed, by the folder each opens.
 +	rowRects   map[int64]ui.Rect
 +	crumbRects []crumbTarget
- 	// rowsShown are where the list's rows of the last frame showed, by
- 	// file, and rowsBuilt those of this frame (glideRow).
- 	rowsShown, rowsBuilt map[int64]float32
+ 	makerAt  ui.Rect // where the maker showed, in the window
+ 	draftAt  ui.Rect // where the folder being named showed
+ 	landing  string  // the path of the folder made, chosen once it lands
 diff --git a/app/grid.go b/app/grid.go
 index 701f41b..2b467fe 100644
 --- a/app/grid.go

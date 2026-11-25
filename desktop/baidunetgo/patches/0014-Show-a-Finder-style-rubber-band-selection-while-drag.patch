@@ -104,10 +104,9 @@ index 2613279..98a84e6 100644
  	l.sole = 0
  	if files := l.chosen(); len(files) == 1 {
  		l.sole = files[0].FsID
-@@ -246,6 +270,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+@@ -241,5 +241,6 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
  		}
  	})
- 	l.rowsShown = l.rowsBuilt
 +	l.dragArea = list.Bounds() // the rubber band clips to the rows' viewport
  	if l.refocus {
  		l.refocus = false
@@ -236,9 +235,9 @@ index fb25d3d..3f9b7fa 100644
 --- a/app/files.go
 +++ b/app/files.go
 @@ -38,6 +38,27 @@ type listing struct {
- 	sole     int64 // the file chosen alone in the last frame, else 0
- 	refocus  bool  // the files take the focus back, from a name edited
- 	over     bool  // files dragged over the window, which light the maker
+ 	sole     int64   // the file chosen alone in the last frame, else 0
+ 	refocus  bool    // the files take the focus back, from a name edited
+ 	over     bool    // files dragged over the window, which light the maker
 +	// The rubber band: pressing the primary button in the list or the grid
 +	// and dragging shows a rectangle from the press point to the pointer.
 +	// The press comes from ObserveInput (so a drag from the rows' blank
@@ -260,9 +259,9 @@ index fb25d3d..3f9b7fa 100644
 +	dragGrid    bool
 +	dragTileHit bool
 +	dragLast    ui.Rect
- 	// rowsShown are where the list's rows of the last frame showed, by
- 	// file, and rowsBuilt those of this frame (glideRow).
- 	rowsShown, rowsBuilt map[int64]float32
+ 	makerAt  ui.Rect // where the maker showed, in the window
+ 	draftAt  ui.Rect // where the folder being named showed
+ 	landing  string  // the path of the folder made, chosen once it lands
 diff --git a/app/grid.go b/app/grid.go
 index a16176e..701f41b 100644
 --- a/app/grid.go

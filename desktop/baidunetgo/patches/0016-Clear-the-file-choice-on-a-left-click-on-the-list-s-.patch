@@ -277,9 +277,8 @@ index bb6fac0..99d32c7 100644
  				}
  				a.endDrag(l)
  			}
-@@ -279,6 +286,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+@@ -274,5 +274,6 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
  	})
- 	l.rowsShown = l.rowsBuilt
  	l.dragArea = list.Bounds() // the rubber band clips to the rows' viewport
 +	l.pressInView = list.PressedInside()
  	if l.refocus {

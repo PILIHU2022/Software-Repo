@@ -13,9 +13,7 @@ diff --git a/mygo.json b/mygo.json
 index b194d2b..b67c8ed 100644
 --- a/mygo.json
 +++ b/mygo.json
-@@ -3,6 +3,12 @@
-   "identifier": "com.pengstem.baidunetgo",
-   "version": "0.8.3",
+@@ -5,4 +5,10 @@
    "out": "build",
 +  "linux": {
 +    "webview": false,

@@ -6,11 +6,11 @@ Subject: [PATCH] Encrypt a backed-up file with a passphrase in the OpenPGP
  does not have this app.
 
 ---
- go.mod                   |   3 +
- go.sum                   |   6 +
+ go.mod                   |   4 +-
+ go.sum                   |   4 +
  internal/pgp/pgp.go      | 210 ++++++++++++++++
  internal/pgp/pgp_test.go | 532 +++++++++++++++++++++++++++++++++++++++
- 4 files changed, 751 insertions(+)
+ 4 files changed, 748 insertions(+), 2 deletions(-)
  create mode 100644 internal/pgp/pgp.go
  create mode 100644 internal/pgp/pgp_test.go
 
@@ -18,61 +18,37 @@ diff --git a/go.mod b/go.mod
 index e26e00a..8a2ef5a 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -3,6 +3,7 @@ module github.com/pengstem/baidunetgo
- go 1.27.3
- 
+@@ -14,5 +14,5 @@ require (
  require (
-+	github.com/ProtonMail/go-crypto v1.5.2
- 	github.com/egoist/mygo v0.8.1
- 	github.com/klippa-app/go-pdfium v1.21.3
- 	github.com/qjfoidnh/BaiduPCS-Go v0.0.0-20260909034501-1b9131817aaf
-@@ -12,6 +13,7 @@ require (
- 
- require (
+-	github.com/ProtonMail/go-crypto v1.4.1 // indirect
++	github.com/ProtonMail/go-crypto v1.5.2 // indirect
  	github.com/bitly/go-simplejson v0.5.0 // indirect
+-	github.com/cloudflare/circl v1.6.2 // indirect
 +	github.com/cloudflare/circl v1.6.3 // indirect
  	github.com/ebitengine/purego v0.11.1 // indirect
- 	github.com/fatih/color v1.18.0 // indirect
- 	github.com/go-text/typesetting v0.3.5 // indirect
-@@ -36,6 +38,7 @@ require (
- 	github.com/tidwall/gjson v1.18.0 // indirect
- 	github.com/tidwall/match v1.1.1 // indirect
- 	github.com/tidwall/pretty v1.2.0 // indirect
-+	golang.org/x/crypto v0.57.0 // indirect
- 	golang.org/x/image v0.46.0 // indirect
- 	golang.org/x/net v0.59.0 // indirect
- 	golang.org/x/sync v0.24.0 // indirect
 diff --git a/go.sum b/go.sum
 index dbe072e..68e0443 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -5,6 +5,8 @@ github.com/GeertJohan/go.rice v1.0.2/go.mod h1:af5vUNlDNkCjOZeSGFgIJxDje9qdjsO6h
- github.com/Knetic/govaluate v3.0.0+incompatible/go.mod h1:r7JcOSlj0wfOMncg0iLm8Leh48TZaKVeNIfJntJ2wa0=
+@@ -7,7 +7,9 @@ github.com/GeertJohan/go.rice v1.0.2/go.mod h1:af5vUNlDNkCjOZeSGFgIJxDje9qdjsO6h
  github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
  github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
+ github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
+ github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 +github.com/ProtonMail/go-crypto v1.5.2 h1:cucYnvqcY7UOXVD//mSyjeaPY0SSN3v5cDkYPxumINk=
 +github.com/ProtonMail/go-crypto v1.5.2/go.mod h1:/RaSu30DaKO4RY+XdV/ACcCcZkGr7AhUIduq5sjzzCo=
  github.com/akavel/rsrc v0.8.0/go.mod h1:uLoCtb9J+EyAqh+26kdrTgmzRBFPGOolLWKpdxkKq+c=
  github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
  github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
-@@ -26,6 +28,8 @@ github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869/go.mod h1:Ekp36dR
- github.com/bradfitz/gomemcache v0.0.0-20180710155616-bc664df96737/go.mod h1:PmM6Mmwb0LSuEubjR8N7PtNe1KxZLtOUHtbeikc5h60=
- github.com/casbin/casbin v1.7.0/go.mod h1:c67qKN6Oum3UF5Q1+BByfFxkwKvhwW57ITjqwtzR1KE=
+@@ -30,6 +30,8 @@ github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869/go.mod h1:Ekp36dR
  github.com/cespare/xxhash/v2 v2.1.1/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+ github.com/cloudflare/circl v1.6.2 h1:hL7VBpHHKzrV5WTfHCaBsgx/HGbBYlgrwvNXEVDYYsQ=
+ github.com/cloudflare/circl v1.6.2/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 +github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
 +github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
  github.com/cloudflare/golz4 v0.0.0-20150217214814-ef862a3cdc58/go.mod h1:EOBUe0h4xcZ5GoxqC5SDxFQ8gwyZPKQoEzownBlhI80=
  github.com/couchbase/go-couchbase v0.0.0-20200519150804-63f3cdb75e0d/go.mod h1:TWI8EKQMs5u5jLKW/tsb9VwauIrMIxQG1r5fMsswK5U=
  github.com/couchbase/gomemcached v0.0.0-20200526233749-ec430f949808/go.mod h1:srVSlQLB8iXBVXHgnqemxUXqN6FCvClgCMPCsjBDR7c=
-@@ -238,6 +242,8 @@ golang.org/x/crypto v0.0.0-20180904163835-0709b304e793/go.mod h1:6SG95UA2DQfeDnf
- golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
- golang.org/x/crypto v0.0.0-20190820162420-60c769a6c586/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
- golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
-+golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
-+golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
- golang.org/x/image v0.46.0 h1:b1+oYj0Jbp6K5MDT4i4/eZpYlk3V8SJhhDKh6LBHAyQ=
- golang.org/x/image v0.46.0/go.mod h1:3B3W05VGVQyuXucLINLjXKrqISASfi4Xj+iCVkLMwew=
- golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
 diff --git a/internal/pgp/pgp.go b/internal/pgp/pgp.go
 new file mode 100644
 index 0000000..cf20f69

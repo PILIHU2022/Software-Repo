@@ -114,14 +114,12 @@ index bbc9001..1d4c3f6 100644
  	// Files dragged over the window light the maker, brought into view.
  	if over := page.FileDragOver(); over != l.over {
  		if l.over = over; over && l.loaded {
-@@ -174,6 +180,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
- 	tops := a.rowTops(l, now)
- 	l.rowsBuilt = map[int64]float32{}
+@@ -173,4 +173,5 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
+ 	a.bindListState(l)
+ 	now := c.Now()
  	l.rowRects = map[int64]ui.Rect{}
 +	l.contentBottom, l.contentRight = 0, 0
- 	if l.glides == nil {
- 		l.glides = map[int64]rowGlide{}
- 	}
+ 	a.listHeader(c, t, p, cols)
 @@ -185,6 +192,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols
  		rows++
  	}
