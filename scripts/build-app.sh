@@ -357,11 +357,37 @@ describe_patch_failure() {
 }
 
 apply_patch_queue() {
-    local sha="$1" patch
+    local sha="$1" patch filtered
     for patch in "${PATCHES[@]}"; do
-        if git -C "$WORK" am -3 "$patch"; then
+        # Markdown is documentation, not build input. Upstream rewrites its
+        # changelog and contributor docs regularly; a stale hunk there must not
+        # block a build whose code still applies. A docs-only patch becomes
+        # empty and `--empty=drop` skips it.
+        filtered="$(mktemp)"
+        if ! awk '
+            /^diff --git / {
+                skip = ($0 ~ / b\/[^ ]+\.md$/)
+            }
+            !skip { print }
+        ' "$patch" >"$filtered"; then
+            rm -f "$filtered"
+            describe_patch_failure "$patch" "$sha"
+            return 1
+        fi
+
+        # Context-apply first. Once the Markdown sections are gone, `-3` can
+        # reject the patch because its authoring-side index blobs are not in
+        # this checkout. Fall back to three-way only after a real conflict.
+        if git -C "$WORK" am -q --empty=drop "$filtered"; then
+            rm -f "$filtered"
             continue
         fi
+        git -C "$WORK" am --abort >/dev/null 2>&1 || true
+        if git -C "$WORK" am -q -3 --empty=drop "$filtered"; then
+            rm -f "$filtered"
+            continue
+        fi
+        rm -f "$filtered"
         if try_auto_merge_append_conflicts; then
             if ! GIT_EDITOR=true git -C "$WORK" am --continue; then
                 echo "ERROR: auto-merged append-only conflict could not be committed" >&2

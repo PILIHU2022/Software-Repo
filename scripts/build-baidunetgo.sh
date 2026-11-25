@@ -216,17 +216,29 @@ apply_queue() {
     # AGENTS.md/CLAUDE.md/README.md/CHANGELOG.md regularly, and a stale
     # documentation hunk must not block a build of code that still applies.
     # Docs-only patches become empty and `--empty=drop` skips them.
+    #
+    # Apply by context first. After stripping the Markdown sections, the
+    # remaining index lines can name blobs from the authoring branch that do
+    # not exist in this checkout, which makes `git am -3` fail before it even
+    # reaches the context. The three-way fallback is still useful when upstream
+    # changed the surrounding code, so retry with it after a real conflict.
     for patch in "$@"; do
         filtered="$(mktemp)"
         if awk '
-            /^diff --git / {
-                skip = ($0 ~ / b\/[^ ]+\.md$/)
-            }
-            !skip { print }
-        ' "$patch" >"$filtered" \
-            && git -C "$WORK" am -q -3 --keep-cr --empty=drop "$filtered"; then
-            rm -f "$filtered"
-            continue
+               /^diff --git / {
+                   skip = ($0 ~ / b\/[^ ]+\.md$/)
+               }
+               !skip { print }
+           ' "$patch" >"$filtered"; then
+            if git -C "$WORK" am -q --keep-cr --empty=drop "$filtered"; then
+                rm -f "$filtered"
+                continue
+            fi
+            git -C "$WORK" am --abort >/dev/null 2>&1 || true
+            if git -C "$WORK" am -q -3 --keep-cr --empty=drop "$filtered"; then
+                rm -f "$filtered"
+                continue
+            fi
         fi
         rm -f "$filtered"
         describe_failure "$patch"

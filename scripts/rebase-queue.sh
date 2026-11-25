@@ -7,11 +7,11 @@
 #
 # The queue is the source of truth, so the rebase is done by applying it to the
 # new upstream with `scripts/build-app.sh <app> --no-build`: that fetches the
-# upstream head and runs `git am -3` for every patch, which is a three-way
-# rebase, and it auto-merges append-only resource-strings conflicts the same way
-# a normal build does. The resulting commits are then exported back into
-# apps/<app>/patches with stable headers, and the anchor commit is written to
-# apps/<app>/upstream.txt.
+# upstream head and replays every patch (Markdown hunks are ignored, with a
+# three-way fallback), and it auto-merges append-only resource-strings
+# conflicts the same way a normal build does. The resulting commits are then
+# exported back into apps/<app>/patches with stable headers, and the anchor
+# commit is written to apps/<app>/upstream.txt.
 #
 # --check   only report whether the stored queue is already anchored on the
 #           upstream head; exit 1 when a rebase would change files.
