@@ -1414,7 +1414,7 @@ index c7550ed0e1..c50ffda9eb 100644
  
          <LinearLayout
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index a821d30899..d658101e8f 100644
+index c6896c2f7f..41564d002a 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1339,6 +1339,17 @@

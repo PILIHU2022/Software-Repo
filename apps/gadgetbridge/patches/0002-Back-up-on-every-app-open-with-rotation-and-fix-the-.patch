@@ -1915,10 +1915,10 @@ index d30b9b57b3..f71b1570df 100644
 +
  </resources>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index d658101e8f..bb47485135 100644
+index 41564d002a..5916074c48 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
-@@ -6892,4 +6892,23 @@ The result is the average of all the measurements.</string>
+@@ -6897,4 +6897,23 @@ The result is the average of all the measurements.</string>
      <string name="magic_touch_head_init_title">Massage head init</string>
      <string name="magic_touch_unplug_charger">Unplug the charger to control the massager</string>
      <string name="magic_touch_turn_on_first">Turn the massager on first</string>

@@ -114,7 +114,7 @@ verified with the existing sha256.
  gradle/libs.versions.toml                     |  19 +
  gradle/wrapper/gradle-wrapper.properties      |   6 +-
  settings.gradle.kts                           |  26 +-
-68 files changed, 5991 insertions(+), 1535 deletions(-)
+ 68 files changed, 5991 insertions(+), 1535 deletions(-)
  create mode 100644 app/src/debug/res/values/strings.xml
  delete mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/AboutActivity.java
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/AboutActivity.kt
@@ -165,11 +165,10 @@ verified with the existing sha256.
  create mode 100644 app/src/main/res/values/styles_expressive.xml
 
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index 0ab59e97eb97..5398245eb589 100644
+index 0ab59e97eb..5398245eb5 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
-@@ -9,7 +9,8 @@ plugins {
- plugins {
+@@ -10,6 +10,7 @@ plugins {
      id("gadgetbridge.git")
      alias(libs.plugins.android.application)
      alias(libs.plugins.kotlin.parcelize)
@@ -177,15 +176,15 @@ index 0ab59e97eb97..5398245eb589 100644
      alias(libs.plugins.kaitai)
      alias(libs.plugins.ksp)
      alias(libs.plugins.hilt)
-@@ -92,6 +93,7 @@ android {
-     buildFeatures {
+@@ -93,6 +94,7 @@ android {
          aidl = true
          buildConfig = true
          viewBinding = true
 +        compose = true
          resValues = true
      }
-@@ -148,7 +150,14 @@ android {
+ 
+@@ -148,6 +150,13 @@ android {
      }
  
      buildTypes {
@@ -199,13 +198,10 @@ index 0ab59e97eb97..5398245eb589 100644
          getByName("release") {
              isMinifyEnabled = true
              proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-         }
-@@ -279,7 +288,22 @@ dependencies {
-     implementation(libs.androidx.media3.exoplayer)
-     implementation(libs.androidx.media3.ui)
+@@ -281,6 +290,21 @@ dependencies {
      implementation(libs.material)
      implementation(libs.flexbox)
-+
+ 
 +    // Jetpack Compose + Material 3 Expressive
 +    implementation(libs.androidx.compose.ui)
 +    implementation(libs.androidx.compose.ui.graphics)
@@ -220,9 +216,10 @@ index 0ab59e97eb97..5398245eb589 100644
 +    implementation(libs.androidx.lifecycle.viewmodel.compose)
 +    debugImplementation(libs.androidx.compose.ui.tooling)
 +    debugImplementation(libs.androidx.compose.ui.test.manifest)
- 
++
      // DI & Annotation Processing
      implementation(libs.hilt.android)
+     ksp(libs.hilt.android.compiler)
 diff --git a/app/src/debug/res/values/strings.xml b/app/src/debug/res/values/strings.xml
 new file mode 100644
 index 0000000000..4a05742f2b
@@ -1846,7 +1843,7 @@ index be06b8b714..0000000000
 -    }
 -}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/devices/garmin/GarminRealtimeSettingsFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/devices/garmin/GarminRealtimeSettingsFragment.java
-index 4b1c0f73ed..19ebb6ac73 100644
+index 2246d66fe8..d1a84f2ef6 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/devices/garmin/GarminRealtimeSettingsFragment.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/devices/garmin/GarminRealtimeSettingsFragment.java
 @@ -74,6 +74,15 @@ import nodomain.freeyourgadget.gadgetbridge.util.preferences.MinMaxFloatWatcher;
@@ -3062,7 +3059,7 @@ index 0000000000..0be2ed387d
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
 new file mode 100644
-index 0000000000..703fb46403
+index 0000000000..ef7f5a295a
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
 @@ -0,0 +1,700 @@
@@ -7889,7 +7886,7 @@ index 0000000000..4d516c18a1
 +</resources>
 diff --git a/app/src/main/res/values-zh-rCN/strings_compose_welcome.xml b/app/src/main/res/values-zh-rCN/strings_compose_welcome.xml
 new file mode 100644
-index 0000000000..c32a3f8baa
+index 0000000000..f4531bc4aa
 --- /dev/null
 +++ b/app/src/main/res/values-zh-rCN/strings_compose_welcome.xml
 @@ -0,0 +1,13 @@
@@ -8111,7 +8108,7 @@ index 0000000000..ff8df7f066
 +</resources>
 diff --git a/app/src/main/res/values-zh-rTW/strings_compose_welcome.xml b/app/src/main/res/values-zh-rTW/strings_compose_welcome.xml
 new file mode 100644
-index 0000000000..128bb8fdce
+index 0000000000..b55fbe5bb5
 --- /dev/null
 +++ b/app/src/main/res/values-zh-rTW/strings_compose_welcome.xml
 @@ -0,0 +1,13 @@
@@ -8241,7 +8238,7 @@ index 0000000000..de1305d30d
 +</resources>
 diff --git a/app/src/main/res/values/strings_compose_welcome.xml b/app/src/main/res/values/strings_compose_welcome.xml
 new file mode 100644
-index 0000000000..7fa120f63b
+index 0000000000..141a904406
 --- /dev/null
 +++ b/app/src/main/res/values/strings_compose_welcome.xml
 @@ -0,0 +1,13 @@
@@ -8298,7 +8295,7 @@ index cd1ef15e66..afbf75ada7 100644
      alias(libs.plugins.kaitai) apply false
      alias(libs.plugins.ksp) apply false
 diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
-index aea60ebcbf..3b42588de1 100644
+index b7d2b85490..0f19329d03 100644
 --- a/gradle/libs.versions.toml
 +++ b/gradle/libs.versions.toml
 @@ -9,6 +9,10 @@ androidx-browser = "1.10.0"
@@ -8312,7 +8309,7 @@ index aea60ebcbf..3b42588de1 100644
  androidx-core = "1.19.1"
  androidx-core-splashscreen = "1.2.0"
  androidx-exifinterface = "1.4.2"
-@@ -123,6 +127,20 @@ mapsforge-map-android = { group = "com.github.mapsforge.mapsforge", name = "maps
+@@ -127,6 +131,20 @@ mapsforge-map-android = { group = "com.github.mapsforge.mapsforge", name = "maps
  mapsforge-map-reader = { group = "com.github.mapsforge.mapsforge", name = "mapsforge-map-reader", version.ref = "mapsforge" }
  mapsforge-themes = { group = "com.github.mapsforge.mapsforge", name = "mapsforge-themes", version.ref = "mapsforge" }
  material = { group = "com.google.android.material", name = "material", version.ref = "material" }
@@ -8331,9 +8328,9 @@ index aea60ebcbf..3b42588de1 100644
 +androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "androidx-lifecycle" }
 +androidx-graphics-shapes = { group = "androidx.graphics", name = "graphics-shapes", version.ref = "androidx-graphics-shapes" }
  mockito = { group = "org.mockito", name = "mockito-core", version.ref = "mockito" }
+ mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
  mpandroidchart = { group = "com.github.PhilJay.MPAndroidChart", name = "MPChartLib", version.ref = "mpandroidchart" }
- msgpack = { group = "org.msgpack", name = "msgpack-core", version.ref = "msgpack" }
-@@ -158,6 +176,7 @@ mapsforge = [
+@@ -172,6 +190,7 @@ unit-test = [
  [plugins]
  android-application = { id = "com.android.application", version.ref = "android-gradle-plugin" }
  kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize", version.ref = "kotlin" }
@@ -8360,11 +8357,12 @@ index bdc1ff0ac9..7bdd54912c 100644
  validateDistributionUrl=true
  zipStoreBase=GRADLE_USER_HOME
 diff --git a/settings.gradle.kts b/settings.gradle.kts
-index 50494e9523..6f54d758b8 100644
+index cba11f57bf..44e9d35ffd 100644
 --- a/settings.gradle.kts
 +++ b/settings.gradle.kts
-@@ -1,6 +1,17 @@
+@@ -1,7 +1,18 @@
  pluginManagement {
+     includeBuild("build-logic")
      repositories {
 -        mavenLocal()
 +        // 国内镜像优先：Gradle 插件门户口径的构件（AGP、Kotlin、KSP、Hilt、protobuf、kaitai…）在阿里云
@@ -8382,7 +8380,7 @@ index 50494e9523..6f54d758b8 100644
          google {
              content {
                  includeGroupAndSubgroups("com.android")
-@@ -8,14 +19,25 @@ pluginManagement {
+@@ -9,14 +20,25 @@ pluginManagement {
                  includeGroupAndSubgroups("androidx")
              }
          }

@@ -49,11 +49,11 @@ Sheets:
  .../WidgetInstanceSettingsFragment.kt         |   3 +
  .../statistics/ChartConfigBottomSheet.kt      |   7 +
  .../database/DatabaseExportWorker.kt          | 173 +++++++++++++++++-
- .../externalevents/NotificationListener.java  |  42 ++--
+ .../externalevents/NotificationListener.java  |  40 ++--
  .../AbstractApiTokenSetupBottomSheet.kt       |   8 +
  .../endurain/EndurainSetupBottomSheet.kt      |   7 +
  .../service/devices/xiaomi/XiaomiSupport.java |   4 +-
- .../xiaomi/services/XiaomiMusicService.java   |  68 +++++--
+ .../xiaomi/services/XiaomiMusicService.java   |  62 +++++--
  .../xiaomi/services/XiaomiSystemService.java  |  44 +++++
  .../ui/compose/components/GbComponents.kt     |  11 +-
  .../ui/compose/components/GbSheetBody.kt      |  60 ++++++
@@ -70,7 +70,7 @@ Sheets:
  app/src/main/res/values/strings.xml           |   5 +
  app/src/main/res/xml/automations_settings.xml |   8 -
  app/src/main/res/xml/preferences.xml          |  13 ++
- 28 files changed, 679 insertions(+), 107 deletions(-)
+ 28 files changed, 675 insertions(+), 103 deletions(-)
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/components/GbSheetBody.kt
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsRefresh.kt
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sheets/BottomSheetCapping.kt
@@ -108,7 +108,7 @@ index d855c29ce6..c05a8ce7c4 100644
  import nodomain.freeyourgadget.gadgetbridge.util.backup.PeriodicZipExporter
  import org.slf4j.Logger
  import org.slf4j.LoggerFactory
-@@ -257,6 +258,10 @@ abstract class AbstractAutoExportSettingsFragment(
+@@ -245,6 +246,10 @@ abstract class AbstractAutoExportSettingsFragment(
              if (nextExecution != null) {
                  prefNextExecution?.summary = formatDateWithDiff(Date(nextExecution.nextScheduleTimeMillis))
              }
@@ -490,7 +490,7 @@ index 0b20401248..2bc4f5a5cf 100644
              "nodomain.freeyourgadget.gadgetbridge.action.DATABASE_EXPORT_SUCCESS"
          const val ACTION_DATABASE_EXPORT_FAIL: String =
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java
-index 75fee5eae4..d0a575aa0b 100644
+index 75fee5eae4..57a9964d86 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/externalevents/NotificationListener.java
 @@ -172,7 +172,8 @@ public class NotificationListener extends NotificationListenerService {
@@ -525,7 +525,13 @@ index 75fee5eae4..d0a575aa0b 100644
 -            if (stateSpec != null) {
 -                if (mSetMusicStateRunnable != null) {
 -                    mHandler.removeCallbacks(mSetMusicStateRunnable);
--                }
++            final MusicSpec pendingMusicSpec = mPendingMusicSpec;
++            final MusicStateSpec pendingMusicStateSpec = mPendingMusicStateSpec;
++            mSetMusicInfoRunnable = () -> {
++                final var deviceService = GBApplication.deviceService();
++                if (deviceService == null) {
++                    return;
+                 }
 -                mSetMusicStateRunnable = new Runnable() {
 -                    @Override
 -                    public void run() {
@@ -534,13 +540,6 @@ index 75fee5eae4..d0a575aa0b 100644
 -                };
 -            }
 -            mHandler.postDelayed(mSetMusicStateRunnable, 100);
-+            final MusicSpec pendingMusicSpec = mPendingMusicSpec;
-+            final MusicStateSpec pendingMusicStateSpec = mPendingMusicStateSpec;
-+            mSetMusicInfoRunnable = () -> {
-+                final var deviceService = GBApplication.deviceService();
-+                if (deviceService == null) {
-+                    return;
-+                }
 +                if (pendingMusicSpec != null) {
 +                    deviceService.onSetMusicInfo(pendingMusicSpec);
 +                }
@@ -619,35 +618,30 @@ index 00438ebad0..f02a60bf79 100644
          if (getCoordinator().supportsCalendarEvents(getDevice())) {
              // TODO this should not be done here
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java
-index 5012265871..2008d6624c 100644
+index 5012265871..c668faea65 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/service/devices/xiaomi/services/XiaomiMusicService.java
-@@ -111,9 +111,10 @@ public class XiaomiMusicService extends AbstractXiaomiService {
+@@ -111,7 +111,8 @@ public class XiaomiMusicService extends AbstractXiaomiService {
      }
  
      public void onSetMusicState(final MusicStateSpec stateSpec) {
 -        if (mediaManager.onSetMusicState(stateSpec)) {
--            sendMusicStateToDevice();
--        }
 +        if (stateSpec != null && mediaManager.onSetMusicState(stateSpec)) {
 +            // Every packet is a complete snapshot; only send when the state changed.
-+            sendMusicStateToDevice();
-+        }
+             sendMusicStateToDevice();
+         }
      }
- 
-     public void onSetPhoneVolume(final float ignoredVolume) {
-@@ -121,8 +122,30 @@ public class XiaomiMusicService extends AbstractXiaomiService {
+@@ -121,32 +122,61 @@ public class XiaomiMusicService extends AbstractXiaomiService {
      }
  
      public void onSetMusicInfo(final MusicSpec musicSpec) {
 -        if (mediaManager.onSetMusicInfo(musicSpec)) {
--            sendMusicStateToDevice();
 +        if (musicSpec != null && mediaManager.onSetMusicInfo(musicSpec)) {
 +            // Every packet is a complete snapshot; only send when the metadata changed.
-+            sendMusicStateToDevice();
-+        }
-+    }
-+
+             sendMusicStateToDevice();
+         }
+     }
+ 
 +    /**
 +     * Maps a {@link MusicStateSpec} to the wire value expected in {@code MusicInfo.state}:
 +     * 0 = not playing, 1 = playing, 2 = paused.
@@ -666,10 +660,10 @@ index 5012265871..2008d6624c 100644
 +            default:
 +                // STATE_UNKNOWN and anything unexpected: do not claim it is playing.
 +                return STATE_NOTHING;
-         }
-     }
- 
-@@ -130,23 +153,30 @@ public class XiaomiMusicService extends AbstractXiaomiService {
++        }
++    }
++
+     private void sendMusicStateToDevice() {
          final MusicSpec musicSpec = mediaManager.getBufferMusicSpec();
          final MusicStateSpec musicStateSpec = mediaManager.getBufferMusicStateSpec();
  
@@ -692,11 +686,11 @@ index 5012265871..2008d6624c 100644
 +            final String track = musicSpec.getTrack();
 +            if (track != null && !track.isEmpty()) {
 +                musicInfo.setTrack(track);
-+            }
+             }
 +            final String artist = musicSpec.getArtist();
 +            if (artist != null && !artist.isEmpty()) {
 +                musicInfo.setArtist(artist);
-             }
++            }
 +            // duration is in seconds; MUSIC_UNKNOWN is -1, which is invalid for a uint32 field.
 +            if (musicSpec.getDuration() > 0) {
 +                musicInfo.setDuration(musicSpec.getDuration());
@@ -893,7 +887,7 @@ index 0000000000..ce389b89da
 +    }
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
-index 703fb46403..95a374de5f 100644
+index ef7f5a295a..2f4bc184d6 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/OnOpenBackupSettingsScreen.kt
 @@ -59,6 +59,7 @@ import androidx.compose.material3.SegmentedButton
@@ -1358,7 +1352,7 @@ index 0f1f62565e..7f95a2385b 100644
 +    <string name="sleep_score_details_hint">點按圓環查看分數構成</string>
  </resources>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index bb47485135..21249d3a1c 100644
+index 5916074c48..a134a4960d 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1341,6 +1341,8 @@
@@ -1370,7 +1364,7 @@ index bb47485135..21249d3a1c 100644
      <string name="sleep_score_estimated_for_age">Age-adjusted estimate for age %1$d</string>
      <string name="sleep_score_target_range">Recommended sleep for your age: %1$s – %2$s</string>
      <string name="sleep_score_breakdown_duration">Sleep duration</string>
-@@ -6911,4 +6913,7 @@ The result is the average of all the measurements.</string>
+@@ -6916,4 +6918,7 @@ The result is the average of all the measurements.</string>
      <string name="backup_on_open_retention_7_days">7 days</string>
      <string name="backup_on_open_retention_14_days">14 days</string>
      <string name="backup_on_open_retention_30_days">30 days</string>
