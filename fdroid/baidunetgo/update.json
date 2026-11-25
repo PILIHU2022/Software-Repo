@@ -1,7 +1,7 @@
 {
   "apk": "https://github.com/PILIHU2022/Software-Repo/releases/download/baidunetgo-android-0.8.3-patchwork-b55b251/BaiduNetGo-0.8.3-patchwork.apk",
   "fdroid": "https://software.sparkzh.top/repo?p=com.pengstem.baidunetgo",
-  "notes": "社区修复版（Android），基于上游 b55b251。",
+  "notes": "社区修复版（Android），基于上游 b55b251，含 48 个补丁。",
   "versionCode": 80348,
   "versionName": "0.8.3-patchwork"
 }
