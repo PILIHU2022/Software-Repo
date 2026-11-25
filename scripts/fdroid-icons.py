@@ -13,7 +13,6 @@ Usage:
 """
 
 import argparse
-import base64
 import hashlib
 import json
 import re
@@ -71,7 +70,12 @@ def restore_index_v2_icons(repo):
     repo/<package>/<locale>/icon_<hash>.png files while keeping the old
     references in index-v2.json.  The index is then inconsistent until the
     files are put back, so copy the source icon to the name and hash the index
-    already expects (or update both when the source changed).
+    already expects.
+
+    index-v2.json must not be rewritten here: entry.json records its sha256 and
+    `fdroid signindex` refuses a hash mismatch, so only a repository-wide
+    `fdroid update` may change the index.  A source icon that no longer matches
+    its index entry is therefore an error, not something to paper over.
     """
     index = repo / "index-v2.json"
     if not index.is_file():
@@ -100,15 +104,12 @@ def restore_index_v2_icons(repo):
 
             content = source.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
-            if not isinstance(name, str) or digest != expected:
-                encoded = base64.urlsafe_b64encode(
-                    bytes.fromhex(digest)
-                ).decode("ascii")
-                name = f"/{package}/{locale}/icon_{encoded}.png"
-                meta["name"] = name
-                meta["sha256"] = digest
-                meta["size"] = len(content)
-                target = repo / name.lstrip("/")
+            if not isinstance(name, str) or not expected or digest != expected:
+                raise SystemExit(
+                    f"icon source for {package} ({locale}) does not match the "
+                    f"index (expected {expected}, got {digest}); regenerate "
+                    "fdroid/icons-src and the repository index"
+                )
 
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
@@ -116,8 +117,7 @@ def restore_index_v2_icons(repo):
             changed += 1
 
     if changed:
-        with index.open("w", encoding="utf-8") as fp:
-            json.dump(data, fp, separators=(",", ":"))
+        print(f"    restored {changed} index-v2 icon(s)")
     else:
         print("    index-v2 icons already current")
     return changed
