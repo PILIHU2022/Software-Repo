@@ -61,7 +61,7 @@ index d5d91c3..5455998 100644
  		}
  		if l.loaded {
  			a.statusBar(c, t, p, l)
-@@ -132,7 +133,7 @@ func (a *App) bindListState(l *listing) {
+@@ -132,6 +133,6 @@ func (a *App) bindListState(l *listing) {
  	l.list.DragSelect = true // a drag over the rows chooses them, as in Finder
  }
  
@@ -69,16 +69,11 @@ index d5d91c3..5455998 100644
 +func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
  	a.bindListState(l)
  	now := c.Now()
- 	tops := a.rowTops(l, now)
-@@ -140,7 +141,7 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
- 	if l.glides == nil {
- 		l.glides = map[int64]rowGlide{}
- 	}
+@@ -138,3 +139,3 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
+ 	now := c.Now()
 -	a.listHeader(c, t, p)
 +	a.listHeader(c, t, p, cols)
  	list := ui.List(c, &l.list, len(l.files)+1).Grow(1).Padding(0, 10, 16)
- 	outer, enter := c, false
- 	list.Rows(func(row ui.ListRow) {
 @@ -217,8 +218,6 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
  			if !f.IsDir {
  				size = humanSize(f.Size)
