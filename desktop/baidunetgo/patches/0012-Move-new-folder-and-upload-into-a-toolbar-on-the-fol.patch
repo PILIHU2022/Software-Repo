@@ -169,7 +169,7 @@ index 5455998..2613279 100644
 +// sortMenu is the button choosing the order, in the list and the grid: the
 +// list also sorts by its columns, this does so wherever.
  func (a *App) sortMenu(c *ui.Context, t *ui.Theme, p *palette) {
- 	toolButton(c, t, p, "arrow-down-wide-narrow", "排序方式").Menu(func(m *ui.Menu) {
+ 	menuButton(toolButton(c, t, p, "arrow-down-wide-narrow", "排序方式"), func(m *ui.Menu) {
  		for _, o := range sortOrders {
 @@ -865,7 +883,7 @@ func (a *App) viewSwitch(c *ui.Context, t *ui.Theme, p *palette) {
  	}
