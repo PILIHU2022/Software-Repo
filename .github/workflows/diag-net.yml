@@ -1,0 +1,29 @@
+name: Network diagnostic
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Probe Maven repositories from the runner
+        run: |
+          set -u
+          marker="com/google/devtools/ksp/com.google.devtools.ksp.gradle.plugin/2.3.14/com.google.devtools.ksp.gradle.plugin-2.3.14.pom"
+          for base in \
+            "https://maven.aliyun.com/repository/gradle-plugin" \
+            "https://maven.aliyun.com/repository/public" \
+            "https://repo.maven.apache.org/maven2" \
+            "https://repo1.maven.org/maven2" \
+            "https://plugins.gradle.org/m2"; do
+            url="$base/$marker"
+            echo "== $url"
+            getent hosts "$(echo "$url" | sed -E 's#https://([^/]+)/.*#\1#')" || echo "dns failed"
+            curl -sS -o /dev/null -w 'http=%{http_code} connect=%{time_connect}s total=%{time_total}s\n' \
+              --max-time 20 "$url" || echo "curl exit=$?"
+          done
+          echo "== proxy env"
+          env | grep -i -E 'proxy|no_proxy' || echo "(none)"
+          echo "== gradle caches"
+          ls -d "$HOME"/.gradle/caches/modules-2/metadata-* 2>/dev/null || true
