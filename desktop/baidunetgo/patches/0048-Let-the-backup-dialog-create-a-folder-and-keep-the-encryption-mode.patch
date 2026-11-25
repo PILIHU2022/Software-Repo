@@ -60,12 +60,13 @@ diff --git a/app/backup_page.go b/app/backup_page.go
 index c1e43c5..9a8c2e0 100644
 --- a/app/backup_page.go
 +++ b/app/backup_page.go
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  package app
  
  import (
 +	"context"
  	"os"
++	"path"
  	"path/filepath"
  	"strings"
 @@ -8,6 +9,7 @@ import (
