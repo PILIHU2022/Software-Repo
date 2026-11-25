@@ -61,15 +61,13 @@ index d5d91c3..5455998 100644
  		}
  		if l.loaded {
  			a.statusBar(c, t, p, l)
-@@ -132,6 +133,6 @@ func (a *App) bindListState(l *listing) {
+@@ -132,8 +133,8 @@ func (a *App) bindListState(l *listing) {
  	l.list.DragSelect = true // a drag over the rows chooses them, as in Finder
  }
  
 -func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing) {
 +func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
  	a.bindListState(l)
- 	now := c.Now()
-@@ -138,3 +139,3 @@ func (a *App) fileList(c *ui.Context, t *ui.Theme, p *palette, l *listing, cols listCols) {
  	now := c.Now()
 -	a.listHeader(c, t, p)
 +	a.listHeader(c, t, p, cols)
