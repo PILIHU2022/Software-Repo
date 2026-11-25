@@ -254,7 +254,7 @@ apply_queue() {
 
 describe_failure() {
     local patch="$1"
-    local subject conflicted
+    local subject conflicted diag
     subject="$(git -C "$WORK" am --show-current-patch=raw 2>/dev/null \
         | sed -n 's/^Subject: //p' | head -n 1 || true)"
     mapfile -t conflicted < <(git -C "$WORK" diff --name-only --diff-filter=U)
@@ -270,6 +270,18 @@ describe_failure() {
         else
             echo "         (none reported by git am)"
         fi
+        # Show which hunk git rejected and where the others landed: without
+        # this, a patch that fails at a shifted line says only the file name.
+        diag="$(mktemp)"
+        awk '
+               /^diff --git / {
+                   skip = ($0 ~ / b\/[^ ]+\.md$/)
+               }
+               !skip { print }
+           ' "$patch" >"$diag" 2>/dev/null || true
+        echo "       git apply --check --verbose:"
+        git -C "$WORK" apply --check --verbose "$diag" 2>&1 | tail -n 25 || true
+        rm -f "$diag"
         echo "       Worktree kept for inspection: $WORK"
     } >&2
 }
