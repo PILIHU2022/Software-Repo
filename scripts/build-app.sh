@@ -374,6 +374,14 @@ apply_patch_queue() {
             describe_patch_failure "$patch" "$sha"
             return 1
         fi
+        # A docs-only patch is reduced to just its mail header here. `git am`
+        # rejects an input with no diff at all, even with --empty=drop, so skip
+        # it before replaying the queue.
+        if ! grep -q '^diff --git ' "$filtered"; then
+            rm -f "$filtered"
+            echo "==> Skipping docs-only patch '$(basename "$patch")'"
+            continue
+        fi
 
         # Context-apply first. Once the Markdown sections are gone, `-3` can
         # reject the patch because its authoring-side index blobs are not in

@@ -8365,18 +8365,18 @@ index cba11f57bf..44e9d35ffd 100644
      includeBuild("build-logic")
      repositories {
 -        mavenLocal()
-+        // 国内镜像优先：Gradle 插件门户口径的构件（AGP、Kotlin、KSP、Hilt、protobuf、kaitai…）在阿里云
-+        // gradle-plugin 与 google 镜像上都有，命中后不必再等官方源。
-+        maven("https://maven.aliyun.com/repository/gradle-plugin")
-+        maven("https://maven.aliyun.com/repository/google") {
++        // 必须直连官方仓库：GitHub 托管的 runner 访问阿里云 public 镜像会返回 502，
++        // Gradle 随之把整个插件解析判成 “not found”，连官方源中的 KSP 也会失败。
++        maven("https://repo.maven.apache.org/maven2/") { name = "patchwork-central" }
++        maven("https://dl.google.com/dl/android/maven2/") { name = "patchwork-google"
 +            content {
 +                includeGroupAndSubgroups("com.android")
 +                includeGroupAndSubgroups("com.google")
 +                includeGroupAndSubgroups("androidx")
 +            }
 +        }
-+        maven("https://maven.aliyun.com/repository/public")
-+        // 官方源兜底：镜像缺版本或临时不可用时仍然能解析。
++        maven("https://plugins.gradle.org/m2/") { name = "patchwork-plugin-portal" }
++        // 下面保留上游声明的官方仓库（本地镜像请写进 ~/.gradle/init.gradle.kts）。
          google {
              content {
                  includeGroupAndSubgroups("com.android")
@@ -8393,17 +8393,17 @@ index cba11f57bf..44e9d35ffd 100644
  dependencyResolutionManagement {
      repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
      repositories {
-+        // Android / AndroidX / Google 构件走阿里云的 google 镜像（比直连 dl.google.com 快很多）。
-+        maven("https://maven.aliyun.com/repository/google") {
++        // Android / AndroidX / Google 构件直连官方 Google Maven。
++        maven("https://dl.google.com/dl/android/maven2/") { name = "patchwork-google-deps"
 +            content {
 +                includeGroupAndSubgroups("com.android")
 +                includeGroupAndSubgroups("com.google")
 +                includeGroupAndSubgroups("androidx")
 +            }
 +        }
-+        // Maven Central 构件走阿里云与华为云镜像，官方源兜底。
-+        maven("https://maven.aliyun.com/repository/public")
-+        maven("https://repo.huaweicloud.com/repository/maven/")
++        // Maven Central 直连官方仓库；本地镜像不要固化进补丁队列。
++        maven("https://repo.maven.apache.org/maven2/") { name = "patchwork-central-deps" }
++        // 上游随后声明的 mavenCentral() 已覆盖这里，无需再列镜像。
          google {
              content {
                  includeGroupAndSubgroups("com.android")

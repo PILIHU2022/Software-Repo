@@ -115,8 +115,8 @@ index 2076f9d..d31e863 100644
 +	fileClip    fileClipboard     // files cut or copied, to paste (fileclip.go)
 +	fileClipGen uint64            // counts puts, to spot a paste of an older clip
  	finding     bool              // Cmd-F asks for the search field
+ 	searchInput ui.Handle         // focuses and selects the previous search query
  	askingQuit  bool              // the question whether to quit is showing
- 	quitOK      atomic.Bool       // the user said to quit while transfers go on
 diff --git a/app/browser.go b/app/browser.go
 index f19f330..d5d91c3 100644
 --- a/app/browser.go

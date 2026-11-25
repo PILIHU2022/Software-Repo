@@ -230,6 +230,11 @@ apply_queue() {
                }
                !skip { print }
            ' "$patch" >"$filtered"; then
+            if ! grep -q '^diff --git ' "$filtered"; then
+                rm -f "$filtered"
+                echo "==> Skipping docs-only patch '$(basename "$patch")'"
+                continue
+            fi
             if git -C "$WORK" am -q --keep-cr --empty=drop "$filtered"; then
                 rm -f "$filtered"
                 continue
