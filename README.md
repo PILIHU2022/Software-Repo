@@ -45,7 +45,7 @@ code.
 
 | App | Upstream (branch) | Upstream revision | Patches | Built version |
 | --- | --- | --- | --- | --- |
-| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `e8ac17f` | 20 | `0.21.4-patchwork` (6812) |
+| RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `5073379` | 20 | `0.21.5-patchwork` (6913, arm64-v8a) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `ec95b22` | 11 | `1.4.2-patchwork` (1405, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 17 | `0.1.3-patchwork` (11207, arm64-v8a) |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `9111cae` | 3 | `3.30-patchwork` (25807204, arm64-v8a) |
