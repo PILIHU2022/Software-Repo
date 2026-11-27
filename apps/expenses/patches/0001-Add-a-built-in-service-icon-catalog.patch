@@ -4,7 +4,6 @@ Date: Sat, 24 Oct 2026 07:46:21 +0800
 Subject: [PATCH] Add a built-in service icon catalog
 
 ---
- SERVICE_ICONS.md                              |  11 +
  .../drawable/ic_service_1password.xml         |  10 +
  .../drawable/ic_service_adobe.xml             |  10 +
  .../drawable/ic_service_amazon.xml            |  10 +
@@ -80,8 +79,7 @@ Subject: [PATCH] Add a built-in service icon catalog
  .../values-zh-rCN/strings.xml                 |  28 +
  .../composeResources/values/strings.xml       |  28 +
  .../shared/data/ExpenseService.kt             | 871 ++++++++++++++++++
- 76 files changed, 1658 insertions(+)
- create mode 100644 SERVICE_ICONS.md
+ 75 files changed, 1647 insertions(+)
  create mode 100644 shared/src/commonMain/composeResources/drawable/ic_service_1password.xml
  create mode 100644 shared/src/commonMain/composeResources/drawable/ic_service_adobe.xml
  create mode 100644 shared/src/commonMain/composeResources/drawable/ic_service_amazon.xml
@@ -156,23 +154,6 @@ Subject: [PATCH] Add a built-in service icon catalog
  create mode 100644 shared/src/commonMain/composeResources/drawable/ic_service_zoom.xml
  create mode 100644 shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/data/ExpenseService.kt
 
-diff --git a/SERVICE_ICONS.md b/SERVICE_ICONS.md
-new file mode 100644
-index 0000000..08aade1
---- /dev/null
-+++ b/SERVICE_ICONS.md
-@@ -0,0 +1,11 @@
-+# Built-in service icons
-+
-+The `ic_service_*.xml` vector drawables in
-+`shared/src/commonMain/composeResources/drawable/` are derived from
-+[Simple Icons](https://simpleicons.org/) (CC0 1.0), using versions 9, 12 and 16
-+of the icon set.
-+
-+Brand names and logos are trademarks of their respective owners. They are
-+included only to let you identify your own subscriptions and recurring
-+expenses; this app is not affiliated with or endorsed by any of these
-+companies.
 diff --git a/shared/src/commonMain/composeResources/drawable/ic_service_1password.xml b/shared/src/commonMain/composeResources/drawable/ic_service_1password.xml
 new file mode 100644
 index 0000000..9798fb3
