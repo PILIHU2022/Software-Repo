@@ -724,12 +724,36 @@ fi
 
 echo "==> Building $GRADLE_TASK"
 chmod +x "$WORK/gradlew"
-(
-    cd "$WORK"
-    ./gradlew "$GRADLE_TASK" \
-        --no-daemon \
-        --stacktrace
-)
+# Maven Central rate-limits the shared GitHub runner egress with HTTP 429, which
+# aborts dependency resolution before any task runs. That is transient, so retry
+# the whole invocation a couple of times with a growing pause instead of going
+# red (and instead of pointing Gradle at third-party mirrors, which can serve
+# incomplete metadata).
+gradle_log="$(mktemp)"
+attempt=1
+while :; do
+    set +e
+    (
+        cd "$WORK"
+        ./gradlew "$GRADLE_TASK" \
+            --no-daemon \
+            --stacktrace
+    ) 2>&1 | tee "$gradle_log"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if (( rc == 0 )); then
+        rm -f "$gradle_log"
+        break
+    fi
+    if (( attempt >= 3 )) || ! grep -qiE 'status code 429|Too Many Requests|Could not download|Could not resolve all artifacts|Could not GET' "$gradle_log"; then
+        rm -f "$gradle_log"
+        exit "$rc"
+    fi
+    delay=$(( attempt * 30 ))
+    echo "==> Gradle dependency resolution failed transiently (attempt ${attempt}/3); retrying in ${delay}s" >&2
+    sleep "$delay"
+    attempt=$(( attempt + 1 ))
+done
 
 APK_DIR="$WORK/$APK_SUBDIR"
 
