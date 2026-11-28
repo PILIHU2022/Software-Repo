@@ -188,7 +188,14 @@ prepare() {
 
     if [[ "${PATCHWORK_SKIP_NPM_CI:-0}" != "1" ]]; then
         echo "==> Installing JavaScript dependencies (node $(node --version), npm $(npm --version))"
-        (cd "$WORK" && npm ci --no-audit --no-fund)
+        # Upstream's package-lock.json is not always in sync with package.json
+        # for the npm bundled with the runner's Node (npm 10 reports missing
+        # optional entries), so `npm ci` can abort with EUSAGE. Fall back to
+        # `npm install`, which reconciles the lock instead of refusing to run.
+        if ! (cd "$WORK" && npm ci --no-audit --no-fund); then
+            echo "!! npm ci rejected the lockfile; falling back to npm install" >&2
+            (cd "$WORK" && npm install --no-audit --no-fund)
+        fi
     fi
 
     local version patch_count

@@ -728,8 +728,7 @@ chmod +x "$WORK/gradlew"
     cd "$WORK"
     ./gradlew "$GRADLE_TASK" \
         --no-daemon \
-        --stacktrace \
-        --init-script "$ROOT/scripts/gradle-repositories.init.gradle"
+        --stacktrace
 )
 
 APK_DIR="$WORK/$APK_SUBDIR"
