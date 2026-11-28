@@ -1,0 +1,499 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Tue, 24 Nov 2026 00:58:00 +0800
+Subject: [PATCH] Move backup to a sidebar page and show whole-run progress
+
+The desktop backup settings lived in a section of the settings page even
+though a run deserves a page of its own, and the status line took its
+percentage from the current file's bytes, so it fell back to 0% whenever
+the uploads moved on. The sidebar now has a 备份 page that keeps every
+backup row there: schedule, folders, encryption mode, passphrase,
+recipients, signing key and the manual run.
+
+Its progress card shows one bar and percentage for the whole run from
+RunDone/RunTotal, the bytes done and total, the file in flight and a live
+upload speed sampled from those same whole-run bytes. It never lists the
+files one by one, so the progress no longer restarts with every file.
+
+---
+ app/backup.go        | 67 ++++++++++++++++++++++++++++++++++++----------------
+ CHANGELOG.md         |  1 +
+ app/backup_page.go   | 108 ++++++++++++++++++++++++++++++++++++++++++++++++--------
+ app/backup_test.go   | 40 +++++++++++++++++++++++++++++-----
+ app/layout_test.go   |  1 +
+ app/settings_page.go |  2 --
+ app/shell.go         | 12 ++++++++
+ docs/BACKUP.md       |  4 ++-
+ 8 files changed, 171 insertions(+), 64 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8a5fcc7..1d2e4f9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -15,2 +15,3 @@
+ - 设置页新增「备份」小节（桌面端）：自动备份开关、备份到（默认 `/备份`，可换成网盘里任意文件夹）、间隔（仅手动 / 15 分钟 / 30 分钟 / 1 小时 / 6 小时 / 24 小时）、文件夹列表（添加与移除，每个文件夹显示上传 / 跳过 / 失败数与上次备份时间）、加密备份开关与口令设置、立即备份 / 取消、实时进度与上次结果、「查看详情」列出出错的文件；备份在后台按间隔自动运行，注销、退出或改动设置会停掉当前的运行，失败的文件下次重试。备份状态存在用户数据目录的 `backup-state.json`，口令单独用钥匙串密钥加密在 `backup-key.enc`（取不到钥匙串时退回 0600 的密钥文件），不写进 `settings.json`。加密后的文件是标准 OpenPGP（AES-256、iterated+salted SHA-256 S2K、不压缩、带 MDC），`gpg -d xxx.jpg.gpg > xxx.jpg` 即可还原，格式与 Android 端一致，细节见 [docs/BACKUP.md](docs/BACKUP.md)。
++- 桌面端把「备份」从设置页移到侧边栏独立页面，并新增总体进度卡片：按整次运行的 `RunDone` / `RunTotal` 显示进度条与百分比、已传字节 / 总字节、当前文件、已完成数量 / 总文件数和实时上传速度，不再用当前文件自己的 `Done` / `Total` 驱动进度，也不会再逐个文件展示进度。
+ 
+diff --git a/app/backup.go b/app/backup.go
+index 2206425..f2ab7d1 100644
+--- a/app/backup.go
++++ b/app/backup.go
+@@ -21,7 +21,7 @@ import (
+ 	"github.com/pengstem/baidunetgo/internal/pgp"
+ )
+ 
+-// The 备份 section of the settings page mirrors local folders into the
++// The 备份 page mirrors local folders into the
+ // netdisk with internal/backup. Its state lives here; the page that draws and
+ // edits it is backup_page.go, and the passphrase's sealed file is
+ // backup_key.go.
+@@ -118,13 +118,16 @@ func (b backupClient) Upload(ctx context.Context, local, remote string, progress
+ 
+ // backupState is the 备份 section's state and the run under way.
+ type backupState struct {
+-	running  bool               // a run goes on now
+-	cancel   context.CancelFunc // stops that run
+-	progress backup.Progress    // the latest report of it
+-	timer    *time.Timer        // the next automatic run, nil for none
+-	next     time.Time          // when that timer fires, zero for none
+-	loaded   bool               // backup-state.json was read
+-	st       *backup.State      // what was backed up, as the engine keeps it
++	running   bool               // a run goes on now
++	cancel    context.CancelFunc // stops that run
++	progress  backup.Progress    // the latest report of it
++	speedDone int64              // RunDone when speedAt was taken
++	speedAt   time.Time          // when the upload speed was last measured
++	speed     int64              // bytes per second, from RunDone deltas
++	timer     *time.Timer        // the next automatic run, nil for none
++	next      time.Time          // when that timer fires, zero for none
++	loaded    bool               // backup-state.json was read
++	st        *backup.State      // what was backed up, as the engine keeps it
+ 
+ 	// What the last completed run did, as the page shows it and the state
+ 	// file keeps it.
+@@ -798,7 +798,8 @@ func (a *App) startBackup(manual bool) bool {
+ 	a.stopBackupTimer()
+ 	a.backup.running, a.backup.cancel = true, cancel
+ 	a.backup.progress = backup.Progress{}
++	a.backup.speedDone, a.backup.speedAt, a.backup.speed = 0, time.Time{}, 0
+ 
+ 	cl := backupClient{c: s.client, parallel: a.settings.upload()}
+ 	b := a.backup
+ 	mode := a.settings.backupEncryptMode()
+@@ -888,6 +918,7 @@ func (a *App) backupReporter() func(backup.Progress) {
+ 			mu.Unlock()
+ 			if ok {
+ 				a.backup.progress = p
++				a.sampleBackupSpeed(p, time.Now())
+ 			}
+ 		})
+ 	}
+@@ -899,6 +930,7 @@ func (a *App) finishedBackup(s *session, cfg backup.Config, res backup.Result, e
+ 	b := &a.backup
+ 	b.running, b.cancel = false, nil
+ 	b.progress = backup.Progress{}
++	b.speedDone, b.speedAt, b.speed = 0, time.Time{}, 0
+ 	canceled := errors.Is(err, context.Canceled)
+ 	if !canceled {
+ 		now := time.Now()
+@@ -1099,26 +1131,19 @@ func (a *App) backupTimerFired() {
+ 	}
+ }
+ 
+-// backupStatus is the line the 备份 section shows of the run under way or the
+-// last one.
++// backupStatus is the line the 备份 page shows of the run under way or the
++// last one. Its percentage is the whole run's, never one file's: a file's
++// Done/Total restarts with every upload and made the old line look stuck.
+ func (a *App) backupStatus() string {
+ 	b := &a.backup
+ 	if b.running {
+ 		p := b.progress
+-		if p.Files == 0 {
++		if p.RunTotal <= 0 {
+ 			return "正在扫描文件…"
+ 		}
+-		name := p.File
+-		if base := filepath.Base(p.Folder); base != "" {
+-			name = base + "/" + p.File
+-		}
+-		pct := 0
+-		if p.Total > 0 && p.Done > 0 {
+-			pct = int(float64(p.Done) * 100 / float64(p.Total))
+-			pct = min(pct, 100)
+-		}
+ 		done := p.Uploaded + p.Skipped + p.Failed
+-		return "正在备份 " + name + "（" + itoa(pct) + "%）· " + itoa(done) + "/" + itoa(p.Files) + " 个文件"
++		return "正在备份（总体 " + itoa(backupPercent(p)) + "%）· " +
++			itoa(done) + "/" + itoa(p.Files) + " 个文件"
+ 	}
+ 	if b.lastErr != "" {
+ 		return b.lastErr
+@@ -1134,6 +1133,32 @@ func (a *App) backupEncryptSummary() string {
+ 	return strings.Join(parts, " · ")
+ }
+ 
++// backupPercent is the whole run's progress, capped at 100. RunTotal is 0
++// while the scan is still counting, and callers say so instead.
++func backupPercent(p backup.Progress) int {
++	if p.RunTotal <= 0 {
++		return 0
++	}
++	pct := int(float64(p.RunDone) * 100 / float64(p.RunTotal))
++	return min(pct, 100)
++}
++
++// sampleBackupSpeed measures the bytes RunDone grew since the last sample.
++// It runs on the UI thread, where the reporter stores progress, so the
++// fields it reads and writes need no lock. A fresh scan resets the sample;
++// slow reports keep the last measured speed between samples.
++func (a *App) sampleBackupSpeed(p backup.Progress, now time.Time) {
++	b := &a.backup
++	if p.RunTotal <= 0 || p.RunDone < b.speedDone || b.speedAt.IsZero() {
++		b.speedDone, b.speedAt, b.speed = p.RunDone, now, 0
++		return
++	}
++	if d := now.Sub(b.speedAt); d >= 300*time.Millisecond {
++		b.speed = int64(float64(p.RunDone-b.speedDone) / d.Seconds())
++		b.speedDone, b.speedAt = p.RunDone, now
++	}
++}
++
+ // backupFolderStatus is the line of one configured folder: what the state
+ // knows of it and when it was last backed up.
+ func (a *App) backupFolderStatus(local string) string {
+diff --git a/app/backup_page.go b/app/backup_page.go
+index a47b8e6..574e04e 100644
+--- a/app/backup_page.go
++++ b/app/backup_page.go
+@@ -13,12 +13,10 @@ import (
+ 	"github.com/pengstem/baidunetgo/internal/pgp"
+ )
+ 
+-// The 备份 section of the settings page: the automatic folder backup's
+-// switch, destination, interval, folder list, encryption and the manual run.
+-// The state it edits and the run behind it are in backup.go.
+-
+-// backupSection is the settings page's 备份 group.
+-func (a *App) backupSection(c *ui.Context, t *ui.Theme, p *palette) {
++// backupPage is the sidebar's 备份 page: the automatic folder backup's
++// switch, destination, interval, folder list, encryption, signing and the
++// manual run. The state it edits and the run behind it are in backup.go.
++func (a *App) backupPage(c *ui.Context, t *ui.Theme, p *palette) {
+ 	// The state file, the sealed passphrase and the key files are read once,
+ 	// here or when a run starts; all are small files.
+ 	a.backupFileLoaded()
+@@ -26,34 +24,82 @@ func (a *App) backupSection(c *ui.Context, t *ui.Theme, p *palette) {
+ 	a.backupKeysLoaded()
+ 	s := &a.settings
+ 	b := &a.backup
+-	section(c, t, p, "备份", func() {
+-		a.backupSwitchRow(c, t, p, s, b)
+-		settingRow(c, t, p, "备份到", "", s.backupDest(), func() {
+-			if pill(c, t, p, "folder", "选择…", false).Clicked() {
+-				a.openBackupDest()
+-			}
++	ui.Scroll(c).Grow(1).Padding(12, 24, 40).Children(func() {
++		a.backupProgressSection(c, t, p, b)
++		section(c, t, p, "备份", func() {
++			a.backupSwitchRow(c, t, p, s, b)
++			settingRow(c, t, p, "备份到", "", s.backupDest(), func() {
++				if pill(c, t, p, "folder", "选择…", false).Clicked() {
++					a.openBackupDest()
++				}
++			})
++			settingRow(c, t, p, "间隔", "", s.backupIntervalDetail(), func() {
++				labels := backupIntervalLabels
++				chosen := s.backupIntervalIndex()
++				was := chosen
++				popUp(c, t, p, &chosen, labels, nil).Label("备份间隔")
++				if chosen == was {
++					return
++				}
++				s.Backup.Interval = backupIntervals[chosen]
++				a.applyBackupSettings()
++			})
++			a.backupFolderRows(c, t, p, s, b)
++			a.backupEncryptRow(c, t, p, s, b)
++			a.backupEncryptModeRow(c, t, p, s, b)
++			if mode := s.backupConfiguredEncryptMode(); mode != backupModeKeys {
++				a.backupPasswordRow(c, t, p, s, b)
++			}
++			a.backupRecipientsRow(c, t, p, s, b)
++			a.backupSignRow(c, t, p, s, b)
++			a.backupSignerRow(c, t, p, s, b)
++			a.backupRunRow(c, t, p, s, b)
+ 		})
+-		settingRow(c, t, p, "间隔", "", s.backupIntervalDetail(), func() {
+-			labels := backupIntervalLabels
+-			chosen := s.backupIntervalIndex()
+-			was := chosen
+-			popUp(c, t, p, &chosen, labels, nil).Label("备份间隔")
+-			if chosen == was {
+-				return
+-			}
+-			s.Backup.Interval = backupIntervals[chosen]
+-			a.applyBackupSettings()
++	})
++	a.backupDialogs(c, t, p)
++}
++
++// backupProgressSection puts the whole run first: one percentage from the
++// engine's RunDone/RunTotal bytes, not the file a worker happens to report,
++// beside the file being sent now and the speed the run is making.
++func (a *App) backupProgressSection(c *ui.Context, t *ui.Theme, p *palette, b *backupState) {
++	if !b.running {
++		return
++	}
++	pr := b.progress
++	section(c, t, p, "备份进度", func() {
++		if pr.RunTotal <= 0 {
++			settingRow(c, t, p, "正在扫描文件…", "", "统计要上传的文件后开始上传", func() {})
++			return
++		}
++		pct := backupPercent(pr)
++		settingRow(c, t, p, "总体进度", "", itoa(pct)+"%", func() {
++			figure(c, humanSize(pr.RunDone)+" / "+humanSize(pr.RunTotal)).FontSize(12).TextColor(t.TextMuted)
+ 		})
++		ui.Column(c).Padding(8, 0, 8).Children(func() {
++			ui.Box(c).Height(8).FillWidth().Radius(4).Background(t.Border).Draw(func(pt *ui.Painter, r ui.Rect) {
++				done := r.W * float32(pct) / 100
++				if done > 0 {
++					pt.Fill(ui.Rect{X: r.X, Y: r.Y, W: done, H: r.H}, t.Accent, 4)
++				}
++			})
++		})
+-		a.backupFolderRows(c, t, p, s, b)
+-		a.backupEncryptRow(c, t, p, s, b)
+-		a.backupEncryptModeRow(c, t, p, s, b)
+-		if mode := s.backupConfiguredEncryptMode(); mode != backupModeKeys {
+-			a.backupPasswordRow(c, t, p, s, b)
++		name := pr.File
++		if base := filepath.Base(pr.Folder); base != "" {
++			name = base + "/" + pr.File
+ 		}
+-		a.backupRecipientsRow(c, t, p, s, b)
+-		a.backupSignRow(c, t, p, s, b)
+-		a.backupSignerRow(c, t, p, s, b)
+-		a.backupRunRow(c, t, p, s, b)
++		if name == "" {
++			name = "等待下一个文件"
++		}
++		settingRow(c, t, p, "当前文件", "", name, func() {})
++		speed := "0 B/s"
++		if b.speed > 0 {
++			speed = humanSize(b.speed) + "/s"
++		}
++		settingRow(c, t, p, "上传速度", "", speed, func() {
++			figure(c, itoa(pr.Uploaded+pr.Skipped+pr.Failed)+" / "+itoa(pr.Files)+" 个文件").
++				FontSize(11).TextColor(t.TextMuted)
++		})
+ 	})
+ }
+ 
+diff --git a/app/backup_test.go b/app/backup_test.go
+index 008a73e..1477612 100644
+--- a/app/backup_test.go
++++ b/app/backup_test.go
+@@ -65,7 +65,7 @@ func TestBackupSettings(t *testing.T) {
+ func TestBackupSettings(t *testing.T) {
+ 	settingsDir, _ := backupTestDirs(t)
+ 	a, tt, _ := signedIn(t)
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	scrollToShow(t, tt, "备份到")
+ 	for _, want := range []string{"自动备份", "备份到", "间隔", "加密备份", "密码", "立即备份"} {
+@@ -124,7 +124,7 @@ func TestBackupEncryptAsksForPassword(t *testing.T) {
+ func TestBackupEncryptAsksForPassword(t *testing.T) {
+ 	settingsDir, stateDir := backupTestDirs(t)
+ 	a, tt, _ := signedIn(t)
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	scrollToShow(t, tt, "加密备份")
+ 	sw, ok := tt.AccessByRole(ui.RoleSwitch, "加密备份")
+@@ -201,7 +201,7 @@ func TestBackupEncryptModeStaysWhenSwitchedOff(t *testing.T) {
+ 	a.settings.Backup.Encrypt = false
+ 	a.settings.Backup.EncryptMode = backupModePassphrase
+ 	a.applyBackupSettings()
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	scrollToShow(t, tt, "加密方式")
+ 	if err := tt.Click("仅密码"); err != nil {
+@@ -258,7 +258,7 @@ func TestBackupDestNewFolder(t *testing.T) {
+ func TestBackupDestNewFolder(t *testing.T) {
+ 	backupTestDirs(t)
+ 	a, tt, srv := signedIn(t)
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	a.openBackupDest()
+ 	tt.Advance(100 * time.Millisecond)
+@@ -331,7 +331,7 @@ func TestBackupRun(t *testing.T) {
+ 		Folders: []backup.Folder{{Local: local}},
+ 	}
+ 	a.applyBackupSettings()
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 
+ 	a.runBackupNow()
+@@ -454,7 +454,7 @@ func TestBackupMissingFolderKeepsGoing(t *testing.T) {
+ 		t.Errorf("a missing folder failed the whole run: %q", a.backup.lastErr)
+ 	}
+ 
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	scrollToShow(t, tt, "查看详情")
+ 	if err := tt.Click("查看详情"); err != nil {
+@@ -504,7 +504,7 @@ func TestBackupFoldersAddRemove(t *testing.T) {
+ 		t.Errorf("settings.json keeps %d folders, want 2: %s", len(s.Backup.Folders), data)
+ 	}
+ 
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	scrollToShow(t, tt, "移除")
+ 	if err := tt.Click("移除"); err != nil {
+@@ -516,6 +516,28 @@ func TestBackupFoldersAddRemove(t *testing.T) {
+ 	}
+ }
+ 
++// TestBackupStatusUsesRunProgress checks that the page's percentage comes
++// from the whole run's bytes, not from the file being uploaded, and that the
++// speed sample follows RunDone rather than one file's Done.
++func TestBackupStatusUsesRunProgress(t *testing.T) {
++	backupTestDirs(t)
++	a, _, _ := signedIn(t)
++	a.backup.running = true
++	a.backup.progress = backup.Progress{
++		Files: 4, Uploaded: 1, RunDone: 50, RunTotal: 200,
++		File: "b.txt", Folder: "/照片", Done: 1, Total: 2,
++	}
++	if got := a.backupStatus(); !strings.Contains(got, "25%") {
++		t.Errorf("status %q does not show the run's 25%%", got)
++	}
++	t0 := time.Unix(100, 0)
++	a.sampleBackupSpeed(backup.Progress{RunDone: 50, RunTotal: 200}, t0)
++	a.sampleBackupSpeed(backup.Progress{RunDone: 150, RunTotal: 200}, t0.Add(time.Second))
++	if got := a.backup.speed; got != 100 {
++		t.Errorf("speed %d B/s, want 100", got)
++	}
++}
++
+ // TestBackupSchedule checks the automatic run's timing, that a new interval
+ // reschedules it, that it starts by itself, and that signing out stops it.
+ func TestBackupSchedule(t *testing.T) {
+@@ -735,7 +757,7 @@ func TestBackupSignerGenerate(t *testing.T) {
+ 	// The signer row shows the identity.
+ 	a.backup.genPublicOpen, a.backup.sigOpen = false, false
+ 	tt.Advance(200 * time.Millisecond)
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	scrollToShow(t, tt, "签名密钥")
+ 	if !tt.HasText("测试签名") {
+@@ -949,7 +971,7 @@ func TestBackupKeysSection(t *testing.T) {
+ 		Sign:        true,
+ 	}
+ 	a.applyBackupSettings()
+-	a.router.Push("/settings")
++	a.router.Push("/backup")
+ 	waitFor(t, tt, "备份到")
+ 	scrollToShow(t, tt, "备份状态")
+ 	save(t, tt, "settings-backup-keys")
+diff --git a/app/layout_test.go b/app/layout_test.go
+index 5667864..4d356f2 100644
+--- a/app/layout_test.go
++++ b/app/layout_test.go
+@@ -105,6 +105,7 @@ func TestPagesAtSmallest(t *testing.T) {
+ 		{"/shares", "我的分享"},
+ 		{"/offline", "离线下载"},
+ 		{"/dedup", "查重"},
++		{"/backup", "备份"},
+ 		{"/recycle", "回收站"},
+ 		{"/settings", "设置"},
+ 	} {
+diff --git a/app/settings_page.go b/app/settings_page.go
+index 1d40fb9..481af3a 100644
+--- a/app/settings_page.go
++++ b/app/settings_page.go
+@@ -495,7 +495,6 @@ func (a *App) accentDialog(c *ui.Context, t *ui.Theme, p *palette) {
+ 					}
+ 				})
+ 			})
+-			a.backupSection(c, t, p)
+ 			a.updatesSection(c, t, p)
+ 			section(c, t, p, "关于", func() {
+ 				settingRow(c, t, p, "BaiduNetGo", "", "百度网盘的原生桌面客户端", func() {
+@@ -517,7 +516,6 @@ func (a *App) accentDialog(c *ui.Context, t *ui.Theme, p *palette) {
+ 	})
+ 	a.updateDialog(c, t, p)
+ 	a.accentDialog(c, t, p)
+-	a.backupDialogs(c, t, p)
+ }
+ 
+ // section is a group of settings under its title: a rounded gray panel,
+diff --git a/app/shell.go b/app/shell.go
+index 4d9cb39..b3e1f20 100644
+--- a/app/shell.go
++++ b/app/shell.go
+@@ -20,6 +20,7 @@
+ 	{"/shares", "分享", ui.Hex("#ff9500")},
+ 	{"/offline", "离线下载", ui.Hex("#30b0c7")},
+ 	{"/dedup", "查重", ui.Hex("#af52de")},
++	{"/backup", "备份", ui.Hex("#0a84ff")},
+ 	{"/recycle", "回收站", ui.Hex("#8e8e93")},
+ }
+ 
+@@ -99,6 +100,9 @@ func (a *App) shell(c *ui.Context, t *ui.Theme, p *palette) {
+ 				case r.Match("/dedup"):
+ 					r.Title("查重")
+ 					a.dedupPage(c, t, p)
++				case r.Match("/backup"):
++					r.Title("备份")
++					a.backupPage(c, t, p)
+ 				case r.Match("/recycle"):
+ 					r.Title("回收站")
+ 					a.recyclePage(c, t, p)
+@@ -378,6 +382,14 @@ func (a *App) subtitle() string {
+ 			return itoa(len(a.dedup.groups)) + " 组重复 · 可释放 " + humanSize(a.dedup.totalReclaim)
+ 		}
+ 		return "按网盘 MD5 找出内容相同的文件"
++	case "/backup":
++		if a.backup.running {
++			return a.backupStatus()
++		}
++		if a.backup.lastRun.IsZero() {
++			return "把选中的文件夹自动备份到网盘"
++		}
++		return "上次备份 " + backupClock(a.backup.lastRun)
+ 	case "/recycle":
+ 		if a.recycle.loaded {
+ 			return itoa(len(a.recycle.items)) + " 项 · 到期自动清除"
+diff --git a/docs/BACKUP.md b/docs/BACKUP.md
+index a4e4826..f366368 100644
+--- a/docs/BACKUP.md
++++ b/docs/BACKUP.md
+@@ -4,12 +4,14 @@
+ 
+ ## 目录布局
+ 
+-- 桌面：设置 →「备份」→「文件夹」里添加任意多个本机文件夹；每个文件夹镜像到 `<备份到>/<文件夹名>/<相对路径>`，`备份到` 默认 `/备份`。点「备份到」一行右侧的「选择…」可逐级进入网盘目录，弹窗底部的「新建文件夹…」能在当前目录下直接建一个新文件夹并进入它。
++- 桌面：侧边栏「备份」页里添加任意多个本机文件夹；每个文件夹镜像到 `<备份到>/<文件夹名>/<相对路径>`，`备份到` 默认 `/备份`。点「备份到」一行右侧的「选择…」可逐级进入网盘目录，弹窗底部的「新建文件夹…」能在当前目录下直接建一个新文件夹并进入它。
+ - Android：同一个「备份」页用系统的目录选择器（SAF）添加文件夹，布局与桌面一致，`备份到` 默认 `/备份`。
+ - 相册（仅 Android）：「相册备份」把选中相册里的照片与视频传到 `<备份到>/相册/<相册名>/<文件名>`。
+ 
+ 网盘上目录按需要自动创建；两种备份都不会删除网盘上已有的文件，也不会删除本机的文件——本机删掉的文件只是不再上传。
+ 
++正在备份时，桌面端「备份」页顶部显示整次运行的进度条与总体百分比（按总字节数）、当前文件与实时上传速度；进度不会因为换到下一个文件而回到 0。
++
+ ## 增量
+ 
+ 每个文件的键是「备份源 + 相对路径」，值记下大小与修改时间（精确到纳秒，Android 用毫秒）。下次运行时大小与修改时间都没变就跳过，不读文件、也不碰网盘；变了才重新上传并覆盖网盘上的同名文件。备份状态存在本机的用户数据目录里：
+
+-- 
+2.47.3

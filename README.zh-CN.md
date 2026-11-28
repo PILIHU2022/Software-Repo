@@ -2,6 +2,7 @@
 
 [![Gadgetbridge](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml)
 [![Fcitx5 for Android](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml)
+[![Bitwarden](https://github.com/PILIHU2022/Software-Repo/actions/workflows/bitwarden.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/bitwarden.yml)
 [![Deploy Pages](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
@@ -10,17 +11,19 @@
 这是一个面向六个 Android 应用——**ScreenTime**、**RecurringExpenseTracker**、
 **Fcitx5 for Android**、**BasicSync**、**Gadgetbridge** 与
 **BaiduNetGo Android 客户端**——一个桌面应用
-**BaiduNetGo**，以及一个内置源码应用
-**[DataArk](dataark/README.md)** 的个人构建仓库。前六个走补丁队列；DataArk 的
+**BaiduNetGo**、**Bitwarden** 浏览器插件与桌面客户端，以及一个内置源码应用
+**[DataArk](dataark/README.md)** 的个人构建仓库。前六个 Android 应用与 Bitwarden
+走补丁队列；DataArk 的
 完整源码直接提交在 [`dataark/`](dataark/)（原创 Kotlin/Compose 应用数据备份工具，
 支持 Root / Shizuku / Dhizuku 三种特权来源，GPL-3.0-or-later，图标来自
 Android-DataBackup），其 CI（[.github/workflows/dataark.yml](.github/workflows/dataark.yml)）
 默认**永久休眠**：2 月 30 日的 cron、不可达的分支过滤、再加 `if: false` 三重保险，
 不会自动或手动触发。
-BaiduNetGo 桌面版只在这里构建，它**不属于** Android / F-Droid 应用。仓库里不保存任何
-应用源码，只保存按顺序应用的补丁队列，以及把补丁应用到上游当前代码、构建签名
-APK、发布签名 F-Droid 仓库的 CI；桌面应用则构建 x86 安装包，发布成带 tag 的
-GitHub Release 并附一份更新 feed。
+BaiduNetGo 桌面版与 Bitwarden 只在这里构建，**不属于** Android / F-Droid 应用。
+仓库里不保存任何应用源码，只保存按顺序应用的补丁队列，以及把补丁应用到上游当前
+代码、构建签名 APK、发布签名 F-Droid 仓库的 CI；BaiduNetGo 桌面版构建 x86 安装包，
+发布成带 tag 的 GitHub Release 并附一份更新 feed，Bitwarden 则构建浏览器插件和
+Windows/Linux/macOS 桌面安装包并上传为 workflow artifact。
 
 > 个人项目，与上游作者（Dennis Bauer、Atharok、Fcitx5 for Android 贡献者、
 > Andrew Gunnerson、
@@ -31,14 +34,16 @@ GitHub Release 并附一份更新 feed。
 一个 *patchwork overlay*（补丁叠加）单仓库，只存两样东西，不存应用源码：
 
 1. **补丁队列** —— Android 应用在 `apps/<app>/patches/*.patch`，桌面应用在
-   `desktop/baidunetgo/patches/*.patch`，都能按顺序用 `git am -3` 应用到上游分支
-   之上。监控的分支分别是：expenses `main`、screentime `main`、fcitx5 `master`
-   （GitHub 上 fcitx5-android 的真实默认分支，不是 `main`；URL 不受影响）与
-   baidunetgo `main`；
+   `desktop/baidunetgo/patches/*.patch` 与 `desktop/bitwarden/patches/*.patch`，
+   都能按顺序用 `git am -3` 应用到上游分支之上。监控的分支分别是：expenses
+   `main`、screentime `main`、fcitx5 `master`（GitHub 上 fcitx5-android 的真实
+   默认分支，不是 `main`；URL 不受影响）、baidunetgo `main` 与 bitwarden/clients
+   `main`；
 2. **构建与发布自动化** —— CI 拉取上游当前 `main`，应用补丁队列，改写版本号，
    构建签名 APK，并更新签名后的 F-Droid 仓库；另一条独立的 `baidunetgo.yml`
    只构建 x86 桌面安装包，把安装包发布成带 tag 的 Release，并提交更新 feed
-   `desktop/baidunetgo/update.json`，完全不碰 F-Droid。
+   `desktop/baidunetgo/update.json`，完全不碰 F-Droid；`bitwarden.yml` 构建浏览器
+   插件和 Windows、Linux、macOS 桌面客户端。
 
 每次构建都把补丁重新应用到最新的上游提交上，因此上游的修复和新功能会自动进入
 构建，而不需要长期维护一个已经分叉的 fork。补丁一旦无法应用，流水线会失败并开
@@ -51,19 +56,30 @@ issue，而不是继续发布过期代码。
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker)（`main`） | `5073379` | 20 | `0.21.5-patchwork` (6913, arm64-v8a) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `ec95b22` | 11 | `1.4.2-patchwork`（1405，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 17 | `0.1.3-patchwork`（11207，arm64-v8a） |
-| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `9111cae` | 3 | `3.30-patchwork`（25807204，arm64-v8a） |
-| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `bd56cf3` | 5 | `2026.11.1-patchwork`（25705，arm64-v8a） |
+| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `9111cae` | 5 | `3.30-patchwork`（25807204，arm64-v8a） |
+| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `bd56cf3` | 9 | `2026.11.1-patchwork`（25705，arm64-v8a） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 48 | `0.8.3.48` —— 上游 `0.8.3` + 48 个补丁（linux/windows x86、Arch 包；Release + feed） |
 | BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 48 | `0.8.3-patchwork`（80348 —— 上游 803 × 100 + 48 个补丁） |
+| Bitwarden | [bitwarden/clients](https://github.com/bitwarden/clients)（`main`） | *首次 CI 构建* | 2 | workflow artifact —— Chrome/Firefox/Edge、Linux/Windows/macOS |
 
-五个 Android 应用发布在 F-Droid。**BaiduNetGo 桌面版不发布**：它是 Go/MyGo 桌面程序，
-按自己的 10 天周期构建：安装包（`.deb`、`.tar.gz`、Arch Linux 的
+五个 Android 应用发布在 F-Droid。**BaiduNetGo 桌面版与 Bitwarden 不发布到
+F-Droid**：BaiduNetGo 是 Go/MyGo 桌面程序，按自己的 10 天周期构建：安装包（`.deb`、`.tar.gz`、Arch Linux 的
 `.pkg.tar.zst`（用 `sudo pacman -U` 安装）、Windows 安装版/便携版 `.zip`）发布成
 `baidunetgo-desktop-<version>-<short_sha>` 的 Release，同时保留
 `baidunetgo-x86-<sha>` artifact；Linux 上下载更新后可以就地安装并重启，pacman
 装的副本则改为提示用 `pacman -U`。每次构建还会提交更新 feed
 `desktop/baidunetgo/update.json`（地址
 <https://raw.githubusercontent.com/PILIHU2022/Software-Repo/main/desktop/baidunetgo/update.json>，已内置进二进制），永远不会变成 APK。
+
+**Bitwarden** —— 浏览器插件与 Electron 客户端由 `bitwarden/clients` 加两个补丁构建。
+第一个补丁在扩展弹窗和桌面窗口中加入离线的**安全检测**：弱口令、重复口令、已泄露
+口令，以及没有保存 TOTP 的登录。HIBP 查询只发送 SHA-1 哈希的前 5 位，密码和完整
+哈希不会离开本机；页面不依赖 NodeWarden 服务端。第二个补丁在 Electron ready 之前
+设置 `ozone-platform-hint=auto`，在 Wayland 会话启用原生窗口装饰，同时保留 X11
+回退和 `ELECTRON_OZONE_PLATFORM_HINT=x11` 逃生口。CI 在 Linux 上构建 Chrome、
+Firefox、Edge 插件，并在 Ubuntu、Windows、macOS 原生 runner 上分别打包桌面客户端；
+Linux job 还会在 headless Weston 下启动打包后的程序做冒烟测试。详见
+[`desktop/bitwarden/README.md`](desktop/bitwarden/README.md)。
 
 **ScreenTime** —— 每日使用记录持久化到本地 SQLite 数据库，新增基于该历史的分析页
 （时长表格从 0 递增、星期进度条与柱图从 0 生长；新增独立的「分析」设置分类和本地
@@ -94,11 +110,14 @@ Rime 配置」，也可用
 设置时行为与上游完全一致，官方/F-Droid 构建不受影响。只发布 `arm64-v8a`
 （上游按 ABI 拆包、没有 universal APK），APK 约 52 MB。
 
-**Gadgetbridge** —— 不用厂商应用也能用手环/手表。补丁队列在上游之上加六个补丁：
+**Gadgetbridge** —— 不用厂商应用也能用手环/手表。补丁队列在上游之上加九个补丁：
 
 * **界面迁移到 Jetpack Compose + Material 3 Expressive**：设置树（首页、每个子页面、
   搜索）、首次运行引导、关于页与睡眠评分面板都是 Compose 渲染，其余仍走 XML 的
-  页面则通过统一的 Expressive 圆角叠加获得同样的观感，改主题/强调色时两套界面一致；
+  页面则通过统一的 Expressive 圆角叠加获得同样的观感，改主题/强调色时两套界面一致。
+  设备特定设置页现在也由 Compose 渲染，包括运行时生成的设置项、分区卡片和内联的
+  Material 3 Expressive 滑块；对话框、意图和自定义控件仍保留原有的
+  `Preference.performClick` 行为；
 * **首次运行权限页支持一次点击依次申请全部权限**：先批量申请运行时权限，再打开
   “不限制后台用电”，随后继续通知访问、自启动等特殊权限；每个系统权限仍需逐项确认，
   如果直接请求电池豁免不可用，会回退到系统的电池优化列表；
@@ -106,6 +125,8 @@ Rime 配置」，也可用
   睡眠时长打分（含深睡占比、REM 占比与睡眠效率），显示在日/周图表与仪表板小组件里，
   **点圆环可展开评分构成**，并可在图表设置里关闭。睡眠按醒来日归属：21 日
   23:00 至 22 日 07:00 的一夜计入 22 日；
+* **日/周图表的睡眠阶段占比**：每个阶段卡片同时显示时长及其占总睡眠的比例，直接由
+  已记录的睡眠会话自动计算并取整；清醒按卧床时间计算，不拿排除清醒后的总睡眠当分母；
 * **每次打开应用都备份**——那是进程一定还活着、一定允许写的时刻——有独立的设置
   分类、保留天数、可更改的备份文件夹与「恢复默认目录」，不再只依赖被国产 ROM
   经常跳过的 WorkManager；
@@ -120,6 +141,13 @@ Rime 配置」，也可用
   `SwipeRefreshLayout` 吞掉之后的手势。正常完成的取数仍由原有广播收尾；30 秒是
   等待上限，较慢的同步也可能先隐藏转圈、继续在后台进行。设备就绪后可以直接再次
   下拉同步。
+* **月度/年度健康总结**：把步数与睡眠放在同一页——总步数、日均步数（只按有记录的
+  天数平均，没同步的天数不按 0 计算）、有记录天数与达标天数、每日/每月柱状图和
+  前十名步数日排行榜；睡眠部分包含平均睡眠时长、睡眠评分、睡眠效率、深睡/REM 占比、
+  睡眠目标达成夜数与睡眠质量排行。年度视图把两部分都按月汇总，并可点进对应月份。
+  入口在侧边抽屉和图表设置里；数据复用每日 `DailyTotals` 与睡眠会话，同一天/夜有
+  多台设备记录时取最大值，避免重复计数。睡眠按醒来日归属；评分优先采用设备上报值，
+  设备没有评分且启用了基于年龄的睡眠评分时才使用估算值。
 
 Release APK 由本仓库签名而不是上游：`PATCHWORK_SIGN_*` 交给队列里的一个小构建补丁，
 所以 F-Droid 仓库里的包名与官方一致、签名不同。

@@ -1,0 +1,249 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Thu, 26 Nov 2026 10:00:00 +0800
+Subject: [PATCH] Add conflict preview and partial overwrite state
+
+Conflicts could only be acted on by file name, so the user had to leave
+BasicSync and inspect the copy elsewhere before choosing which version to
+keep. This adds a read-only preview action for direct-storage and SAF conflict
+copies. It also separates the case where the original was successfully
+replaced but the conflict copy could not be deleted: that state is no longer
+reported as a failed overwrite and the card remains visible for cleanup.
+---
+ CHANGELOG.md                                |  1 +
+ app/src/main/AndroidManifest.xml            | 15 ++++
+ .../basicsync/settings/ConflictsScreen.kt   | 58 +++++++++++++++++++++
+ .../basicsync/syncthing/ConflictResolver.kt | 13 ++++-
+ .../values-zh-rCN/strings_conflicts.xml     |  4 +
+ app/src/main/res/values/strings_conflicts.xml | 4 +
+ app/src/main/res/xml/file_provider_paths.xml | 12 ++++
+ 7 files changed, 107 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d9beacf..e56e7e0 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,3 +13,4 @@ ### Unreleased
+ * Add a navigation sidebar and make Syncthing's web UI the main page
+ * Add a conflict management page that can discard a conflict copy or replace the original file with it
++* Add a conflict preview action and report a replaced-but-not-deleted conflict separately
+ 
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 2c760c0..baf0798 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -114,4 +114,19 @@
+         <activity
+             android:name=".settings.ConflictsActivity"
+             android:exported="false" />
++
++        <!--
++            Conflict copies are read from the same folders that BasicSync syncs, but external apps
++            cannot open the raw paths directly. The provider grants only one temporary read grant
++            at a time; it is never used for writing or for any other app data.
++        -->
++        <provider
++            android:name="androidx.core.content.FileProvider"
++            android:authorities="${applicationId}.conflict.fileprovider"
++            android:exported="false"
++            android:grantUriPermissions="true">
++            <meta-data
++                android:name="android.support.FILE_PROVIDER_PATHS"
++                android:resource="@xml/file_provider_paths" />
++        </provider>
+ 
+         <service
+diff --git a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
+index 26346dd..50c53c8 100644
+--- a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
++++ b/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
+@@ -12,5 +12,6 @@ package com.chiller3.basicsync.settings
+ import android.content.res.Configuration
+ import android.net.Uri
++import android.webkit.MimeTypeMap
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.PaddingValues
+@@ -62,3 +63,4 @@ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.tooling.preview.Preview
+ import androidx.compose.ui.unit.dp
++import androidx.core.content.FileProvider
+ import com.chiller3.basicsync.R
+@@ -242,2 +244,10 @@ fun ConflictsScreen(
+                 when (result) {
++                    is ConflictResult.PartialSuccess -> {
++                        // Do not hide the item. Syncthing still reports the copy, and the user can
++                        // retry cleanup with the "Keep original" action without overwriting again.
++                        message = UiMessage(
++                            text = result.message,
++                        )
++                    }
++
+                     is ConflictResult.Success -> {
+@@ -300,2 +310,37 @@ fun ConflictsScreen(
+             },
++            onPreview = { item ->
++                val uri = when {
++                    item.conflictFile != null ->
++                        FileProvider.getUriForFile(
++                            context,
++                            "${context.packageName}.conflict.fileprovider",
++                            File(item.conflictFile),
++                        )
++                    item.conflictUri != null -> item.conflictUri
++                    else -> null
++                }
++
++                if (uri == null) {
++                    message = UiMessage(
++                        text = resources.getString(R.string.conflicts_error_preview),
++                    )
++                } else {
++                    val mimeType = MimeTypeMap.getSingleton()
++                        .getMimeTypeFromExtension(item.fileName.substringAfterLast('.', ""))
++                        ?: "application/octet-stream"
++
++                    try {
++                        val intent = Intent(Intent.ACTION_VIEW).apply {
++                            setDataAndType(uri, mimeType)
++                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
++                        }
++
++                        context.startActivity(intent)
++                    } catch (_: ActivityNotFoundException) {
++                        message = UiMessage(
++                            text = resources.getString(R.string.conflicts_error_preview),
++                        )
++                    }
++                }
++            },
+             contentPadding = params.contentPadding,
+         )
+@@ -371,2 +426,3 @@ fun ConflictsContent(
+     onKeepOriginal: (SyncthingService.ConflictItem) -> Unit,
++    onPreview: (SyncthingService.ConflictItem) -> Unit,
+     onOpenFolder: (Uri) -> Unit,
+@@ -405,3 +460,4 @@ fun ConflictsContent(
+                     onUseConflict = { onUseConflict(conflict) },
+                     onKeepOriginal = { onKeepOriginal(conflict) },
++                    onPreview = { onPreview(conflict) },
+                     onOpenFolder = openFolder,
+@@ -446,2 +502,3 @@ private fun ConflictCard(
+     onKeepOriginal: () -> Unit,
++    onPreview: (() -> Unit)?,
+     onOpenFolder: (() -> Unit)?,
+@@ -550,8 +607,18 @@ private fun ConflictCard(
+             onOpenFolder?.let { onOpenFolder ->
+                 TextButton(
+                     onClick = onOpenFolder,
+                     enabled = enabled,
+                 ) {
+                     Text(text = stringResource(R.string.conflicts_action_open_folder))
+                 }
+             }
++            onPreview?.let { onPreview ->
++                TextButton(
++                    onClick = onPreview,
++                    enabled = enabled,
++                ) {
++                    Text(text = stringResource(R.string.conflicts_action_preview))
++                }
++            }
+         }
+     }
+ }
+@@ -620,2 +687,3 @@ private fun PreviewConflictsScreen() {
+                 onKeepOriginal = {},
++                onPreview = {},
+                 onOpenFolder = {},
+diff --git a/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt b/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
+index 12e11e7..fe5c317 100644
+--- a/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
++++ b/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
+@@ -25,4 +25,10 @@ sealed interface ConflictResult {
+     /** The conflict was resolved. */
+     data object Success : ConflictResult
+ 
++    /**
++     * The original was replaced or restored, but the conflict copy remains. The UI must keep the
++     * item visible so the remaining copy can be deleted without repeating the overwrite.
++     */
++    data class PartialSuccess(val message: String) : ConflictResult
++
+     /**
+      * The conflict could not be resolved.
+@@ -315,7 +321,11 @@ class ConflictResolver(private val context: Context) {
+         if (!conflict.delete()) {
+-            return failure(R.string.conflict_error_remove_after_copy, original.name)
++            return ConflictResult.PartialSuccess(
++                context.getString(R.string.conflict_error_remove_after_copy, original.name),
++            )
++        }
++
+         scanFile(original)
+         return ConflictResult.Success
+     }
+@@ -388,6 +398,8 @@ class ConflictResolver(private val context: Context) {
+         if (!DocumentsContract.deleteDocument(context.contentResolver, conflictDocumentUri)) {
+-            return failure(R.string.conflict_error_remove_after_copy, originalName)
++            return ConflictResult.PartialSuccess(
++                context.getString(R.string.conflict_error_remove_after_copy, originalName),
++            )
+         }
+ 
+         return ConflictResult.Success
+diff --git a/app/src/main/res/values-zh-rCN/strings_conflicts.xml b/app/src/main/res/values-zh-rCN/strings_conflicts.xml
+index a38a2d1..c67a1e0 100644
+--- a/app/src/main/res/values-zh-rCN/strings_conflicts.xml
++++ b/app/src/main/res/values-zh-rCN/strings_conflicts.xml
+@@ -30,5 +30,9 @@
+     <!-- Button that opens the folder containing the conflict file. -->
+     <string name="conflicts_action_open_folder">打开文件夹</string>
+ 
++    <!-- Button that opens the conflict copy in a read-only viewer. -->
++    <string name="conflicts_action_preview">预览</string>
++
++    <!-- Message shown when no viewer can preview the conflict copy or it cannot be opened. -->
++    <string name="conflicts_error_preview">无法预览冲突副本。</string>
++
+     <!-- Title of the confirmation dialog for replacing the original file with the conflict copy. -->
+     <string name="dialog_use_conflict_title">替换原文件？</string>
+ 
+diff --git a/app/src/main/res/values/strings_conflicts.xml b/app/src/main/res/values/strings_conflicts.xml
+index 7b46071..d9168d0 100644
+--- a/app/src/main/res/values/strings_conflicts.xml
++++ b/app/src/main/res/values/strings_conflicts.xml
+@@ -30,5 +30,9 @@
+     <!-- Button that opens the folder containing the conflict file. -->
+     <string name="conflicts_action_open_folder">Open folder</string>
+ 
++    <!-- Button that opens the conflict copy in a read-only viewer. -->
++    <string name="conflicts_action_preview">Preview</string>
++
++    <!-- Message shown when no viewer can preview the conflict copy or it cannot be opened. -->
++    <string name="conflicts_error_preview">Could not preview the conflict copy.</string>
++
+     <!-- Title of the confirmation dialog for replacing the original file with the conflict copy. -->
+     <string name="dialog_use_conflict_title">Replace the original file?</string>
+ 
+diff --git a/app/src/main/res/xml/file_provider_paths.xml b/app/src/main/res/xml/file_provider_paths.xml
+new file mode 100644
+index 0000000..7e14c67
+--- /dev/null
++++ b/app/src/main/res/xml/file_provider_paths.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++    SPDX-FileCopyrightText: 2026 BasicSync patchwork contributors
++    SPDX-License-Identifier: GPL-3.0-only
++-->
++<paths>
++    <!--
++        Syncthing folders may live on the primary external volume or another mounted volume, and
++        their exact roots are chosen at runtime. Grant only the explicitly requested file URI.
++    -->
++    <root-path name="conflicts" path="." />
++</paths>
+-- 
+2.47.1
+

@@ -17,6 +17,8 @@ Auto-export fixes:
 - PeriodicExporter no longer cancels and re-enqueues the work on every app start (ExistingPeriodicWorkPolicy.UPDATE, cancelUniqueWork only when disabled).
 - ZipBackupExportJob exports into a temporary file, validates it, and only then writes the target, deleting the partial target if the copy fails.
 - The zip auto-export location picker now picks a directory, so its runs are timestamped and rotated too.
+- A periodic export that starts while the app-open backup is writing now waits for it instead of reporting a failed export; a missing or revoked folder grant falls back to the app's own backup directory.
+- Existing grants are persisted with write access when a provider rejects read+write, and new SAF documents are written with a mode providers accept.
 
 Material 3 settings screen:
 - New OnOpenBackupSettingsActivity with an MD3 preference screen (switch, folder picker, retention list, run now, clean now, status), reachable from Settings > Automations and indexed for settings search.
@@ -25,23 +27,23 @@ Material 3 settings screen:
  app/src/main/AndroidManifest.xml              |   4 +
  .../activities/ControlCenterv2.java           |   6 +
  .../activities/SettingsActivity.java          |   3 +
- .../AbstractAutoExportSettingsFragment.kt     |  42 +-
+ .../AbstractAutoExportSettingsFragment.kt     |  54 +-
  .../OnOpenBackupSettingsActivity.kt           | 286 ++++++++++++
  .../activities/welcome/WelcomeActivity.java   |   5 +
  .../gadgetbridge/util/PeriodicExporter.kt     |  17 +-
  .../util/backup/AbstractZipBackupJob.java     |   7 +
  .../util/backup/BackupRetention.kt            |  64 +++
- .../gadgetbridge/util/backup/BackupStorage.kt | 366 +++++++++++++++
+ .../gadgetbridge/util/backup/BackupStorage.kt | 441 +++++++++++++++++++
  .../util/backup/OnOpenBackupPrefs.kt          | 141 ++++++
- .../util/backup/OnOpenBackupRunner.kt         | 422 ++++++++++++++++++
+ .../util/backup/OnOpenBackupRunner.kt         | 440 ++++++++++++++++++
  .../util/backup/ZipBackupExportJob.java       | 183 +++++++-
- .../util/backup/ZipExportWorker.kt            |  27 +-
+ .../util/backup/ZipExportWorker.kt            |  35 +-
  app/src/main/res/values/arrays.xml            |  15 +
  app/src/main/res/values/strings.xml           |  19 +
  app/src/main/res/xml/automations_settings.xml |   8 +
  .../main/res/xml/on_open_backup_settings.xml  |  70 +++
  .../util/backup/OnOpenBackupRetentionTest.kt  | 154 +++++++
- 19 files changed, 1816 insertions(+), 23 deletions(-)
+ 19 files changed, 1929 insertions(+), 23 deletions(-)
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/OnOpenBackupSettingsActivity.kt
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupRetention.kt
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt
@@ -122,7 +124,7 @@ index 5bb5f45d79..d855c29ce6 100644
  import org.slf4j.Logger
  import org.slf4j.LoggerFactory
  import java.util.Date
-@@ -73,10 +74,19 @@ abstract class AbstractAutoExportSettingsFragment(
+@@ -73,10 +74,30 @@ abstract class AbstractAutoExportSettingsFragment(
                  LOG.error("Got no uri")
                  return@registerForActivityResult
              }
@@ -139,13 +141,24 @@ index 5bb5f45d79..d855c29ce6 100644
 +            try {
 +                requireContext().contentResolver.takePersistableUriPermission(uri, permissionFlags)
 +            } catch (e: SecurityException) {
-+                // Some providers do not support persistable grants; the location is still stored
-+                LOG.warn("Failed to take the persistable uri permission for {}", uri, e)
++                // A tree provider may grant write access without read access, in which case taking
++                // both flags fails as a whole. Retry with write access only before giving up;
++                // otherwise the location is stored but cannot be used after the app restarts.
++                val writeFlag = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
++                if (permissionFlags != writeFlag) {
++                    try {
++                        requireContext().contentResolver.takePersistableUriPermission(uri, writeFlag)
++                    } catch (writeError: SecurityException) {
++                        LOG.warn("Failed to take the persistable uri permission for {}", uri, writeError)
++                    }
++                } else {
++                    LOG.warn("Failed to take the persistable uri permission for {}", uri, e)
++                }
 +            }
              gbPrefs.preferences.edit {
                  putString(prefKeyLocation, uri.toString())
              }
-@@ -92,12 +102,20 @@ abstract class AbstractAutoExportSettingsFragment(
+@@ -92,12 +113,21 @@ abstract class AbstractAutoExportSettingsFragment(
          val prefExportLocation = findPreference<Preference>(prefKeyLocation)
          if (prefExportLocation != null) {
              prefExportLocation.setOnPreferenceClickListener {
@@ -157,7 +170,8 @@ index 5bb5f45d79..d855c29ce6 100644
                  val title: String = requireContext().applicationContext.getString(R.string.choose_auto_export_location)
 +                val chooseFlags = Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
 +                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
-+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
++                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
++                    Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
 +
 +                val i: Intent = if (picksBackupDirectory()) {
 +                    Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(chooseFlags)
@@ -171,7 +185,7 @@ index 5bb5f45d79..d855c29ce6 100644
                  exportLocationPicker.launch(Intent.createChooser(i, title))
  
                  true
-@@ -147,6 +165,14 @@ abstract class AbstractAutoExportSettingsFragment(
+@@ -147,6 +177,14 @@ abstract class AbstractAutoExportSettingsFragment(
          }
      }
  
@@ -650,7 +664,7 @@ new file mode 100644
 index 0000000000..ee50ce7730
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,441 @@
 +/*  Copyright (C) 2026 Gadgetbridge contributors
 +
 +    This file is part of Gadgetbridge.
@@ -679,6 +693,7 @@ index 0000000000..ee50ce7730
 +import java.io.File
 +import java.io.FileOutputStream
 +import java.io.IOException
++import java.io.OutputStream
 +
 +private val LOG = LoggerFactory.getLogger(BackupStorage::class.java)
 +
@@ -807,8 +822,10 @@ index 0000000000..ee50ce7730
 +
 +            val actualName = displayNameOf(createdUri) ?: fileName
 +
-+            val outputStream = resolver.openOutputStream(createdUri, "wt")
-+                ?: throw IOException("Unable to open an output stream for $createdUri")
++            // The document was just created and is empty, so "w" is enough. Some providers reject
++            // "wt" on a new document even though they support plain writing, which used to abort
++            // the export after the zip had already been generated.
++            val outputStream = openNewDocumentForWriting(createdUri)
 +            outputStream.use { output ->
 +                source.inputStream().use { input ->
 +                    input.copyTo(output, COPY_BUFFER_SIZE)
@@ -897,6 +914,23 @@ index 0000000000..ee50ce7730
 +        }
 +    }
 +
++    private fun openNewDocumentForWriting(documentUri: Uri): OutputStream {
++        var firstError: Exception? = null
++        for (mode in arrayOf("w", "wt")) {
++            try {
++                val stream = resolver.openOutputStream(documentUri, mode)
++                if (stream != null) {
++                    return stream
++                }
++            } catch (e: Exception) {
++                if (firstError == null) {
++                    firstError = e
++                }
++            }
++        }
++        throw IOException("Unable to open an output stream for $documentUri", firstError)
++    }
++
 +    /** @return the size of the document, or -1 when the provider does not report it. */
 +    private fun sizeOf(documentUri: Uri): Long {
 +        return try {
@@ -937,20 +971,34 @@ index 0000000000..ee50ce7730
 +     * The directory for the backup that runs when the app is opened: the SAF tree the user picked,
 +     * or the app's own backup folder when there is none. A stored value that is not a tree is
 +     * ignored, since a persisted single document cannot be used to create new files next to it.
++     * A tree whose persisted grant was revoked falls back to the app's own folder as well, so a
++     * revoked grant cannot turn every app open into a failed backup.
 +     */
 +    fun forOnOpenBackup(context: Context): BackupStorage? {
 +        val location = OnOpenBackupPrefs.location()
 +        if (location != null) {
 +            val uri = location.toUri()
 +            if (DocumentsContract.isTreeUri(uri)) {
-+                return SafBackupStorage(context, uri)
++                if (hasPersistedWritePermission(context, uri)) {
++                    return SafBackupStorage(context, uri)
++                }
++                LOG.warn(
++                    "The backup location {} no longer has a persisted write grant; using the default directory",
++                    location,
++                )
++            } else {
++                LOG.warn(
++                    "Ignoring the backup location {}, it is not a directory; using the default directory",
++                    location,
++                )
 +            }
-+            LOG.warn(
-+                "Ignoring the backup location {}, it is not a directory; using the default directory",
-+                location,
-+            )
 +        }
 +
++        return defaultStorage()
++    }
++
++    /** The app's own backup directory, used when no usable user-selected location is available. */
++    fun defaultStorage(): BackupStorage? {
 +        return try {
 +            val dir = defaultBackupDir()
 +            if (!dir.isDirectory && !dir.mkdirs()) {
@@ -973,16 +1021,36 @@ index 0000000000..ee50ce7730
 +     * {@code ACTION_CREATE_DOCUMENT}, so when there is no tree permission for its parent directory
 +     * there is no way to create timestamped files next to it; the caller falls back to overwriting
 +     * that single document then, which is safe now that the export goes through a temporary file.
++     *
++     * A missing or no-longer-writable location (the user revoked the grant, the document was moved,
++     * or no location was chosen) falls back to the app's own backup directory. The periodic export
++     * should still produce a backup then instead of failing with "unable to export".
 +     */
 +    fun forAutoExport(context: Context, location: String?): BackupStorage? {
 +        if (location.isNullOrBlank()) {
-+            return null
++            LOG.info("No auto-export location is configured; using the default backup directory")
++            return defaultStorage()
 +        }
 +
 +        val uri = location.toUri()
 +
 +        if (DocumentsContract.isTreeUri(uri)) {
-+            return SafBackupStorage(context, uri)
++            if (hasPersistedWritePermission(context, uri)) {
++                return SafBackupStorage(context, uri)
++            }
++            LOG.warn(
++                "The auto-export location {} no longer has a persisted write grant; using the default backup directory",
++                location,
++            )
++            return defaultStorage()
++        }
++
++        if (!hasPersistedWritePermission(context, uri)) {
++            LOG.warn(
++                "The auto-export document {} no longer has a persisted write grant; using the default backup directory",
++                location,
++            )
++            return defaultStorage()
 +        }
 +
 +        val parentTreeUri = parentTreeUriOf(uri) ?: return null
@@ -995,6 +1063,27 @@ index 0000000000..ee50ce7730
 +        }
 +
 +        return SafBackupStorage(context, parentTreeUri)
++    }
++
++    /**
++     * Whether [location] is a single document that can still be overwritten. A tree is not a
++     * document target, and a document without a persisted write grant cannot be used as one.
++     */
++    fun hasLegacyDocumentTarget(context: Context, location: String?): Boolean {
++        if (location.isNullOrBlank()) {
++            return false
++        }
++        val uri = location.toUri()
++        if (DocumentsContract.isTreeUri(uri)) {
++            return false
++        }
++        return hasPersistedWritePermission(context, uri)
++    }
++
++    private fun hasPersistedWritePermission(context: Context, uri: Uri): Boolean {
++        return context.contentResolver.persistedUriPermissions.any { permission ->
++            permission.uri == uri && permission.isWritePermission
++        }
 +    }
 +
 +    /**
@@ -1171,7 +1260,7 @@ new file mode 100644
 index 0000000000..70756e35cc
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,440 @@
 +/*  Copyright (C) 2026 Gadgetbridge contributors
 +
 +    This file is part of Gadgetbridge.
@@ -1198,7 +1287,7 @@ index 0000000000..70756e35cc
 +import java.time.LocalDate
 +import java.time.LocalDateTime
 +import java.util.concurrent.TimeUnit
-+import java.util.concurrent.atomic.AtomicBoolean
++import java.util.concurrent.locks.ReentrantLock
 +
 +/**
 + * The backup that runs when the user opens the app.
@@ -1226,8 +1315,12 @@ index 0000000000..70756e35cc
 +    /** Stale temporary files of crashed runs are removed after this many hours. */
 +    private const val STALE_TEMP_FILE_AGE_HOURS = 24L
 +
-+    /** Guards against two backups writing at the same time, e.g. an app open during a manual run. */
-+    private val running = AtomicBoolean(false)
++    /**
++     * Serializes backups, e.g. an app open during the periodic zip export. The periodic export must
++     * wait instead of failing when an app-open backup is already writing: returning failure here
++     * used to make the scheduler report "unable to export" even though nothing was wrong.
++     */
++    private val exportLock = ReentrantLock()
 +
 +    /** The outcome of a backup, for the settings screen and for the callers of [runNow]. */
 +    data class Result(
@@ -1239,7 +1332,7 @@ index 0000000000..70756e35cc
 +    /**
 +     * Runs a backup right now. This is the manual trigger of the settings screen, so it ignores the
 +     * enable switch and the [MIN_INTERVAL_MILLIS] throttle; it does not ignore a backup that is
-+     * already running and returns a "busy" [Result] for it.
++     * already running and waits for it to finish.
 +     *
 +     * This method blocks until the backup has been written, call it from a background thread.
 +     */
@@ -1287,7 +1380,7 @@ index 0000000000..70756e35cc
 +                return
 +            }
 +
-+            if (running.get()) {
++            if (exportLock.isLocked) {
 +                LOG.info("Not running the on-open backup, another backup is already running")
 +                return
 +            }
@@ -1388,17 +1481,22 @@ index 0000000000..70756e35cc
 +    fun pruneNow(context: Context): Int {
 +        val appContext = context.applicationContext ?: context
 +
-+        return try {
-+            val storage = BackupStorages.forOnOpenBackup(appContext)
-+            if (storage == null) {
-+                LOG.error("Unable to prune the backups, there is no backup directory")
++        exportLock.lock()
++        try {
++            return try {
++                val storage = BackupStorages.forOnOpenBackup(appContext)
++                if (storage == null) {
++                    LOG.error("Unable to prune the backups, there is no backup directory")
++                    -1
++                } else {
++                    prune(storage)
++                }
++            } catch (t: Throwable) {
++                LOG.error("Failed to prune the backups", t)
 +                -1
-+            } else {
-+                prune(storage)
 +            }
-+        } catch (t: Throwable) {
-+            LOG.error("Failed to prune the backups", t)
-+            -1
++        } finally {
++            exportLock.unlock()
 +        }
 +    }
 +
@@ -1417,12 +1515,7 @@ index 0000000000..70756e35cc
 +        callback: ZipBackupCallback?,
 +        recordResult: Boolean,
 +    ): Result {
-+        if (!running.compareAndSet(false, true)) {
-+            val message = "a backup is already running"
-+            LOG.warn("Not writing a backup into {}: {}", storage.describe(), message)
-+            return Result(false, message, null)
-+        }
-+
++        exportLock.lock()
 +        var cleanupFile: File? = null
 +
 +        try {
@@ -1462,6 +1555,14 @@ index 0000000000..70756e35cc
 +                OnOpenBackupPrefs.recordSuccess(writtenName, System.currentTimeMillis())
 +            }
 +
++            // Report success only now: the callback used to see onSuccess as soon as the temporary
++            // zip was generated, before the target directory had accepted the file.
++            try {
++                callback?.onSuccess(listener.warnings)
++            } catch (t: Throwable) {
++                LOG.warn("The export callback failed after the backup was written", t)
++            }
++
 +            val deleted = pruneQuietly(storage)
 +
 +            val sizeBytes = tempFile.length()
@@ -1484,11 +1585,14 @@ index 0000000000..70756e35cc
 +            }
 +            return Result(false, message, null)
 +        } finally {
-+            running.set(false)
-+            cleanupFile?.let { file ->
-+                if (file.exists() && !file.delete()) {
-+                    LOG.warn("Unable to delete the temporary file {}", file)
++            try {
++                cleanupFile?.let { file ->
++                    if (file.exists() && !file.delete()) {
++                        LOG.warn("Unable to delete the temporary file {}", file)
++                    }
 +                }
++            } finally {
++                exportLock.unlock()
 +            }
 +        }
 +    }
@@ -1575,13 +1679,16 @@ index 0000000000..70756e35cc
 +        var failureMessage: String? = null
 +            private set
 +
++        var warnings: String? = null
++            private set
++
 +        override fun onProgress(progress: Int, message: String?) {
 +            delegate?.onProgress(progress, message)
 +        }
 +
 +        override fun onSuccess(warnings: String?) {
 +            succeeded = true
-+            delegate?.onSuccess(warnings)
++            this.warnings = warnings
 +        }
 +
 +        override fun onFailure(errorMessage: String?) {
@@ -1853,7 +1960,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/
 index 441e786b29..6652ec7540 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
-@@ -52,13 +52,32 @@ class ZipExportWorker(
+@@ -52,13 +52,40 @@ class ZipExportWorker(
  
          setForegroundAsync(createForegroundInfo())
  
@@ -1866,7 +1973,7 @@ index 441e786b29..6652ec7540 100644
 -        LOG.info("Zip export completed, success={}", success)
 +        val result = if (storage != null) {
 +            OnOpenBackupRunner.exportToStorage(mContext, storage, this)
-+        } else {
++        } else if (BackupStorages.hasLegacyDocumentTarget(mContext, dst)) {
 +            // The legacy auto export location is a single file (ACTION_CREATE_DOCUMENT), and there
 +            // is no tree permission to create new files next to it. The export now goes through a
 +            // temporary file, so even this mode cannot truncate the previous backup anymore
@@ -1878,6 +1985,14 @@ index 441e786b29..6652ec7540 100644
 +                if (success) "wrote $dst" else "the export failed",
 +                null
 +            )
++        } else {
++            // A tree without a persisted grant is not a document that can be written to, and the
++            // default directory could not be created either. Do not pass the tree to the legacy
++            // single-document path, which would fail with a generic "unable to export".
++            val message = "no writable backup directory for $dst"
++            LOG.error("Unable to export the zip backup: {}", message)
++            onFailure(message)
++            OnOpenBackupRunner.Result(false, message, null)
 +        }
 +
 +        LOG.info("Zip export completed, success={}, {}", result.success, result.message)

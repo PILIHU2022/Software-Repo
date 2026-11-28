@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Fri, 27 Nov 2026 17:30:00 +0800
+Subject: [PATCH] Show each sleep stage share of total sleep
+
+The sleep charts already list each stage's duration, but leave the relative
+shares to mental arithmetic. Show the share next to the duration in the day and
+week stage tiles.
+
+- Divide light, deep and REM by the recorded asleep time, which includes
+  sleep-any stages that the device did not break down further.
+- Divide awake by time in bed (asleep + awake), so it is not compared with a
+  denominator that excludes it.
+- Compute weekly shares from the whole period's totals instead of averaging
+  daily percentages.
+- Add English, Simplified Chinese and Traditional Chinese strings.
+
+This uses the existing sleep sessions; no additional device data or setting is
+needed.
+---
+ .../activities/charts/SleepDailyFragment.java          | 21 +++++++++++++--------
+ .../activities/charts/SleepPeriodFragment.java         | 35 +++++++++++++++++++++++++++++++-----
+ .../main/res/values-zh-rCN/strings.xml                 |  2 ++
+ .../main/res/values-zh-rTW/strings.xml                 |  2 ++
+ app/src/main/res/values/strings.xml                    |  2 ++
+ 5 files changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
+@@ -383,6 +383,14 @@
+         return DateTimeUtils.formatDurationHoursMinutes(seconds, TimeUnit.SECONDS);
+     }
+ 
++    private String stageShareValue(final long stageSeconds, final long totalSeconds, final int templateRes) {
++        if (totalSeconds <= 0L) {
++            return "-";
++        }
++        final int percent = (int) Math.round(100.0 * stageSeconds / totalSeconds);
++        return getString(templateRes, timeStringFormat(stageSeconds), percent);
++    }
++
+     private StatTileData buildSleepStageTile(final int colorRes, final int labelRes, final String value) {
+         return new StatTileData(value, getString(labelRes), null, null, null, null, ContextCompat.getColor(requireContext(), colorRes));
+     }
+@@ -400,16 +408,21 @@
+         final boolean hasSleepSessions = !pieData.sleepSessions.isEmpty();
+         final List<StatTileData> legendStats = new ArrayList<>();
+         legendStats.add(buildSleepStageTile(R.color.chart_deep_sleep_dark, R.string.sleep_colored_stats_deep,
+-                hasSleepSessions ? timeStringFormat(pieData.getTotalDeep()) : "-"));
++                hasSleepSessions ? stageShareValue(pieData.getTotalDeep(), pieData.getTotalSleep(),
++                        R.string.sleep_stage_share) : "-"));
+         legendStats.add(buildSleepStageTile(R.color.chart_light_sleep_dark, R.string.sleep_colored_stats_light,
+-                hasSleepSessions ? timeStringFormat(pieData.getTotalLight()) : "-"));
++                hasSleepSessions ? stageShareValue(pieData.getTotalLight(), pieData.getTotalSleep(),
++                        R.string.sleep_stage_share) : "-"));
+         if (showRemSleep(pieData)) {
+             legendStats.add(buildSleepStageTile(R.color.chart_rem_sleep_dark, R.string.sleep_colored_stats_rem,
+-                    hasSleepSessions ? timeStringFormat(pieData.getTotalRem()) : "-"));
++                    hasSleepSessions ? stageShareValue(pieData.getTotalRem(), pieData.getTotalSleep(),
++                            R.string.sleep_stage_share) : "-"));
+         }
+         if (showAwakeSleep(pieData)) {
+             legendStats.add(buildSleepStageTile(R.color.chart_awake_sleep_dark, R.string.abstract_chart_fragment_kind_awake_sleep,
+-                    hasSleepSessions ? timeStringFormat(pieData.getTotalAwake()) : "-"));
++                    hasSleepSessions ? stageShareValue(pieData.getTotalAwake(),
++                            pieData.getTotalSleep() + pieData.getTotalAwake(),
++                            R.string.sleep_stage_awake_share) : "-"));
+         }
+         binding.sleepLegendStatsContainer.removeAllViews();
+         StatTileGridUtilKt.addStatTileGrid(binding.sleepLegendStatsContainer, requireContext(), legendStats, 0);
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
+@@ -93,6 +93,7 @@
+         long remWeeklyTotal = 0;
+         long deepWeeklyTotal = 0;
+         long lightWeeklyTotal = 0;
++        long sleepWeeklyTotal = 0;
+ 
+         for (List<SleepSession> daySessions : sessionsByDay) {
+             if (calculateBalance(daySessions) > 0) {
+@@ -109,6 +110,9 @@
+             if (showAwakeSleep) {
+                 awakeWeeklyTotal += totalAmounts.get(i++).longValue();
+             }
++            for (final SleepSession session : daySessions) {
++                sleepWeeklyTotal += session.getTotalSleepDuration();
++            }
+         }
+ 
+         return new MySleepWeeklyData(
+@@ -116,6 +120,7 @@
+                 remWeeklyTotal,
+                 deepWeeklyTotal,
+                 lightWeeklyTotal,
++                sleepWeeklyTotal / 60,
+                 totalDaysForAverage);
+     }
+ 
+@@ -206,23 +211,29 @@
+ 
+         final MySleepWeeklyData sleepWeeklyData = mcd.getSleepWeeklyData();
+         final int totalDaysForAverage = sleepWeeklyData.getTotalDaysForAverage();
++        final long totalSleepMinutes = sleepWeeklyData.getTotalSleep();
+         final List<StatTileData> legendStats = new ArrayList<>();
+         if (totalDaysForAverage > 0) {
+             float avgDeep = Math.abs(sleepWeeklyData.getTotalDeep() / totalDaysForAverage);
+             legendStats.add(buildSleepStageTile(R.color.chart_deep_sleep_dark, R.string.sleep_colored_stats_deep_avg,
+-                    DateTimeUtils.formatDurationHoursMinutes((int) avgDeep, TimeUnit.MINUTES)));
++                    stageShareValue(DateTimeUtils.formatDurationHoursMinutes((int) avgDeep, TimeUnit.MINUTES),
++                            sleepWeeklyData.getTotalDeep(), totalSleepMinutes, R.string.sleep_stage_share)));
+             float avgLight = Math.abs(sleepWeeklyData.getTotalLight() / totalDaysForAverage);
+             legendStats.add(buildSleepStageTile(R.color.chart_light_sleep_dark, R.string.sleep_colored_stats_light_avg,
+-                    DateTimeUtils.formatDurationHoursMinutes((int) avgLight, TimeUnit.MINUTES)));
++                    stageShareValue(DateTimeUtils.formatDurationHoursMinutes((int) avgLight, TimeUnit.MINUTES),
++                            sleepWeeklyData.getTotalLight(), totalSleepMinutes, R.string.sleep_stage_share)));
+             if (showRemSleep) {
+                 float avgRem = Math.abs(sleepWeeklyData.getTotalRem() / totalDaysForAverage);
+                 legendStats.add(buildSleepStageTile(R.color.chart_rem_sleep_dark, R.string.sleep_colored_stats_rem_avg,
+-                        DateTimeUtils.formatDurationHoursMinutes((int) avgRem, TimeUnit.MINUTES)));
++                        stageShareValue(DateTimeUtils.formatDurationHoursMinutes((int) avgRem, TimeUnit.MINUTES),
++                                sleepWeeklyData.getTotalRem(), totalSleepMinutes, R.string.sleep_stage_share)));
+             }
+             if (showAwakeSleep) {
+                 float avgAwake = Math.abs(sleepWeeklyData.getTotalAwake() / totalDaysForAverage);
+                 legendStats.add(buildSleepStageTile(R.color.chart_awake_sleep_dark, R.string.sleep_colored_stats_awake_avg,
+-                        DateTimeUtils.formatDurationHoursMinutes((int) avgAwake, TimeUnit.MINUTES)));
++                        stageShareValue(DateTimeUtils.formatDurationHoursMinutes((int) avgAwake, TimeUnit.MINUTES),
++                                sleepWeeklyData.getTotalAwake(), totalSleepMinutes + sleepWeeklyData.getTotalAwake(),
++                                R.string.sleep_stage_awake_share)));
+             }
+         } else {
+             legendStats.add(buildSleepStageTile(R.color.chart_deep_sleep_dark, R.string.sleep_colored_stats_deep_avg, "-"));
+@@ -538,6 +549,15 @@
+         return DateTimeUtils.formatDurationHoursMinutes(value, TimeUnit.MINUTES);
+     }
+ 
++    private String stageShareValue(final String duration, final long stageMinutes, final long totalMinutes,
++                                   final int templateRes) {
++        if (totalMinutes <= 0L) {
++            return "-";
++        }
++        final int percent = (int) Math.round(100.0 * stageMinutes / totalMinutes);
++        return getString(templateRes, duration, percent);
++    }
++
+     private StatTileData buildSleepStageTile(final int colorRes, final int labelRes, final String value) {
+         return new StatTileData(value, getString(labelRes), null, null, null, null, ContextCompat.getColor(requireContext(), colorRes));
+     }
+@@ -627,17 +647,20 @@
+         private final long totalRem;
+         private final long totalDeep;
+         private final long totalLight;
++        private final long totalSleep;
+         private final int totalDaysForAverage;
+ 
+         public MySleepWeeklyData(long totalAwake,
+                                  long totalRem,
+                                  long totalDeep,
+                                  long totalLight,
++                                 long totalSleep,
+                                  int totalDaysForAverage) {
+             this.totalDeep = totalDeep;
+             this.totalRem = totalRem;
+             this.totalAwake = totalAwake;
+             this.totalLight = totalLight;
++            this.totalSleep = totalSleep;
+             this.totalDaysForAverage = totalDaysForAverage;
+         }
+ 
+@@ -657,6 +680,10 @@
+             return this.totalLight;
+         }
+ 
++        public long getTotalSleep() {
++            return this.totalSleep;
++        }
++
+         public int getTotalDaysForAverage() {
+             return this.totalDaysForAverage;
+         }
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -5419,6 +5419,8 @@
+     <string name="device_card_more_summary">此项目下面的内容显示在弹窗中</string>
+     <string name="alarm_smart_wakeup_interval_minutes">智能唤醒间隔（分钟）</string>
+     <string name="sleep_stages">睡眠阶段</string>
++    <string name="sleep_stage_share">%1$s · 占总睡眠 %2$d%%</string>
++    <string name="sleep_stage_awake_share">%1$s · 占卧床时间 %2$d%%</string>
+     <string name="last_night_timeline">昨夜时间线</string>
+     <string name="hrv_status_trend">HRV 趋势</string>
+     <string name="day_timeline">白天时间线</string>
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -3273,6 +3273,8 @@
+     <string name="pref_title_third_party_app_device_alarms">允許第三方應用程式設定鬧鐘</string>
+     <string name="pref_summary_third_party_app_device_alarms">允許其他已安裝的第三方應用程式透過 Intent 設定裝置鬧鐘。</string>
+     <string name="sleep_stages">睡眠階段</string>
++    <string name="sleep_stage_share">%1$s · 佔總睡眠 %2$d%%</string>
++    <string name="sleep_stage_awake_share">%1$s · 佔臥床時間 %2$d%%</string>
+     <string name="stats_empty_value">-</string>
+     <string name="date_placeholders__date__time">%1$s，%2$s</string>
+     <string name="date_placeholders__start_time__end_time">%1$s – %2$s</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1337,6 +1337,8 @@
+     <string name="lowest">Lowest</string>
+     <string name="highest">Highest</string>
+     <string name="sleep_stages">Sleep Stages</string>
++    <string name="sleep_stage_share">%1$s · %2$d%% of sleep</string>
++    <string name="sleep_stage_awake_share">%1$s · %2$d%% of time in bed</string>
+     <string name="sleep_score">Sleep Score</string>
+     <string name="sleep_score_value">Score: %1d</string>
+     <string name="sleep_score_value_age_adjusted">Score: %1d (age-adjusted)</string>

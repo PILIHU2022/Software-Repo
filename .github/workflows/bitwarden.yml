@@ -1,0 +1,316 @@
+name: Bitwarden build
+
+# Watches bitwarden/clients and produces the patched browser extensions and
+# native desktop clients. Bitwarden is not an Android app: nothing in this
+# workflow runs Gradle, signs an APK, or publishes through F-Droid.
+#
+# Every build replays desktop/bitwarden/patches onto the current upstream main,
+# installs the JavaScript dependencies, then packages:
+#
+#   * Chrome, Firefox and Edge extension zips on Linux;
+#   * Linux packages, a Windows installer/portable zip and a macOS dmg/zip
+#     from their native runners.
+#
+# The Linux job also starts the packaged application under a headless Weston
+# compositor. That runtime smoke test is what proves the Ozone switch really
+# selects Wayland instead of merely compiling an unused command-line flag.
+#
+# A push touching the Bitwarden queue or scripts builds immediately. A daily
+# schedule only builds after the 10-day window and an upstream move. A manual
+# dispatch always builds, which is useful after changing the queue.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'desktop/bitwarden/**'
+      - 'scripts/build-bitwarden.sh'
+      - 'scripts/test-bitwarden-wayland.sh'
+      - '.github/workflows/bitwarden.yml'
+  schedule:
+    - cron: '27 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bitwarden-build
+  cancel-in-progress: false
+
+env:
+  WATCH_INTERVAL_DAYS: '10'
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+jobs:
+  check:
+    name: Check upstream
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      sha: ${{ steps.check.outputs.sha }}
+      short_sha: ${{ steps.check.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Respect the 10-day window
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME:-}" != "main" ]]; then
+            echo "::error::This pipeline only runs from main (got '${GITHUB_REF_NAME:-<unset>}')"
+            exit 1
+          fi
+
+          days="${WATCH_INTERVAL_DAYS:-10}"
+          due=true
+          if [[ "$EVENT" == "schedule" ]]; then
+            last="$(jq -r '.bitwarden // empty' .watch-state.json 2>/dev/null || true)"
+            if [[ -n "$last" ]] && last_epoch="$(date -u -d "$last" +%s 2>/dev/null)"; then
+              age=$(( $(date -u +%s) - last_epoch ))
+              if (( age < days * 86400 )); then
+                due=false
+                echo "::notice::Last Bitwarden watch was ${age}s ago; the next one is due in $(( days * 86400 - age ))s."
+              fi
+            fi
+          fi
+          echo "due=$due" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the upstream head
+        id: check
+        if: steps.gate.outputs.due == 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          upstream_url="https://github.com/bitwarden/clients.git"
+          sha=""
+          for attempt in 1 2 3; do
+            sha="$(git ls-remote "$upstream_url" refs/heads/main 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && break
+            echo "    ls-remote attempt ${attempt}/3 failed; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Could not resolve $upstream_url main"; exit 1; }
+
+          previous="$(jq -r '.bitwarden // empty' desktop/.build-state.json 2>/dev/null || true)"
+          changed=false
+          [[ "$sha" != "$previous" ]] && changed=true
+
+          force=false
+          if [[ "$EVENT" == "push" || "$EVENT" == "workflow_dispatch" ]]; then
+            force=true
+          fi
+          build=false
+          if [[ "$changed" == "true" || "$force" == "true" ]]; then
+            build=true
+          fi
+
+          echo "    upstream:   $sha"
+          echo "    last built: ${previous:-none}"
+          echo "    changed:    $changed"
+          echo "    force:      $force"
+          echo "    build:      $build"
+          {
+            echo "sha=$sha"
+            echo "short_sha=${sha:0:7}"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
+  browser:
+    name: Build browser extensions
+    needs: check
+    if: needs.check.result == 'success' && needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libglib2.0-dev libsecret-1-dev pkg-config
+
+      - name: Prepare the patched upstream tree
+        shell: bash
+        run: bash ./scripts/build-bitwarden.sh --prepare
+
+      - name: Build Chrome, Firefox and Edge packages
+        shell: bash
+        run: |
+          bash ./scripts/build-bitwarden.sh --build --target browser \
+            --out "$RUNNER_TEMP/dist"
+
+      - name: Upload browser packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: bitwarden-browser-${{ needs.check.outputs.short_sha }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+
+      - name: Upload browser build info
+        uses: actions/upload-artifact@v7
+        with:
+          name: bitwarden-info-browser
+          path: ${{ runner.temp }}/dist/build-info.txt
+          if-no-files-found: error
+
+  desktop:
+    name: Build desktop (${{ matrix.target }})
+    needs: check
+    if: needs.check.result == 'success' && needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: desktop-linux
+          - os: windows-latest
+            target: desktop-windows
+          - os: macos-14
+            target: desktop-macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential dpkg fakeroot libglib2.0-dev libsecret-1-dev \
+            libxkbcommon-dev pkg-config rpm weston dbus-x11
+
+      - name: Prepare the patched upstream tree
+        shell: bash
+        run: bash ./scripts/build-bitwarden.sh --prepare
+
+      - name: Build the native desktop package
+        shell: bash
+        run: |
+          bash ./scripts/build-bitwarden.sh --build --target "${{ matrix.target }}" \
+            --out "$RUNNER_TEMP/dist"
+
+      - name: Smoke-test Wayland
+        if: matrix.target == 'desktop-linux'
+        shell: bash
+        run: bash ./scripts/test-bitwarden-wayland.sh
+
+      - name: Upload desktop package
+        uses: actions/upload-artifact@v7
+        with:
+          name: bitwarden-${{ matrix.target }}-${{ needs.check.outputs.short_sha }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+
+      - name: Upload desktop build info
+        uses: actions/upload-artifact@v7
+        with:
+          name: bitwarden-info-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist/build-info.txt
+          if-no-files-found: error
+
+  record:
+    name: Record the 10-day window
+    needs:
+      - check
+      - browser
+      - desktop
+    if: >-
+      success() &&
+      needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Download build metadata
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bitwarden-info-*
+          path: ${{ runner.temp }}/info
+
+      - name: Record the upstream commit and window
+        env:
+          SHA: ${{ needs.check.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          find "$RUNNER_TEMP/info" -type f -name build-info.txt -print -quit | grep -q . \
+            || { echo "::error::No build-info.txt artifacts were downloaded"; exit 1; }
+          if grep -Rqs '^upstream_fallback=1$' "$RUNNER_TEMP/info"; then
+            echo "::warning title=Fallback build::The queue did not apply to $SHA; keeping the previous state so the next run retries."
+            exit 0
+          fi
+
+          built_shas="$(find "$RUNNER_TEMP/info" -type f -name build-info.txt \
+            -exec sed -n 's/^upstream_commit=//p' {} + | LC_ALL=C sort -u)"
+          sha_count="$(printf '%s\n' "$built_shas" | sed '/^$/d' | wc -l | tr -d ' ')"
+          [[ "$sha_count" == "1" ]] \
+            || { echo "::error::The build jobs disagree on upstream_commit: $built_shas"; exit 1; }
+          built_sha="$built_shas"
+          [[ "$built_sha" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid upstream_commit in build-info.txt: $built_sha"; exit 1; }
+          if [[ "$built_sha" != "$SHA" ]]; then
+            echo "::warning title=Upstream moved::$built_sha was built while the check job resolved $SHA; recording the built commit."
+          fi
+
+          jq --arg sha "$built_sha" '.bitwarden = $sha' desktop/.build-state.json > "$RUNNER_TEMP/state.json"
+          mv "$RUNNER_TEMP/state.json" desktop/.build-state.json
+          jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.bitwarden = $now' .watch-state.json \
+            > "$RUNNER_TEMP/watch.json"
+          mv "$RUNNER_TEMP/watch.json" .watch-state.json
+
+          git config user.name "DeepSeek Harness"
+          git config user.email "noreply@deepseek.com"
+          git add desktop/.build-state.json .watch-state.json
+          if git diff --cached --quiet; then
+            echo "No build state changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(bitwarden): record upstream ${built_sha:0:7} [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main \
+               && git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main; then
+              exit 0
+            fi
+            echo "    push attempt ${attempt}/3 failed; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::error::Could not push the Bitwarden build state"
+          exit 1

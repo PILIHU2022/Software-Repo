@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Tue, 24 Nov 2026 19:30:00 +0800
+Subject: [PATCH] Rebuild the expense table in the 12 to 13 migration
+
+Room validates the migrated table against schema 13, where `suspended` has no
+default value. ALTER TABLE has to add the new NOT NULL column with a default,
+which leaves `DEFAULT 0` on the column and makes the app fail on the next open
+with "Migration didn't properly handle: recurring_expenses".
+
+Recreate the table with the exact schema 13 definition, copy every existing
+row and fill the new `suspended` column with 0.
+---
+ .../model/database/RecurringExpenseDatabase.kt | 44 +++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
+--- a/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
++++ b/shared/src/commonMain/kotlin/de/dbauer/expensetracker/shared/model/database/RecurringExpenseDatabase.kt
+@@ -356,10 +356,48 @@ abstract class RecurringExpenseDatabase : RoomDatabase() {
+         val migration_12_13 =
+             object : Migration(12, 13) {
+                 override suspend fun migrate(connection: SQLiteConnection) {
+-                    connection.executeSQL(
+-                        "ALTER TABLE recurring_expenses ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0",
+-                    )
++                    // `suspended` has no default value in schema 13. SQLite requires one
++                    // when adding a NOT NULL column with ALTER TABLE, so recreate the table
++                    // with the exact schema instead of leaving `DEFAULT 0` behind.
++                    connection.executeSQL(
++                        """
++                        CREATE TABLE recurring_expenses_new (
++                            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
++                            name TEXT,
++                            description TEXT,
++                            price REAL,
++                            everyXRecurrence INTEGER,
++                            recurrence INTEGER,
++                            firstPayment INTEGER,
++                            currencyCode TEXT NOT NULL,
++                            notifyForExpense INTEGER NOT NULL,
++                            requireManualConfirmation INTEGER NOT NULL,
++                            endDate INTEGER,
++                            archivedDate INTEGER,
++                            suspended INTEGER NOT NULL,
++                            serviceId TEXT
++                        )
++                        """.trimIndent(),
++                    )
++                    connection.executeSQL(
++                        """
++                        INSERT INTO recurring_expenses_new (
++                            id, name, description, price, everyXRecurrence, recurrence,
++                            firstPayment, currencyCode, notifyForExpense,
++                            requireManualConfirmation, endDate, archivedDate, suspended, serviceId
++                        )
++                        SELECT
++                            id, name, description, price, everyXRecurrence, recurrence,
++                            firstPayment, currencyCode, notifyForExpense,
++                            requireManualConfirmation, endDate, archivedDate, 0, serviceId
++                        FROM recurring_expenses
++                        """.trimIndent(),
++                    )
++                    connection.executeSQL("DROP TABLE recurring_expenses")
++                    connection.executeSQL(
++                        "ALTER TABLE recurring_expenses_new RENAME TO recurring_expenses",
++                    )
+                 }
+             }
+     }
+ }

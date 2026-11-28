@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 21 Nov 2026 15:15:09 +0800
+Subject: [PATCH] CHANGELOG: Note the navigation drawer and conflict resolution
+
+---
+ CHANGELOG.md | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d9beacf..a191023 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -10,6 +10,8 @@
+ ### Unreleased
+ 
+ * Add setting to disable receiving announcement packets for local discovery ([PR #295])
++* Add a navigation sidebar and make Syncthing's web UI the main page
++* Add a conflict management page that can discard a conflict copy or replace the original file with it
+ 
+ ### Version 3.29
+ 

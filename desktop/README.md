@@ -3,7 +3,8 @@
 This tree holds apps that are **not** Android apps and therefore never appear in
 the F-Droid repository. `apps/` stays Android-only; `build.yml` and
 `check-upstream.sh` glob `apps/*/app.conf` and would otherwise try to run a
-Gradle build on a desktop program.
+Gradle build on a desktop program. Bitwarden is here too because the same
+upstream tree produces both its browser extensions and its Electron clients.
 
 ## BaiduNetGo
 
@@ -122,3 +123,31 @@ git push origin main
 exported by hand. Pushing the queue does not trigger the desktop build (its
 workflow only runs on its schedule or manual dispatch) — run `BaiduNetGo desktop
 build` manually with `force` if you do not want to wait for the window.
+
+## Bitwarden
+
+| | |
+| --- | --- |
+| Upstream | [bitwarden/clients](https://github.com/bitwarden/clients), `main` |
+| Queue | `bitwarden/patches/*.patch`, replayed with `git am -3` |
+| Browser targets | Chrome, Firefox, Edge |
+| Desktop targets | Linux packages, Windows (installer/zip), macOS (dmg/zip) |
+| Builder | `scripts/build-bitwarden.sh` |
+| Workflow | `.github/workflows/bitwarden.yml`, one window every 10 days |
+
+The queue adds an offline security check to both the browser popup and the
+desktop window. It flags weak, reused and breached passwords, lists logins
+without a saved TOTP, and uses HIBP's SHA-1 k-anonymity range endpoint (only the
+first five hash characters leave the device). There is no NodeWarden server
+dependency and no password is persisted.
+
+The Linux desktop build starts Electron with `ozone-platform-hint=auto` and
+enables native Wayland decorations when `WAYLAND_DISPLAY` is present, while
+falling back to X11 when needed. CI launches the packaged app under headless
+Weston and fails if the process exits during the smoke test.
+
+The workflow builds browser packages on Ubuntu and each desktop installer on
+its native runner. Artifacts are attached to the run as
+`bitwarden-browser-<sha>` and `bitwarden-<platform>-<sha>`; they are not
+published to F-Droid. See [`bitwarden/README.md`](bitwarden/README.md) for the
+security model, Wayland escape hatch and queue maintenance.

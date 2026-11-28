@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Fri, 27 Nov 2026 13:00:00 +0800
+Subject: [PATCH] Select the Wayland Ozone backend on Linux
+
+Electron 39 already prefers Wayland on a Wayland session, but Bitwarden can
+still be started from a launcher that does not pass the hint through. Set
+ozone-platform-hint=auto before the app is ready, enable native Wayland window
+decorations when a Wayland display is present, and keep an explicit
+ELECTRON_OZONE_PLATFORM_HINT=x11 escape hatch for X11-only desktops.
+
+The switch is Linux-only; Windows and macOS are untouched.
+---
+ apps/desktop/src/main.ts            | 2 ++
+ apps/desktop/src/patchwork-linux.ts | 14 ++++++++++++++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -1,0 +1,2 @@
++import { configurePatchworkLinux } from "./patchwork-linux";
++configurePatchworkLinux();
+diff --git a/apps/desktop/src/patchwork-linux.ts b/apps/desktop/src/patchwork-linux.ts
+new file mode 100644
+--- /dev/null
++++ b/apps/desktop/src/patchwork-linux.ts
+@@ -0,0 +1,14 @@
++import { app } from "electron";
++
++export function configurePatchworkLinux(): void {
++  if (process.platform === "linux") {
++    const requestedHint = process.env.ELECTRON_OZONE_PLATFORM_HINT?.trim();
++    const sessionType = (process.env.XDG_SESSION_TYPE || "").toLowerCase();
++    const waylandSession = sessionType === "wayland" || Boolean(process.env.WAYLAND_DISPLAY);
++
++    app.commandLine.appendSwitch("ozone-platform-hint", requestedHint || "auto");
++    if (waylandSession) {
++      app.commandLine.appendSwitch("enable-features", "WaylandWindowDecorations");
++    }
++  }
++}

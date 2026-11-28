@@ -2,6 +2,7 @@
 
 [![Gadgetbridge](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/gadgetbridge.yml)
 [![Fcitx5 for Android](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/fcitx5.yml)
+[![Bitwarden](https://github.com/PILIHU2022/Software-Repo/actions/workflows/bitwarden.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/bitwarden.yml)
 [![Deploy Pages](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/PILIHU2022/Software-Repo/actions/workflows/deploy-pages.yml)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 
@@ -10,12 +11,13 @@
 A personal, patch-based build overlay for six Android apps — **ScreenTime**,
 **RecurringExpenseTracker**, **Fcitx5 for Android**, **BasicSync**,
 **Gadgetbridge** and the **BaiduNetGo Android client** — plus the
-**BaiduNetGo desktop** client, which is built here but is *not* an
-Android/F-Droid app.
+**BaiduNetGo desktop** client and the **Bitwarden** browser/desktop clients,
+which are built here but are *not* Android/F-Droid apps.
 No application source is vendored here. The repository keeps ordered patch
 queues, plus the CI that applies them to current upstream code: signed APKs are
-published through a signed F-Droid repository, and the desktop app's x86
-installers are published as GitHub Releases plus an update feed.
+published through a signed F-Droid repository, BaiduNetGo's x86 installers are
+published as GitHub Releases plus an update feed, and Bitwarden's browser
+extensions and three desktop packages are uploaded as workflow artifacts.
 
 > Personal project, not affiliated with or endorsed by the upstream authors
 > (Dennis Bauer, Atharok, the Fcitx5 for Android contributors, Andrew Gunnerson,
@@ -26,15 +28,18 @@ installers are published as GitHub Releases plus an update feed.
 A *patchwork overlay* monorepo that stores two things and no app source:
 
 1. **Patch queues** — `apps/<app>/patches/*.patch` for the Android apps and
-   `desktop/baidunetgo/patches/*.patch` for the desktop one: ordered changes
-   that apply on top of the upstream branch with `git am -3`. The monitored
-   branches are expenses `main`, screentime `main`, fcitx5 `master`
-   (fcitx5-android's real default branch) and baidunetgo `main`.
+   `desktop/baidunetgo/patches/*.patch` and
+   `desktop/bitwarden/patches/*.patch`: ordered changes that apply on top of
+   the upstream branch with `git am -3`. The monitored branches are expenses
+   `main`, screentime `main`, fcitx5 `master` (fcitx5-android's real default
+   branch), baidunetgo `main` and bitwarden/clients `main`.
 2. **Build and publish automation** — CI fetches the current upstream head,
    applies the queue, rewrites the version, builds signed APKs and updates the
    signed F-Droid repository; separately, `baidunetgo.yml` builds the patched
    desktop app for x86 only, publishes the installers to a tagged GitHub
-   Release and commits the update feed `desktop/baidunetgo/update.json`.
+   Release and commits the update feed `desktop/baidunetgo/update.json`;
+   `bitwarden.yml` builds the browser extensions and the Windows, Linux and
+   macOS desktop clients.
 
 Re-applying the queue to the latest upstream commit on every build lets upstream
 fixes and features flow in without maintaining a diverged fork. A patch that no
@@ -48,10 +53,11 @@ code.
 | RecurringExpenseTracker | [DennisBauer/RecurringExpenseTracker](https://github.com/DennisBauer/RecurringExpenseTracker) (`main`) | `5073379` | 20 | `0.21.5-patchwork` (6913, arm64-v8a) |
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime) (`main`) | `ec95b22` | 11 | `1.4.2-patchwork` (1405, arm64-v8a) |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android) (`master`) | `eb5b5021` | 17 | `0.1.3-patchwork` (11207, arm64-v8a) |
-| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `9111cae` | 3 | `3.30-patchwork` (25807204, arm64-v8a) |
-| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge) (`master`) | `bd56cf3` | 5 | `2026.11.1-patchwork` (25705, arm64-v8a) |
+| BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync) (`master`) | `9111cae` | 5 | `3.30-patchwork` (25807204, arm64-v8a) |
+| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge) (`master`) | `bd56cf3` | 9 | `2026.11.1-patchwork` (25705, arm64-v8a) |
 | BaiduNetGo (desktop) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) | `60ca12c` | 48 | `0.8.3.48` — upstream `0.8.3` + 48 patches (linux/windows x86, Arch package; Release + feed) |
 | BaiduNetGo (Android) | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo) (`main`) — same queue as the desktop build | `60ca12c` | 48 | `0.8.3-patchwork` (80348 — upstream 803 × 100 + 48 patches) |
+| Bitwarden | [bitwarden/clients](https://github.com/bitwarden/clients) (`main`) | *first CI run* | 2 | workflow artifacts — Chrome/Firefox/Edge, Linux/Windows/macOS |
 | DataArk | *in-tree* — source at [`dataark/`](dataark/) (no upstream; GPL-3.0, icon from [Android-DataBackup](https://github.com/XayahSuSuSu/Android-DataBackup)) | — | — | `1.0.0` — full source committed, not a patch queue; CI is dormant (see below) |
 
 **DataArk** — the one app whose full source lives in this tree instead of a
@@ -67,8 +73,21 @@ gating — Dhizuku is APK-only, and external `Android/data` requires root. See
 `if: false` job guard): nothing runs it automatically or manually until the
 triggers are consciously re-enabled.
 
-The five Android apps are published in F-Droid. **The BaiduNetGo desktop
-program is not**: it is a
+**Bitwarden** — the browser extension and Electron clients are built from
+`bitwarden/clients` plus a two-patch queue. The first patch adds an offline
+**security check** to both the popup and the desktop window: weak, reused and
+breached passwords, plus logins without a saved TOTP. HIBP lookups use the
+five-character SHA-1 k-anonymity prefix, so no password or full hash leaves the
+device; the page is not tied to a NodeWarden server. The second patch sets
+Electron's `ozone-platform-hint=auto` and enables native Wayland decorations,
+while keeping X11 fallback and an `ELECTRON_OZONE_PLATFORM_HINT=x11` escape
+hatch. CI builds Chrome, Firefox and Edge packages on Linux and runs the native
+desktop packaging on Ubuntu, Windows and macOS; the Linux job also boots the
+packaged app under headless Weston. See
+[`desktop/bitwarden/README.md`](desktop/bitwarden/README.md).
+
+The five Android apps are published in F-Droid. **BaiduNetGo desktop and
+Bitwarden are not**: BaiduNetGo is a
 Go/MyGo desktop program, built on its own 10-day schedule. Its installers —
 `.deb`, `.tar.gz`, an Arch Linux `.pkg.tar.zst` (`sudo pacman -U`) and the
 Windows setup/portable `.zip` — go to a GitHub Release tagged
@@ -130,13 +149,16 @@ and no universal APK), and the APK is
 about 52 MB.
 
 **Gadgetbridge** — Bluetooth wearables without the vendor's app. The queue
-starts from upstream and adds six patches:
+starts from upstream and adds nine patches:
 
 * the **user interface runs on Jetpack Compose + Material 3 Expressive**: the
   settings tree (home, every sub-screen, the search), the first-run guide, the
-  About page and the sleep score sheet are Compose, and the remaing XML screens
+  About page and the sleep score sheet are Compose, and the remaining XML screens
   inherit the larger Expressive shapes, so a settings change or a theme switch
-  looks the same everywhere;
+  looks the same everywhere. Device-specific settings pages now also use Compose,
+  including runtime-generated settings items, section cards and inline Material 3
+  Expressive sliders, while dialogs, intents and custom controls keep their
+  existing `Preference.performClick` behavior;
 * the **first-run permissions page starts the full permission sequence with
   one tap**: it asks for the runtime permissions in one batch, then opens the
   unrestricted background battery screen and continues with notification
@@ -150,6 +172,10 @@ starts from upstream and adds six patches:
   behind the score ring** and a chart setting to turn it off. A night is
   attributed to the day it ends on, so a 23:00–07:00 session counts toward the
   wake-up day;
+* **sleep-stage shares in the day and week charts**: each stage tile now shows
+  the stage duration and its share of total sleep, calculated from the recorded
+  sessions and rounded to a whole percent. Awake is measured against time in
+  bed, so it is not compared with a denominator that excludes it;
 * a **backup that runs on every app open** — the one moment the process is
   guaranteed to be alive — with its own settings page, a retention period, a
   changeable folder and a reset action, instead of relying on WorkManager, which
@@ -171,6 +197,18 @@ starts from upstream and adds six patches:
   normal fetches still end through the existing completion broadcast, while the
   30-second bound can also hide the indicator of a slower sync that keeps running
   in the background.
+* a **health summary for a month or a year**: steps and sleep in one place —
+  total steps, the daily average over the days that recorded steps (missing days
+  are not counted as zero), recorded and goal days, a bar chart and a top-ten
+  daily step leaderboard, plus average sleep duration, sleep score, efficiency,
+  deep/REM shares, sleep-goal nights and a sleep-quality leaderboard. The year
+  view groups both halves by month. It opens from the navigation drawer and is
+  also listed under the chart settings; the data reuses the same per-day
+  `DailyTotals` and sleep sessions as the charts, and when several devices
+  recorded the same day or night the largest total is used instead of summing
+  them. Sleep is attributed to the day it ends on; a device score is preferred
+  and the age-based estimate is used only when it is enabled and the device has
+  no score.
 
 The release APK is signed here rather than upstream: `PATCHWORK_SIGN_*` feeds a
 small build patch, so the F-Droid repository serves a build whose package name

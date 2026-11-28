@@ -1,0 +1,2666 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Fri, 27 Nov 2026 12:00:00 +0800
+Subject: [PATCH] Add monthly and yearly health summaries with steps and sleep
+
+Gadgetbridge already records steps and sleep per day, but there is no period
+overview: the dashboard and the charts show a day, a week or a running period,
+and there is no place that answers "how much did I walk this month", "what is
+my average day", "how well did I sleep" or "which days and nights were best".
+
+This adds a Health summary screen with:
+- a month/year switch, paging to the previous and next period, and a refresh;
+- total steps, the average over the days that actually recorded steps (missing
+  days are not counted as zero), the number of recorded days, and how many days
+  met the step goal;
+- a bar chart of steps per day for a month and per month for a year;
+- a yearly month-by-month step list that opens the corresponding month;
+- a daily step leaderboard, highest first and capped at ten days;
+- average sleep duration, sleep score, efficiency and deep/REM shares, the
+  number of recorded nights and the number of nights that met the sleep goal;
+- a nightly sleep chart for a month and an average-sleep chart per month for a
+  year, plus a monthly sleep breakdown that opens the corresponding month;
+- a sleep-quality leaderboard, highest score first and by duration when a night
+  has no score;
+- empty and error states for both halves, plus English, Simplified Chinese and
+  Traditional Chinese strings.
+
+The activity data comes from DailyTotals, so it follows the same per-device
+arithmetic as the existing charts. Sleep sessions are attributed to the day
+they end on; a device score is preferred and the age-based estimate is used
+only when it is enabled and the device has none. When several devices recorded
+the same day or night, the largest total is used, so wearing two watches does
+not double the summary.
+---
+ app/src/main/AndroidManifest.xml                                             |   4 +
+ app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt |  43 +++++
+ app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java     |  20 +++++
+ app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt | 1234 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt    | 181 ++++++++++++++
+ app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt | 117 ++++++++++
+ app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt            | 218 ++++++++++++++++
+ app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt  | 173 +++++++++++++
+ app/src/main/res/drawable/ic_activity_summary.xml                            |  11 +
+ app/src/main/res/values-zh-rCN/strings_activity_summary.xml                  |  67 ++++
+ app/src/main/res/values-zh-rTW/strings_activity_summary.xml                  |  67 ++++
+ app/src/main/res/values/strings_activity_summary.xml                         |  67 ++++
+ app/src/main/res/xml/charts_preferences.xml                                  |  10 +
+ app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt | 127 +++++++++
+ app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt | 161 ++++++++++
+ 15 files changed, 2500 insertions(+)
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -246,6 +246,10 @@
+         <activity
+             android:name=".activities.automations.OnOpenBackupSettingsActivity"
+             android:label="@string/pref_header_backup_on_open"
+             android:parentActivityName=".activities.SettingsActivity" />
++        <activity
++            android:name=".activities.ActivitySummaryActivity"
++            android:label="@string/activity_summary_title"
++            android:parentActivityName=".activities.ControlCenterv2" />
+         <activity
+             android:name=".activities.maps.MapsTrackActivity"
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+@@ -105,3 +105,6 @@ public class ControlCenterv2 extends AppCompatActivity
+     private static final Logger LOG = LoggerFactory.getLogger(ControlCenterv2.class);
+     public static final long REALTIME_HR_SAMPLE_TTL_MS = 5_000L;
+     public static final int MENU_REFRESH_CODE = 1;
++
++    /** Id of the activity summary entry, appended to R.menu.activity_main_drawer at runtime. */
++    private static final int MENU_ACTIVITY_SUMMARY = 1001;
+@@ -344,3 +347,14 @@ public class ControlCenterv2 extends AppCompatActivity
+         drawerMenuPopup.inflate(R.menu.activity_main_drawer);
+         final Menu drawerMenu = drawerMenuPopup.getMenu();
++        // Append the downstream activity summary without editing the shared menu resource; it
++        // joins the last group so the drawer does not draw an extra separator before it.
++        final int activitySummaryGroup = drawerMenu.size() > 0
++                ? drawerMenu.getItem(drawerMenu.size() - 1).getGroupId()
++                : Menu.NONE;
++        final MenuItem activitySummaryItem = drawerMenu.add(
++                activitySummaryGroup,
++                MENU_ACTIVITY_SUMMARY,
++                Integer.MAX_VALUE,
++                R.string.activity_summary_title);
++        activitySummaryItem.setIcon(R.drawable.ic_activity_summary);
+         final List<GbDrawerNavItem> drawerItems = new ArrayList<>(drawerMenu.size());
+@@ -642,3 +656,9 @@ public class ControlCenterv2 extends AppCompatActivity
+     public boolean onNavigationItemSelected(@NonNull final MenuItem item) {
+         final DrawerLayout drawer = findViewById(R.id.drawer_layout);
+         drawer.closeDrawer(GravityCompat.START, AndroidUtils.areAnimationsEnabled(this));
++        if (item.getItemId() == MENU_ACTIVITY_SUMMARY) {
++            startActivity(new android.content.Intent(
++                    this,
++                    nodomain.freeyourgadget.gadgetbridge.activities.ActivitySummaryActivity.class));
++            return false;
++        }
+diff --git a/app/src/main/res/xml/charts_preferences.xml b/app/src/main/res/xml/charts_preferences.xml
+--- a/app/src/main/res/xml/charts_preferences.xml
++++ b/app/src/main/res/xml/charts_preferences.xml
+@@ -71,14 +71,24 @@
+             android:title="@string/pref_title_charts_average"
+             app:iconSpaceReserved="false" />
+ 
+         <SwitchPreferenceCompat
+             android:defaultValue="true"
+             android:key="charts_age_based_sleep_score"
+             android:layout="@layout/preference_checkbox"
+             android:summary="@string/pref_summary_age_based_sleep_score"
+             android:title="@string/pref_title_age_based_sleep_score"
+             app:iconSpaceReserved="false" />
+ 
++        <Preference
++            android:icon="@drawable/ic_activity_summary"
++            android:key="charts_activity_summary"
++            android:summary="@string/activity_summary_pref_summary"
++            android:title="@string/activity_summary_title">
++            <intent
++                android:targetClass="nodomain.freeyourgadget.gadgetbridge.activities.ActivitySummaryActivity"
++                android:targetPackage="@string/applicationId" />
++        </Preference>
++
+         <MultiSelectListPreference
+             android:defaultValue="@array/pref_chart_weight_body_composition_default"
+             android:dialogTitle="@string/pref_title_chart_weight_body_composition"
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt
+new file mode 100644
+index 0000000..db600c8
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt
+@@ -0,0 +1,43 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.activities
++
++import android.os.Bundle
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.screens.activity.ActivitySummaryScreen
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.screens.settings.setComposeHandlesSystemBarInsets
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.setGbComposeContent
++
++/**
++ * Hosts the monthly and yearly activity and sleep summary, which is reached from the navigation
++ * drawer and from the chart settings.
++ */
++class ActivitySummaryActivity : AbstractGBActivity() {
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++
++        // The Compose screen draws its own large top app bar
++        supportActionBar?.hide()
++
++        setGbComposeContent {
++            ActivitySummaryScreen(
++                onBack = { onBackPressedDispatcher.onBackPressed() },
++            )
++        }
++
++        setComposeHandlesSystemBarInsets()
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt
+new file mode 100644
+index 0000000..7869319
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt
+@@ -0,0 +1,1234 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++@file:OptIn(ExperimentalMaterial3ExpressiveApi::class)
++
++package nodomain.freeyourgadget.gadgetbridge.ui.compose.screens.activity
++
++import android.text.format.DateFormat
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxHeight
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.automirrored.filled.ArrowBack
++import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
++import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
++import androidx.compose.material.icons.filled.Refresh
++import androidx.compose.material3.Button
++import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.SegmentedButton
++import androidx.compose.material3.SegmentedButtonDefaults
++import androidx.compose.material3.SingleChoiceSegmentedButtonRow
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.semantics.contentDescription
++import androidx.compose.ui.semantics.semantics
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import kotlinx.coroutines.CancellationException
++import nodomain.freeyourgadget.gadgetbridge.R
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbExpressiveScaffold
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbLoadingIndicator
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbSectionTitle
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbTonalCard
++import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbWavyBar
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummary
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummaryPeriod
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummaryRepository
++import nodomain.freeyourgadget.gadgetbridge.util.activity.DailySteps
++import nodomain.freeyourgadget.gadgetbridge.util.activity.MonthSteps
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.MonthSleep
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.NightSleep
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.SleepQuality
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.SleepSummary
++import nodomain.freeyourgadget.gadgetbridge.util.sleep.SleepSummaryRepository
++import java.text.NumberFormat
++import java.time.LocalDate
++import java.time.YearMonth
++import java.time.format.DateTimeFormatter
++import java.util.Locale
++
++/**
++ * The monthly and yearly activity and sleep summary.
++ *
++ * The period is loaded in the background. Changing the month/year, switching between month and
++ * year, or tapping refresh starts a new load, so the screen never reads the database on the main
++ * thread.
++ */
++@Composable
++fun ActivitySummaryScreen(
++    onBack: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    val repository = remember { ActivitySummaryRepository() }
++    val sleepRepository = remember { SleepSummaryRepository() }
++    val locale = Locale.getDefault()
++
++    var period by remember { mutableStateOf(ActivitySummaryPeriod.MONTH) }
++    var anchor by remember { mutableStateOf(LocalDate.now()) }
++    var reloadKey by remember { mutableIntStateOf(0) }
++    var uiState by remember { mutableStateOf<SummaryUiState>(SummaryUiState.Loading) }
++    var sleepState by remember { mutableStateOf<SleepUiState>(SleepUiState.Loading) }
++
++    LaunchedEffect(period, anchor, reloadKey) {
++        uiState = SummaryUiState.Loading
++        uiState = try {
++            SummaryUiState.Ready(repository.load(period, anchor))
++        } catch (e: CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            SummaryUiState.Failure(e.message ?: e.toString())
++        }
++    }
++
++    LaunchedEffect(period, anchor, reloadKey) {
++        sleepState = SleepUiState.Loading
++        sleepState = try {
++            SleepUiState.Ready(sleepRepository.load(period, anchor))
++        } catch (e: CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            SleepUiState.Failure(e.message ?: e.toString())
++        }
++    }
++
++    val today = LocalDate.now()
++    val canGoNext = when (period) {
++        ActivitySummaryPeriod.MONTH -> YearMonth.from(anchor).isBefore(YearMonth.from(today))
++        ActivitySummaryPeriod.YEAR -> anchor.year < today.year
++    }
++
++    GbExpressiveScaffold(
++        title = stringResource(R.string.activity_summary_title),
++        subtitle = periodLabel(period, anchor, locale),
++        modifier = modifier,
++        navigationIcon = {
++            IconButton(onClick = onBack) {
++                Icon(
++                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
++                    contentDescription = stringResource(R.string.compose_settings_navigate_up),
++                )
++            }
++        },
++        actions = {
++            IconButton(onClick = { reloadKey++ }) {
++                Icon(
++                    imageVector = Icons.Filled.Refresh,
++                    contentDescription = stringResource(R.string.activity_summary_refresh),
++                )
++            }
++        },
++    ) { innerPadding ->
++        LazyColumn(
++            modifier = Modifier
++                .fillMaxSize()
++                .padding(innerPadding),
++            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 32.dp),
++            verticalArrangement = Arrangement.spacedBy(12.dp),
++        ) {
++            item {
++                PeriodTypeSelector(
++                    period = period,
++                    onPeriodChange = { period = it },
++                )
++            }
++            item {
++                PeriodNavigator(
++                    period = period,
++                    anchor = anchor,
++                    canGoNext = canGoNext,
++                    locale = locale,
++                    onPrevious = {
++                        anchor = when (period) {
++                            ActivitySummaryPeriod.MONTH -> anchor.minusMonths(1)
++                            ActivitySummaryPeriod.YEAR -> anchor.minusYears(1)
++                        }
++                    },
++                    onNext = {
++                        anchor = when (period) {
++                            ActivitySummaryPeriod.MONTH -> anchor.plusMonths(1)
++                            ActivitySummaryPeriod.YEAR -> anchor.plusYears(1)
++                        }
++                    },
++                )
++            }
++
++            when (val state = uiState) {
++                SummaryUiState.Loading -> item {
++                    Box(
++                        modifier = Modifier
++                            .fillMaxWidth()
++                            .padding(vertical = 48.dp),
++                        contentAlignment = Alignment.Center,
++                    ) {
++                        GbLoadingIndicator()
++                    }
++                }
++
++                is SummaryUiState.Failure -> item {
++                    FailureCard(
++                        message = state.message,
++                        onRetry = { reloadKey++ },
++                    )
++                }
++
++                is SummaryUiState.Ready -> {
++                    val summary = state.summary
++                    if (summary.isEmpty) {
++                        item { EmptyCard() }
++                    } else {
++                        item { SummaryGrid(summary = summary, locale = locale) }
++                        item {
++                            StepsChartCard(
++                                summary = summary,
++                                onOpenMonth = { month ->
++                                    anchor = month.atDay(1)
++                                    period = ActivitySummaryPeriod.MONTH
++                                },
++                            )
++                        }
++                    }
++                }
++            }
++
++            item {
++                GbSectionTitle(stringResource(R.string.sleep_summary_section))
++            }
++            item {
++                SleepSummarySection(
++                    state = sleepState,
++                    onRetry = { reloadKey++ },
++                    onOpenMonth = { month ->
++                        anchor = month.atDay(1)
++                        period = ActivitySummaryPeriod.MONTH
++                    },
++                )
++            }
++        }
++    }
++}
++
++private sealed interface SummaryUiState {
++    data object Loading : SummaryUiState
++
++    data class Ready(val summary: ActivitySummary) : SummaryUiState
++
++    data class Failure(val message: String) : SummaryUiState
++}
++
++private sealed interface SleepUiState {
++    data object Loading : SleepUiState
++
++    data class Ready(val summary: SleepSummary) : SleepUiState
++
++    data class Failure(val message: String) : SleepUiState
++}
++
++@Composable
++private fun PeriodTypeSelector(
++    period: ActivitySummaryPeriod,
++    onPeriodChange: (ActivitySummaryPeriod) -> Unit,
++) {
++    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
++        ActivitySummaryPeriod.entries.forEachIndexed { index, candidate ->
++            SegmentedButton(
++                selected = period == candidate,
++                onClick = { onPeriodChange(candidate) },
++                shape = SegmentedButtonDefaults.itemShape(
++                    index = index,
++                    count = ActivitySummaryPeriod.entries.size,
++                ),
++                modifier = Modifier.weight(1f),
++                label = {
++                    Text(
++                        text = stringResource(
++                            when (candidate) {
++                                ActivitySummaryPeriod.MONTH -> R.string.activity_summary_month
++                                ActivitySummaryPeriod.YEAR -> R.string.activity_summary_year
++                            },
++                        ),
++                        style = MaterialTheme.typography.labelLarge,
++                    )
++                },
++            )
++        }
++    }
++}
++
++@Composable
++private fun PeriodNavigator(
++    period: ActivitySummaryPeriod,
++    anchor: LocalDate,
++    canGoNext: Boolean,
++    locale: Locale,
++    onPrevious: () -> Unit,
++    onNext: () -> Unit,
++) {
++    Row(
++        modifier = Modifier.fillMaxWidth(),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        IconButton(onClick = onPrevious) {
++            Icon(
++                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
++                contentDescription = stringResource(R.string.activity_summary_previous_period),
++            )
++        }
++        Text(
++            text = periodLabel(period, anchor, locale),
++            modifier = Modifier.weight(1f),
++            style = MaterialTheme.typography.titleLarge,
++            textAlign = TextAlign.Center,
++        )
++        IconButton(
++            onClick = onNext,
++            enabled = canGoNext,
++        ) {
++            Icon(
++                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
++                contentDescription = stringResource(R.string.activity_summary_next_period),
++            )
++        }
++    }
++}
++
++@Composable
++private fun SummaryGrid(
++    summary: ActivitySummary,
++    locale: Locale,
++) {
++    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
++        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++            SummaryMetricCard(
++                value = formatSteps(summary.totalSteps),
++                label = stringResource(R.string.activity_summary_total_steps),
++                supporting = bestDayText(summary, locale),
++                modifier = Modifier.weight(1f),
++            )
++            SummaryMetricCard(
++                value = formatSteps(summary.averageSteps.toLong()),
++                label = stringResource(R.string.activity_summary_average_steps),
++                supporting = stringResource(
++                    R.string.activity_summary_average_hint,
++                    summary.recordedDays,
++                ),
++                modifier = Modifier.weight(1f),
++            )
++        }
++        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++            SummaryMetricCard(
++                value = formatSteps(summary.recordedDays.toLong()),
++                label = stringResource(R.string.activity_summary_recorded_days),
++                supporting = stringResource(
++                    R.string.activity_summary_recorded_days_hint,
++                    summary.recordedDays,
++                    summary.days.size,
++                ),
++                modifier = Modifier.weight(1f),
++            )
++            SummaryMetricCard(
++                value = formatSteps(summary.goalDays.toLong()),
++                label = stringResource(R.string.activity_summary_goal_days),
++                supporting = if (summary.goal > 0) {
++                    stringResource(
++                        R.string.activity_summary_goal_days_hint,
++                        summary.goalDays,
++                        summary.days.size,
++                        formatSteps(summary.goal.toLong()),
++                    )
++                } else {
++                    stringResource(R.string.activity_summary_goal_days_no_goal)
++                },
++                modifier = Modifier.weight(1f),
++            )
++        }
++        Text(
++            text = stringResource(
++                R.string.activity_summary_calendar_average,
++                formatSteps(summary.averagePerElapsedDay.toLong()),
++                summary.days.size,
++            ),
++            modifier = Modifier.padding(horizontal = 4.dp),
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++        )
++    }
++}
++
++@Composable
++private fun SummaryMetricCard(
++    value: String,
++    label: String,
++    supporting: String,
++    modifier: Modifier = Modifier,
++) {
++    GbTonalCard(
++        modifier = modifier,
++        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
++    ) {
++        Column(modifier = Modifier.padding(16.dp)) {
++            Text(
++                text = value,
++                style = MaterialTheme.typography.headlineSmall,
++                fontWeight = FontWeight.SemiBold,
++                maxLines = 1,
++            )
++            Spacer(Modifier.height(4.dp))
++            Text(
++                text = label,
++                style = MaterialTheme.typography.labelLarge,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++            Spacer(Modifier.height(2.dp))
++            Text(
++                text = supporting,
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++        }
++    }
++}
++
++@Composable
++private fun StepsChartCard(
++    summary: ActivitySummary,
++    onOpenMonth: (YearMonth) -> Unit,
++) {
++    val chartTitle = stringResource(
++        when (summary.period) {
++            ActivitySummaryPeriod.MONTH -> R.string.activity_summary_chart_daily
++            ActivitySummaryPeriod.YEAR -> R.string.activity_summary_chart_monthly
++        },
++    )
++
++    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
++        GbTonalCard(
++            modifier = Modifier
++                .fillMaxWidth()
++                .semantics {
++                    contentDescription = chartTitle
++                },
++            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
++        ) {
++            Column(modifier = Modifier.padding(16.dp)) {
++                Text(
++                    text = chartTitle,
++                    style = MaterialTheme.typography.titleMedium,
++                )
++                Spacer(Modifier.height(12.dp))
++                StepsBars(bars = barsFor(summary))
++            }
++        }
++
++        if (summary.period == ActivitySummaryPeriod.YEAR) {
++            val currentMonth = YearMonth.now()
++            val visibleMonths = summary.months.filter { !it.month.isAfter(currentMonth) }
++            val maxMonthly = visibleMonths.maxOfOrNull { it.totalSteps } ?: 0L
++
++            GbSectionTitle(stringResource(R.string.activity_summary_monthly_totals))
++            visibleMonths.forEach { month ->
++                MonthlyRow(
++                    month = month,
++                    maxMonthly = maxMonthly,
++                    locale = Locale.getDefault(),
++                    onClick = { onOpenMonth(month.month) },
++                )
++            }
++        }
++
++        GbSectionTitle(stringResource(R.string.activity_summary_leaderboard))
++        if (summary.leaderboard.isEmpty()) {
++            Text(
++                text = stringResource(R.string.activity_summary_leaderboard_empty),
++                style = MaterialTheme.typography.bodyMedium,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++        } else {
++            val best = summary.leaderboard.first().steps.coerceAtLeast(1)
++            summary.leaderboard.forEachIndexed { index, day ->
++                LeaderboardRow(
++                    rank = index + 1,
++                    day = day,
++                    best = best,
++                    goal = summary.goal,
++                    locale = Locale.getDefault(),
++                )
++            }
++        }
++
++        Text(
++            text = stringResource(R.string.activity_summary_note),
++            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++        )
++    }
++}
++
++@Composable
++private fun StepsBars(bars: List<SummaryBar>) {
++    val max = bars.maxOfOrNull { it.value }?.coerceAtLeast(1L) ?: 1L
++
++    Column {
++        Row(
++            modifier = Modifier
++                .fillMaxWidth()
++                .height(140.dp),
++            horizontalArrangement = Arrangement.spacedBy(2.dp),
++            verticalAlignment = Alignment.Bottom,
++        ) {
++            bars.forEach { bar ->
++                Box(
++                    modifier = Modifier
++                        .weight(1f)
++                        .fillMaxHeight(),
++                    contentAlignment = Alignment.BottomCenter,
++                ) {
++                    Box(
++                        modifier = Modifier
++                            .fillMaxWidth()
++                            .fillMaxHeight(bar.value.toFloat() / max)
++                            .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
++                            .background(
++                                color = if (bar.highlight) {
++                                    MaterialTheme.colorScheme.tertiary
++                                } else {
++                                    MaterialTheme.colorScheme.primary
++                                },
++                            ),
++                    )
++                }
++            }
++        }
++        Spacer(Modifier.height(4.dp))
++        Row(
++            modifier = Modifier.fillMaxWidth(),
++            horizontalArrangement = Arrangement.spacedBy(2.dp),
++        ) {
++            bars.forEach { bar ->
++                Text(
++                    text = bar.label,
++                    modifier = Modifier.weight(1f),
++                    fontSize = 9.sp,
++                    lineHeight = 10.sp,
++                    maxLines = 1,
++                    textAlign = TextAlign.Center,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            }
++        }
++    }
++}
++
++private data class SummaryBar(
++    val value: Long,
++    val label: String,
++    val highlight: Boolean,
++)
++
++private fun barsFor(summary: ActivitySummary): List<SummaryBar> =
++    when (summary.period) {
++        ActivitySummaryPeriod.MONTH -> {
++            val best = summary.days.maxOfOrNull { it.steps } ?: 0
++            summary.days.map { day ->
++                SummaryBar(
++                    value = day.steps.toLong(),
++                    label = if (day.date.dayOfMonth == 1 || day.date.dayOfMonth % 7 == 0) {
++                        day.date.dayOfMonth.toString()
++                    } else {
++                        ""
++                    },
++                    highlight = best > 0 && day.steps == best,
++                )
++            }
++        }
++
++        ActivitySummaryPeriod.YEAR -> {
++            val best = summary.months.maxOfOrNull { it.totalSteps } ?: 0L
++            summary.months.map { month ->
++                SummaryBar(
++                    value = month.totalSteps,
++                    label = month.month.monthValue.toString(),
++                    highlight = best > 0 && month.totalSteps == best,
++                )
++            }
++        }
++    }
++
++@Composable
++private fun MonthlyRow(
++    month: MonthSteps,
++    maxMonthly: Long,
++    locale: Locale,
++    onClick: () -> Unit,
++) {
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.surfaceContainer,
++        onClick = onClick,
++    ) {
++        Column(modifier = Modifier.padding(16.dp)) {
++            Row(
++                modifier = Modifier.fillMaxWidth(),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Text(
++                    text = formatMonth(month.month, locale),
++                    modifier = Modifier.weight(1f),
++                    style = MaterialTheme.typography.titleMedium,
++                )
++                Text(
++                    text = stringResource(
++                        R.string.activity_summary_month_row_average,
++                        formatSteps(month.averageSteps.toLong()),
++                    ),
++                    style = MaterialTheme.typography.bodyMedium,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++                Spacer(Modifier.size(4.dp))
++                Icon(
++                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
++                    contentDescription = null,
++                )
++            }
++            Spacer(Modifier.height(4.dp))
++            Text(
++                text = stringResource(
++                    R.string.activity_summary_month_row_days,
++                    month.recordedDays,
++                ),
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++            Spacer(Modifier.height(8.dp))
++            GbWavyBar(
++                progress = if (maxMonthly > 0) {
++                    month.totalSteps.toFloat() / maxMonthly.toFloat()
++                } else {
++                    0f
++                },
++            )
++            Spacer(Modifier.height(4.dp))
++            Text(
++                text = stringResource(R.string.activity_summary_steps_value, formatSteps(month.totalSteps)),
++                style = MaterialTheme.typography.bodySmall,
++            )
++        }
++    }
++}
++
++@Composable
++private fun LeaderboardRow(
++    rank: Int,
++    day: DailySteps,
++    best: Int,
++    goal: Int,
++    locale: Locale,
++) {
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.surfaceContainer,
++    ) {
++        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
++            Row(
++                modifier = Modifier.fillMaxWidth(),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Box(
++                    modifier = Modifier
++                        .size(32.dp)
++                        .clip(CircleShape)
++                        .background(MaterialTheme.colorScheme.primaryContainer),
++                    contentAlignment = Alignment.Center,
++                ) {
++                    Text(
++                        text = rank.toString(),
++                        style = MaterialTheme.typography.labelLarge,
++                        fontWeight = FontWeight.SemiBold,
++                        color = MaterialTheme.colorScheme.onPrimaryContainer,
++                    )
++                }
++                Spacer(Modifier.size(12.dp))
++                Column(modifier = Modifier.weight(1f)) {
++                    Text(
++                        text = formatDay(day.date, locale),
++                        style = MaterialTheme.typography.titleMedium,
++                    )
++                    if (goal > 0 && day.steps >= goal) {
++                        Text(
++                            text = stringResource(R.string.activity_summary_goal_reached),
++                            style = MaterialTheme.typography.bodySmall,
++                            color = MaterialTheme.colorScheme.tertiary,
++                        )
++                    }
++                }
++                Text(
++                    text = formatSteps(day.steps.toLong()),
++                    style = MaterialTheme.typography.titleLarge,
++                    fontWeight = FontWeight.SemiBold,
++                )
++                Spacer(Modifier.size(4.dp))
++                Text(
++                    text = stringResource(R.string.activity_summary_steps_unit),
++                    style = MaterialTheme.typography.labelSmall,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            }
++            Spacer(Modifier.height(8.dp))
++            GbWavyBar(
++                progress = (day.steps.toFloat() / best).coerceIn(0f, 1f),
++                color = if (day.steps == best) {
++                    MaterialTheme.colorScheme.tertiary
++                } else {
++                    MaterialTheme.colorScheme.primary
++                },
++            )
++        }
++    }
++}
++
++@Composable
++private fun FailureCard(
++    message: String,
++    onRetry: () -> Unit,
++) {
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.errorContainer,
++        contentColor = MaterialTheme.colorScheme.onErrorContainer,
++    ) {
++        Column(modifier = Modifier.padding(16.dp)) {
++            Text(
++                text = stringResource(R.string.activity_summary_error, message),
++                style = MaterialTheme.typography.bodyMedium,
++            )
++            Spacer(Modifier.height(12.dp))
++            Button(onClick = onRetry) {
++                Text(stringResource(R.string.activity_summary_retry))
++            }
++        }
++    }
++}
++
++@Composable
++private fun EmptyCard() {
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
++    ) {
++        Text(
++            text = stringResource(R.string.activity_summary_empty),
++            modifier = Modifier.padding(16.dp),
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++        )
++    }
++}
++
++@Composable
++private fun SleepSummarySection(
++    state: SleepUiState,
++    onRetry: () -> Unit,
++    onOpenMonth: (YearMonth) -> Unit,
++) {
++    when (state) {
++        SleepUiState.Loading -> Box(
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(vertical = 32.dp),
++            contentAlignment = Alignment.Center,
++        ) {
++            GbLoadingIndicator()
++        }
++
++        is SleepUiState.Failure -> SleepFailureCard(
++            message = state.message,
++            onRetry = onRetry,
++        )
++
++        is SleepUiState.Ready -> {
++            val summary = state.summary
++            if (summary.isEmpty) {
++                SleepEmptyCard()
++            } else {
++                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
++                    SleepMetrics(summary)
++                    SleepChart(summary = summary, onOpenMonth = onOpenMonth)
++                    SleepLeaderboard(summary)
++                    Text(
++                        text = stringResource(R.string.sleep_summary_note),
++                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun SleepMetrics(summary: SleepSummary) {
++    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
++        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++            SummaryMetricCard(
++                value = formatSleepDuration(summary.averageAsleepMinutes),
++                label = stringResource(R.string.sleep_summary_average_duration),
++                supporting = stringResource(
++                    R.string.sleep_summary_average_duration_hint,
++                    summary.nights.size,
++                ),
++                modifier = Modifier.weight(1f),
++            )
++            SummaryMetricCard(
++                value = summary.averageScore?.toString()
++                    ?: stringResource(R.string.sleep_summary_no_value),
++                label = stringResource(R.string.sleep_summary_average_score),
++                supporting = bestSleepNightText(summary),
++                modifier = Modifier.weight(1f),
++            )
++        }
++        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++            SummaryMetricCard(
++                value = stringResource(
++                    R.string.sleep_summary_percent,
++                    summary.averageEfficiencyPercent,
++                ),
++                label = stringResource(R.string.sleep_summary_average_efficiency),
++                supporting = stringResource(
++                    R.string.sleep_summary_deep_rem,
++                    summary.averageDeepSharePercent,
++                    summary.averageRemSharePercent,
++                ),
++                modifier = Modifier.weight(1f),
++            )
++            SummaryMetricCard(
++                value = formatSteps(summary.nights.size.toLong()),
++                label = stringResource(R.string.sleep_summary_recorded_nights),
++                supporting = if (summary.goalMinutes > 0) {
++                    stringResource(
++                        R.string.sleep_summary_recorded_nights_goal_hint,
++                        summary.nights.size,
++                        summary.elapsedDays,
++                        summary.goalNights,
++                    )
++                } else {
++                    stringResource(
++                        R.string.sleep_summary_recorded_nights_hint,
++                        summary.nights.size,
++                        summary.elapsedDays,
++                    )
++                },
++                modifier = Modifier.weight(1f),
++            )
++        }
++    }
++}
++
++@Composable
++private fun SleepChart(
++    summary: SleepSummary,
++    onOpenMonth: (YearMonth) -> Unit,
++) {
++    val chartTitle = stringResource(
++        when (summary.period) {
++            ActivitySummaryPeriod.MONTH -> R.string.sleep_summary_chart_daily
++            ActivitySummaryPeriod.YEAR -> R.string.sleep_summary_chart_monthly
++        },
++    )
++
++    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
++        GbTonalCard(
++            modifier = Modifier
++                .fillMaxWidth()
++                .semantics {
++                    contentDescription = chartTitle
++                },
++            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
++        ) {
++            Column(modifier = Modifier.padding(16.dp)) {
++                Text(
++                    text = chartTitle,
++                    style = MaterialTheme.typography.titleMedium,
++                )
++                Spacer(Modifier.height(12.dp))
++                StepsBars(bars = sleepBarsFor(summary))
++            }
++        }
++
++        if (summary.period == ActivitySummaryPeriod.YEAR) {
++            val currentMonth = YearMonth.now()
++            val visibleMonths = summary.months.filter { !it.month.isAfter(currentMonth) }
++            val maxMonthly = visibleMonths.maxOfOrNull { it.averageAsleepMinutes } ?: 0
++
++            GbSectionTitle(stringResource(R.string.sleep_summary_monthly_totals))
++            visibleMonths.forEach { month ->
++                SleepMonthlyRow(
++                    month = month,
++                    maxMonthly = maxMonthly,
++                    locale = Locale.getDefault(),
++                    onClick = { onOpenMonth(month.month) },
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun SleepMonthlyRow(
++    month: MonthSleep,
++    maxMonthly: Int,
++    locale: Locale,
++    onClick: () -> Unit,
++) {
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.surfaceContainer,
++        onClick = onClick,
++    ) {
++        Column(modifier = Modifier.padding(16.dp)) {
++            Row(
++                modifier = Modifier.fillMaxWidth(),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Text(
++                    text = formatMonth(month.month, locale),
++                    modifier = Modifier.weight(1f),
++                    style = MaterialTheme.typography.titleMedium,
++                )
++                Text(
++                    text = formatSleepDuration(month.averageAsleepMinutes),
++                    style = MaterialTheme.typography.bodyMedium,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++                Spacer(Modifier.size(4.dp))
++                Icon(
++                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
++                    contentDescription = null,
++                )
++            }
++            Spacer(Modifier.height(4.dp))
++            Text(
++                text = stringResource(
++                    R.string.sleep_summary_month_row_nights,
++                    month.nights.size,
++                ),
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++            month.averageScore?.let { score ->
++                Text(
++                    text = stringResource(R.string.sleep_summary_month_row_score, score),
++                    style = MaterialTheme.typography.bodySmall,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            }
++            Spacer(Modifier.height(8.dp))
++            GbWavyBar(
++                progress = if (maxMonthly > 0) {
++                    month.averageAsleepMinutes.toFloat() / maxMonthly.toFloat()
++                } else {
++                    0f
++                },
++            )
++        }
++    }
++}
++
++@Composable
++private fun SleepLeaderboard(summary: SleepSummary) {
++    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
++        GbSectionTitle(stringResource(R.string.sleep_summary_leaderboard))
++        if (summary.leaderboard.isEmpty()) {
++            Text(
++                text = stringResource(R.string.sleep_summary_leaderboard_empty),
++                style = MaterialTheme.typography.bodyMedium,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++        } else {
++            val bestScore = summary.leaderboard.maxOfOrNull { it.score ?: 0 } ?: 0
++            val bestDuration = summary.leaderboard
++                .maxOfOrNull { it.asleepMinutes }
++                ?.coerceAtLeast(1)
++                ?: 1
++            summary.leaderboard.forEachIndexed { index, night ->
++                SleepLeaderboardRow(
++                    rank = index + 1,
++                    night = night,
++                    bestScore = bestScore,
++                    bestDuration = bestDuration,
++                    locale = Locale.getDefault(),
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun SleepLeaderboardRow(
++    rank: Int,
++    night: NightSleep,
++    bestScore: Int,
++    bestDuration: Int,
++    locale: Locale,
++) {
++    val score = night.score
++    val progress = if (bestScore > 0 && score != null) {
++        score.toFloat() / 100f
++    } else {
++        night.asleepMinutes.toFloat() / bestDuration
++    }
++
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.surfaceContainer,
++    ) {
++        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
++            Row(
++                modifier = Modifier.fillMaxWidth(),
++                verticalAlignment = Alignment.CenterVertically,
++            ) {
++                Box(
++                    modifier = Modifier
++                        .size(32.dp)
++                        .clip(CircleShape)
++                        .background(MaterialTheme.colorScheme.primaryContainer),
++                    contentAlignment = Alignment.Center,
++                ) {
++                    Text(
++                        text = rank.toString(),
++                        style = MaterialTheme.typography.labelLarge,
++                        fontWeight = FontWeight.SemiBold,
++                        color = MaterialTheme.colorScheme.onPrimaryContainer,
++                    )
++                }
++                Spacer(Modifier.size(12.dp))
++                Column(modifier = Modifier.weight(1f)) {
++                    Text(
++                        text = formatDay(night.date, locale),
++                        style = MaterialTheme.typography.titleMedium,
++                    )
++                    Text(
++                        text = sleepQualityLabel(night.quality),
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                }
++                Text(
++                    text = score?.toString()
++                        ?: stringResource(R.string.sleep_summary_no_value),
++                    style = MaterialTheme.typography.titleLarge,
++                    fontWeight = FontWeight.SemiBold,
++                )
++                Spacer(Modifier.size(4.dp))
++                Text(
++                    text = stringResource(R.string.sleep_summary_score),
++                    style = MaterialTheme.typography.labelSmall,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            }
++            Spacer(Modifier.height(4.dp))
++            Text(
++                text = stringResource(
++                    R.string.sleep_summary_night_duration,
++                    formatSleepDuration(night.asleepMinutes),
++                ),
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++            )
++            Spacer(Modifier.height(8.dp))
++            GbWavyBar(
++                progress = progress.coerceIn(0f, 1f),
++                color = if (rank == 1) {
++                    MaterialTheme.colorScheme.tertiary
++                } else {
++                    MaterialTheme.colorScheme.primary
++                },
++            )
++        }
++    }
++}
++
++@Composable
++private fun SleepFailureCard(
++    message: String,
++    onRetry: () -> Unit,
++) {
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.errorContainer,
++        contentColor = MaterialTheme.colorScheme.onErrorContainer,
++    ) {
++        Column(modifier = Modifier.padding(16.dp)) {
++            Text(
++                text = stringResource(R.string.sleep_summary_error, message),
++                style = MaterialTheme.typography.bodyMedium,
++            )
++            Spacer(Modifier.height(12.dp))
++            Button(onClick = onRetry) {
++                Text(stringResource(R.string.activity_summary_retry))
++            }
++        }
++    }
++}
++
++@Composable
++private fun SleepEmptyCard() {
++    GbTonalCard(
++        modifier = Modifier.fillMaxWidth(),
++        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
++    ) {
++        Text(
++            text = stringResource(R.string.sleep_summary_empty),
++            modifier = Modifier.padding(16.dp),
++            style = MaterialTheme.typography.bodyMedium,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++        )
++    }
++}
++
++@Composable
++private fun bestSleepNightText(summary: SleepSummary): String {
++    val best = summary.bestNight ?: return stringResource(R.string.sleep_summary_no_value)
++    val score = best.score ?: 0
++    return if (score > 0) {
++        stringResource(
++            R.string.sleep_summary_best_night,
++            formatDay(best.date, Locale.getDefault()),
++            score,
++        )
++    } else {
++        stringResource(
++            R.string.sleep_summary_longest_night,
++            formatDay(best.date, Locale.getDefault()),
++            formatSleepDuration(best.asleepMinutes),
++        )
++    }
++}
++
++@Composable
++private fun sleepQualityLabel(quality: SleepQuality): String = stringResource(
++    when (quality) {
++        SleepQuality.EXCELLENT -> R.string.sleep_summary_quality_excellent
++        SleepQuality.GOOD -> R.string.sleep_summary_quality_good
++        SleepQuality.FAIR -> R.string.sleep_summary_quality_fair
++        SleepQuality.POOR -> R.string.sleep_summary_quality_poor
++        SleepQuality.UNKNOWN -> R.string.sleep_summary_quality_unknown
++    },
++)
++
++@Composable
++private fun formatSleepDuration(minutes: Int): String {
++    val hours = minutes / 60
++    val rest = minutes % 60
++    return if (hours > 0) {
++        stringResource(R.string.sleep_summary_duration_hours_minutes, hours, rest)
++    } else {
++        stringResource(R.string.sleep_summary_duration_minutes, rest)
++    }
++}
++
++private fun sleepBarsFor(summary: SleepSummary): List<SummaryBar> =
++    when (summary.period) {
++        ActivitySummaryPeriod.MONTH -> {
++            val byDate = summary.nights.associateBy { it.date }
++            val best = summary.nights.maxOfOrNull { it.asleepMinutes } ?: 0
++            (0 until summary.elapsedDays).map { offset ->
++                val date = summary.start.plusDays(offset.toLong())
++                val minutes = byDate[date]?.asleepMinutes ?: 0
++                SummaryBar(
++                    value = minutes.toLong(),
++                    label = if (date.dayOfMonth == 1 || date.dayOfMonth % 7 == 0) {
++                        date.dayOfMonth.toString()
++                    } else {
++                        ""
++                    },
++                    highlight = best > 0 && minutes == best,
++                )
++            }
++        }
++
++        ActivitySummaryPeriod.YEAR -> {
++            val best = summary.months.maxOfOrNull { it.averageAsleepMinutes } ?: 0
++            summary.months.map { month ->
++                SummaryBar(
++                    value = month.averageAsleepMinutes.toLong(),
++                    label = month.month.monthValue.toString(),
++                    highlight = best > 0 && month.averageAsleepMinutes == best,
++                )
++            }
++        }
++    }
++
++@Composable
++private fun bestDayText(summary: ActivitySummary, locale: Locale): String {
++    val best = summary.bestDay ?: return stringResource(R.string.activity_summary_no_best_day)
++    return stringResource(
++        R.string.activity_summary_best_day,
++        formatDay(best.date, locale),
++        formatSteps(best.steps.toLong()),
++    )
++}
++
++private fun periodLabel(
++    period: ActivitySummaryPeriod,
++    anchor: LocalDate,
++    locale: Locale,
++): String = when (period) {
++    ActivitySummaryPeriod.MONTH -> formatMonth(YearMonth.from(anchor), locale)
++    ActivitySummaryPeriod.YEAR -> anchor.year.toString()
++}
++
++private fun formatMonth(month: YearMonth, locale: Locale): String {
++    val pattern = DateFormat.getBestDateTimePattern(locale, "yMMMM")
++    return month.atDay(1).format(DateTimeFormatter.ofPattern(pattern, locale))
++}
++
++private fun formatDay(date: LocalDate, locale: Locale): String {
++    val pattern = DateFormat.getBestDateTimePattern(locale, "MMMd")
++    return date.format(DateTimeFormatter.ofPattern(pattern, locale))
++}
++
++private fun formatSteps(steps: Long): String =
++    NumberFormat.getIntegerInstance().format(steps)
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt
+new file mode 100644
+index 0000000..dcab23a
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt
+@@ -0,0 +1,181 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.activity
++
++import java.time.LocalDate
++import java.time.YearMonth
++
++/**
++ * The aggregation window of an [ActivitySummary].
++ */
++enum class ActivitySummaryPeriod {
++    MONTH,
++    YEAR,
++}
++
++/**
++ * The steps recorded on one calendar day.
++ */
++data class DailySteps(
++    val date: LocalDate,
++    val steps: Int,
++) {
++    val hasSteps: Boolean
++        get() = steps > 0
++}
++
++/**
++ * The totals of one month, used by the yearly view.
++ */
++data class MonthSteps(
++    val month: YearMonth,
++    val days: List<DailySteps>,
++    val recordedDays: Int,
++    val totalSteps: Long,
++    val averageSteps: Int,
++    val goalDays: Int,
++)
++
++/**
++ * A fully calculated monthly or yearly activity summary.
++ *
++ * [averageSteps] averages only the days that recorded steps, so a missing sync does not pull the
++ * average down as if the user had walked nothing. [averagePerElapsedDay] is the calendar average,
++ * over every day of the period that has already passed, and is kept for the supporting text.
++ */
++data class ActivitySummary(
++    val period: ActivitySummaryPeriod,
++    val anchor: LocalDate,
++    val start: LocalDate,
++    val endExclusive: LocalDate,
++    val days: List<DailySteps>,
++    val recordedDays: Int,
++    val totalSteps: Long,
++    val averageSteps: Int,
++    val averagePerElapsedDay: Int,
++    val goal: Int,
++    val goalDays: Int,
++    val bestDay: DailySteps?,
++    val leaderboard: List<DailySteps>,
++    val months: List<MonthSteps>,
++) {
++    val isEmpty: Boolean
++        get() = totalSteps == 0L
++}
++
++/**
++ * Turns per-day step totals into the monthly and yearly summaries the screen shows.
++ *
++ * The calculator is deliberately free of Android and database dependencies, so the averages, the
++ * goal count and the leaderboard ordering can be tested without a device or a database.
++ */
++object ActivitySummaryCalculator {
++    /** How many days the daily leaderboard shows. */
++    const val LEADERBOARD_SIZE = 10
++
++    /**
++     * The half-open date range [start, endExclusive) of [period] that contains [anchor].
++     */
++    fun bounds(period: ActivitySummaryPeriod, anchor: LocalDate): Pair<LocalDate, LocalDate> =
++        when (period) {
++            ActivitySummaryPeriod.MONTH -> {
++                val month = YearMonth.from(anchor)
++                month.atDay(1) to month.plusMonths(1).atDay(1)
++            }
++
++            ActivitySummaryPeriod.YEAR ->
++                LocalDate.of(anchor.year, 1, 1) to LocalDate.of(anchor.year + 1, 1, 1)
++        }
++
++    /**
++     * Builds the summary of [period] around [anchor], using [today] to exclude days that have not
++     * happened yet. [stepsByDate] may contain days outside the period; they are ignored.
++     */
++    fun calculate(
++        period: ActivitySummaryPeriod,
++        anchor: LocalDate,
++        today: LocalDate,
++        goal: Int,
++        stepsByDate: Map<LocalDate, Int>,
++    ): ActivitySummary {
++        val (start, endExclusive) = bounds(period, anchor)
++        val lastIncluded = minOf(endExclusive, today.plusDays(1))
++
++        val days = buildList {
++            var date = start
++            while (date.isBefore(lastIncluded)) {
++                add(DailySteps(date, (stepsByDate[date] ?: 0).coerceAtLeast(0)))
++                date = date.plusDays(1)
++            }
++        }
++        val recorded = days.filter { it.hasSteps }
++        val totalSteps = days.sumOf { it.steps.toLong() }
++        val safeGoal = goal.coerceAtLeast(0)
++        val goalDays = if (safeGoal > 0) days.count { it.steps >= safeGoal } else 0
++
++        // Highest first, earliest day first when two days tie.
++        val leaderboard = recorded
++            .sortedWith(compareByDescending<DailySteps> { it.steps }.thenBy { it.date })
++            .take(LEADERBOARD_SIZE)
++
++        val byMonth = days.groupBy { YearMonth.from(it.date) }
++        val months = if (period == ActivitySummaryPeriod.YEAR) {
++            (1..12).map { monthNumber ->
++                val month = YearMonth.of(anchor.year, monthNumber)
++                monthSteps(month, byMonth[month].orEmpty(), safeGoal)
++            }
++        } else {
++            emptyList()
++        }
++
++        return ActivitySummary(
++            period = period,
++            anchor = anchor,
++            start = start,
++            endExclusive = endExclusive,
++            days = days,
++            recordedDays = recorded.size,
++            totalSteps = totalSteps,
++            averageSteps = if (recorded.isEmpty()) 0 else (totalSteps / recorded.size).toInt(),
++            averagePerElapsedDay = if (days.isEmpty()) 0 else (totalSteps / days.size).toInt(),
++            goal = safeGoal,
++            goalDays = goalDays,
++            bestDay = recorded.maxWithOrNull(
++                compareBy<DailySteps> { it.steps }.thenByDescending { it.date },
++            ),
++            leaderboard = leaderboard,
++            months = months,
++        )
++    }
++
++    private fun monthSteps(
++        month: YearMonth,
++        days: List<DailySteps>,
++        goal: Int,
++    ): MonthSteps {
++        val recorded = days.filter { it.hasSteps }
++        val total = days.sumOf { it.steps.toLong() }
++        return MonthSteps(
++            month = month,
++            days = days,
++            recordedDays = recorded.size,
++            totalSteps = total,
++            averageSteps = if (recorded.isEmpty()) 0 else (total / recorded.size).toInt(),
++            goalDays = if (goal > 0) days.count { it.steps >= goal } else 0,
++        )
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt
+new file mode 100644
+index 0000000..4d959ed
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt
+@@ -0,0 +1,117 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.activity
++
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import nodomain.freeyourgadget.gadgetbridge.GBApplication
++import nodomain.freeyourgadget.gadgetbridge.model.ActivityUser
++import nodomain.freeyourgadget.gadgetbridge.model.DailyTotals
++import org.slf4j.LoggerFactory
++import java.time.LocalDate
++import java.time.ZoneId
++import java.util.Calendar
++import java.util.TimeZone
++
++/**
++ * Reads the per-day step totals of the paired devices and hands them to
++ * [ActivitySummaryCalculator].
++ *
++ * Gadgetbridge already has the per-day aggregation in [DailyTotals], including the provider
++ * specific handling of counters that reset at midnight, so the repository asks it once per day
++ * instead of re-implementing the sample arithmetic. When several devices recorded the same day,
++ * the largest total is used: two watches on the same wrist must not double the step count.
++ */
++class ActivitySummaryRepository {
++
++    suspend fun load(
++        period: ActivitySummaryPeriod,
++        anchor: LocalDate,
++    ): ActivitySummary = withContext(Dispatchers.IO) {
++        val zone = ZoneId.systemDefault()
++        val today = LocalDate.now(zone)
++        val (start, endExclusive) = ActivitySummaryCalculator.bounds(period, anchor)
++        val lastIncluded = minOf(endExclusive, today.plusDays(1))
++        val stepsByDate = readDailySteps(start, lastIncluded, zone)
++        val goal = runCatching { ActivityUser().stepsGoal }.getOrDefault(0)
++
++        ActivitySummaryCalculator.calculate(
++            period = period,
++            anchor = anchor,
++            today = today,
++            goal = goal,
++            stepsByDate = stepsByDate,
++        )
++    }
++
++    private fun readDailySteps(
++        start: LocalDate,
++        endExclusive: LocalDate,
++        zone: ZoneId,
++    ): Map<LocalDate, Int> {
++        if (!start.isBefore(endExclusive)) {
++            return emptyMap()
++        }
++
++        val devices = GBApplication.app().deviceManager.devices
++        if (devices.isEmpty()) {
++            return emptyMap()
++        }
++
++        val db = GBApplication.acquireDB()
++        try {
++            val calendar = Calendar.getInstance(TimeZone.getTimeZone(zone.id))
++            // A device that cannot report activity is dropped after its first failure instead of
++            // throwing for every one of the 365 days of a yearly summary.
++            val readableDevices = devices.toMutableList()
++            val result = LinkedHashMap<LocalDate, Int>()
++            var date = start
++            while (date.isBefore(endExclusive)) {
++                val dayMillis = date.atStartOfDay(zone).toInstant().toEpochMilli()
++                var daySteps = 0
++                val iterator = readableDevices.iterator()
++                while (iterator.hasNext()) {
++                    calendar.timeInMillis = dayMillis
++                    val device = iterator.next()
++                    val deviceSteps = try {
++                        DailyTotals.getDailyTotalsForDevice(device, calendar, db).steps.toInt()
++                    } catch (e: Exception) {
++                        LOG.warn(
++                            "Device {} cannot provide daily activity totals; skipping it",
++                            device.name,
++                            e,
++                        )
++                        iterator.remove()
++                        0
++                    }
++                    if (deviceSteps > daySteps) {
++                        daySteps = deviceSteps
++                    }
++                }
++                result[date] = daySteps
++                date = date.plusDays(1)
++            }
++            return result
++        } finally {
++            db.release()
++        }
++    }
++
++    companion object {
++        private val LOG = LoggerFactory.getLogger(ActivitySummaryRepository::class.java)
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt
+new file mode 100644
+index 0000000..b91549b
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt
+@@ -0,0 +1,218 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.sleep
++
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummaryCalculator
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummaryPeriod
++import java.time.LocalDate
++import java.time.YearMonth
++import kotlin.math.roundToInt
++
++/**
++ * The quality band of a sleep score. The bands are only labels; the score itself is always kept.
++ */
++enum class SleepQuality {
++    EXCELLENT,
++    GOOD,
++    FAIR,
++    POOR,
++    UNKNOWN,
++}
++
++/**
++ * One night of sleep, attributed to the day it ended on.
++ */
++data class NightSleep(
++    val date: LocalDate,
++    val asleepMinutes: Int,
++    val timeInBedMinutes: Int,
++    val awakeMinutes: Int,
++    val deepMinutes: Int,
++    val remMinutes: Int,
++    val score: Int?,
++) {
++    val efficiencyPercent: Int
++        get() = percentage(asleepMinutes.toLong(), timeInBedMinutes.toLong())
++
++    val deepSharePercent: Int
++        get() = percentage(deepMinutes.toLong(), asleepMinutes.toLong())
++
++    val remSharePercent: Int
++        get() = percentage(remMinutes.toLong(), asleepMinutes.toLong())
++
++    val quality: SleepQuality
++        get() {
++            val value = score ?: return SleepQuality.UNKNOWN
++            return when {
++                value <= 0 -> SleepQuality.UNKNOWN
++                value >= 85 -> SleepQuality.EXCELLENT
++                value >= 70 -> SleepQuality.GOOD
++                value >= 50 -> SleepQuality.FAIR
++                else -> SleepQuality.POOR
++            }
++        }
++}
++
++/**
++ * The sleep totals of one month, used by the yearly view.
++ */
++data class MonthSleep(
++    val month: YearMonth,
++    val nights: List<NightSleep>,
++    val averageAsleepMinutes: Int,
++    val averageScore: Int?,
++    val goalNights: Int,
++)
++
++/**
++ * A fully calculated monthly or yearly sleep summary.
++ *
++ * Averages are aggregate ratios: the average efficiency is total asleep time divided by total
++ * time in bed, and the deep/REM shares divide the summed stage durations by the summed sleep
++ * duration. This is more stable than averaging per-night percentages when one night is very short.
++ */
++data class SleepSummary(
++    val period: ActivitySummaryPeriod,
++    val anchor: LocalDate,
++    val start: LocalDate,
++    val endExclusive: LocalDate,
++    val elapsedDays: Int,
++    val nights: List<NightSleep>,
++    val totalAsleepMinutes: Long,
++    val averageAsleepMinutes: Int,
++    val averageScore: Int?,
++    val averageEfficiencyPercent: Int,
++    val averageDeepSharePercent: Int,
++    val averageRemSharePercent: Int,
++    val goalMinutes: Int,
++    val goalNights: Int,
++    val bestNight: NightSleep?,
++    val leaderboard: List<NightSleep>,
++    val months: List<MonthSleep>,
++) {
++    val isEmpty: Boolean
++        get() = nights.isEmpty()
++}
++
++/**
++ * Turns per-night sleep records into the monthly and yearly summaries the screen shows.
++ *
++ * Like [ActivitySummaryCalculator], this object has no Android or database dependency, so the
++ * averages, the goal count and the ranking can be tested without a device.
++ */
++object SleepSummaryCalculator {
++    /** How many nights the quality leaderboard shows. */
++    const val LEADERBOARD_SIZE = 10
++
++    fun calculate(
++        period: ActivitySummaryPeriod,
++        anchor: LocalDate,
++        today: LocalDate,
++        goalMinutes: Int,
++        nights: List<NightSleep>,
++    ): SleepSummary {
++        val (start, endExclusive) = ActivitySummaryCalculator.bounds(period, anchor)
++        val lastIncluded = minOf(endExclusive, today.plusDays(1))
++        val inPeriod = nights
++            .filter { !it.date.isBefore(start) && it.date.isBefore(lastIncluded) }
++            .sortedBy { it.date }
++
++        val totalAsleep = inPeriod.sumOf { it.asleepMinutes.toLong() }
++        val totalInBed = inPeriod.sumOf { it.timeInBedMinutes.toLong() }
++        val totalDeep = inPeriod.sumOf { it.deepMinutes.toLong() }
++        val totalRem = inPeriod.sumOf { it.remMinutes.toLong() }
++        val safeGoal = goalMinutes.coerceAtLeast(0)
++        val goalNights = if (safeGoal > 0) {
++            inPeriod.count { it.asleepMinutes >= safeGoal }
++        } else {
++            0
++        }
++
++        // Score first; unscored nights follow by duration instead of being dropped.
++        val leaderboard = inPeriod
++            .sortedWith(
++                compareByDescending<NightSleep> { it.score ?: -1 }
++                    .thenByDescending { it.asleepMinutes }
++                    .thenBy { it.date },
++            )
++            .take(LEADERBOARD_SIZE)
++
++        val elapsedDays = java.time.temporal.ChronoUnit.DAYS
++            .between(start, minOf(endExclusive, today.plusDays(1)))
++            .toInt()
++            .coerceAtLeast(0)
++        val byMonth = inPeriod.groupBy { YearMonth.from(it.date) }
++        val months = if (period == ActivitySummaryPeriod.YEAR) {
++            (1..12).map { monthNumber ->
++                val month = YearMonth.of(anchor.year, monthNumber)
++                monthSleep(month, byMonth[month].orEmpty(), safeGoal)
++            }
++        } else {
++            emptyList()
++        }
++
++        return SleepSummary(
++            period = period,
++            anchor = anchor,
++            start = start,
++            endExclusive = endExclusive,
++            elapsedDays = elapsedDays,
++            nights = inPeriod,
++            totalAsleepMinutes = totalAsleep,
++            averageAsleepMinutes = if (inPeriod.isEmpty()) {
++                0
++            } else {
++                (totalAsleep / inPeriod.size).toInt()
++            },
++            averageScore = averageScore(inPeriod),
++            averageEfficiencyPercent = percentage(totalAsleep, totalInBed),
++            averageDeepSharePercent = percentage(totalDeep, totalAsleep),
++            averageRemSharePercent = percentage(totalRem, totalAsleep),
++            goalMinutes = safeGoal,
++            goalNights = goalNights,
++            bestNight = leaderboard.firstOrNull(),
++            leaderboard = leaderboard,
++            months = months,
++        )
++    }
++
++    private fun monthSleep(
++        month: YearMonth,
++        nights: List<NightSleep>,
++        goal: Int,
++    ): MonthSleep {
++        val total = nights.sumOf { it.asleepMinutes.toLong() }
++        return MonthSleep(
++            month = month,
++            nights = nights,
++            averageAsleepMinutes = if (nights.isEmpty()) 0 else (total / nights.size).toInt(),
++            averageScore = averageScore(nights),
++            goalNights = if (goal > 0) nights.count { it.asleepMinutes >= goal } else 0,
++        )
++    }
++
++    private fun averageScore(nights: List<NightSleep>): Int? {
++        val scored = nights.filter { (it.score ?: 0) > 0 }
++        if (scored.isEmpty()) {
++            return null
++        }
++        return (scored.sumOf { it.score ?: 0 }.toDouble() / scored.size).roundToInt()
++    }
++
++    private fun percentage(part: Long, total: Long): Int =
++        if (total <= 0) 0 else ((part * 100) / total).toInt().coerceIn(0, 100)
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt
+new file mode 100644
+index 0000000..13e9a40
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt
+@@ -0,0 +1,173 @@
++/*  Copyright (C) 2026 Gadgetbridge contributors
++
++    This file is part of Gadgetbridge.
++
++    Gadgetbridge is free software: you can redistribute it and/or modify
++    it under the terms of the GNU Affero General Public License as published
++    by the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    Gadgetbridge is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU Affero General Public License for more details.
++
++    You should have received a copy of the GNU Affero General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>. */
++package nodomain.freeyourgadget.gadgetbridge.util.sleep
++
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import nodomain.freeyourgadget.gadgetbridge.GBApplication
++import nodomain.freeyourgadget.gadgetbridge.model.ActivityUser
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummaryCalculator
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummaryPeriod
++import org.slf4j.LoggerFactory
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++
++/**
++ * Reads the recorded sleep sessions and their scores, and hands per-night records to
++ * [SleepSummaryCalculator].
++ *
++ * A session belongs to the day it ends on. When several devices recorded the same night, the
++ * device with the longest sleep is used, so wearing two watches does not double the night. The
++ * score prefers the device's own score; when it has none and the user enabled the age-based
++ * estimate, the estimate is used instead.
++ */
++class SleepSummaryRepository {
++
++    suspend fun load(
++        period: ActivitySummaryPeriod,
++        anchor: LocalDate,
++    ): SleepSummary = withContext(Dispatchers.IO) {
++        val zone = ZoneId.systemDefault()
++        val today = LocalDate.now(zone)
++        val (start, endExclusive) = ActivitySummaryCalculator.bounds(period, anchor)
++        val lastIncluded = minOf(endExclusive, today.plusDays(1))
++        val nights = readNights(start, lastIncluded, zone)
++        val goal = runCatching { ActivityUser().sleepDurationGoal }.getOrDefault(0)
++
++        SleepSummaryCalculator.calculate(
++            period = period,
++            anchor = anchor,
++            today = today,
++            goalMinutes = goal,
++            nights = nights,
++        )
++    }
++
++    private fun readNights(
++        start: LocalDate,
++        endExclusive: LocalDate,
++        zone: ZoneId,
++    ): List<NightSleep> {
++        if (!start.isBefore(endExclusive)) {
++            return emptyList()
++        }
++
++        val devices = GBApplication.app().deviceManager.devices
++            .filter { it.deviceCoordinator.supportsSleepMeasurement(it) }
++        if (devices.isEmpty()) {
++            return emptyList()
++        }
++
++        val db = GBApplication.acquireDB()
++        try {
++            val age = AgeSleepScore.getAge()
++            val estimateEnabled = AgeSleepScore.isEnabled()
++            val fromSeconds = start.minusDays(1).atStartOfDay(zone).toEpochSecond().toInt() - 1
++            val toSeconds = endExclusive.atStartOfDay(zone).toEpochSecond().toInt() - 1
++            val scoreFromMillis = start.minusDays(2).atStartOfDay(zone).toInstant().toEpochMilli()
++            val scoreToMillis = endExclusive.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
++            val nights = HashMap<LocalDate, NightSleep>()
++
++            for (device in devices) {
++                val sessions = try {
++                    device.deviceCoordinator.getSleepSessionProvider(device, db.daoSession)
++                        .getSleepSessionsEndingIn(fromSeconds, toSeconds)
++                } catch (e: Exception) {
++                    LOG.warn("Could not read the sleep sessions of {}", device.name, e)
++                    continue
++                }
++                if (sessions.isEmpty()) {
++                    continue
++                }
++
++                val scoreSamples = try {
++                    device.deviceCoordinator.getSleepScoreProvider(device, db.daoSession)
++                        ?.getAllSamples(scoreFromMillis, scoreToMillis)
++                        .orEmpty()
++                        .filter { it.sleepScore > 0 }
++                } catch (e: Exception) {
++                    LOG.warn("Could not read the sleep scores of {}", device.name, e)
++                    emptyList()
++                }
++
++                val sessionsByDate = sessions.groupBy {
++                    Instant.ofEpochMilli(it.endTime).atZone(zone).toLocalDate()
++                }
++                for ((date, daySessions) in sessionsByDate) {
++                    if (date.isBefore(start) || !date.isBefore(endExclusive)) {
++                        continue
++                    }
++
++                    val asleepSeconds = daySessions.sumOf { it.totalSleepDuration.coerceAtLeast(0) }
++                    if (asleepSeconds <= 0) {
++                        continue
++                    }
++                    val inBedSeconds = daySessions.sumOf {
++                        (it.endTime - it.startTime).coerceAtLeast(0) / 1000
++                    }
++                    val deepSeconds = daySessions.sumOf { it.deepSleepDuration.coerceAtLeast(0) }
++                    val remSeconds = daySessions.sumOf { it.remSleepDuration.coerceAtLeast(0) }
++                    val awakeSeconds = daySessions.sumOf { it.awakeSleepDuration.coerceAtLeast(0) }
++
++                    val startMillis = daySessions.minOf { it.startTime }
++                    val endMillis = daySessions.maxOf { it.endTime }
++                    val nativeScore = scoreSamples
++                        .filter {
++                            it.timestamp >= startMillis - SCORE_MARGIN_MILLIS &&
++                                it.timestamp <= endMillis + SCORE_MARGIN_MILLIS
++                        }
++                        .maxByOrNull { it.timestamp }
++                        ?.sleepScore
++                        ?.takeIf { it > 0 }
++                    val estimatedScore = if (nativeScore == null && estimateEnabled) {
++                        runCatching {
++                            AgeSleepScoreCalculator.calculate(age, daySessions).score
++                        }.getOrDefault(0).takeIf { it > 0 }
++                    } else {
++                        null
++                    }
++
++                    val night = NightSleep(
++                        date = date,
++                        asleepMinutes = (asleepSeconds / 60).toInt(),
++                        timeInBedMinutes = (inBedSeconds / 60).toInt(),
++                        awakeMinutes = (awakeSeconds / 60).toInt(),
++                        deepMinutes = (deepSeconds / 60).toInt(),
++                        remMinutes = (remSeconds / 60).toInt(),
++                        score = nativeScore ?: estimatedScore,
++                    )
++                    val existing = nights[date]
++                    if (existing == null || night.asleepMinutes > existing.asleepMinutes) {
++                        nights[date] = night
++                    }
++                }
++            }
++
++            return nights.values.sortedBy { it.date }
++        } finally {
++            db.release()
++        }
++    }
++
++    companion object {
++        private val LOG = LoggerFactory.getLogger(SleepSummaryRepository::class.java)
++
++        /** A score may be stored slightly before bedtime or after wake-up. */
++        private const val SCORE_MARGIN_MILLIS = 60L * 60L * 1000L
++    }
++}
+diff --git a/app/src/main/res/drawable/ic_activity_summary.xml b/app/src/main/res/drawable/ic_activity_summary.xml
+new file mode 100644
+index 0000000..b88e3f5
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_activity_summary.xml
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:tint="?attr/colorControlNormal"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="@android:color/white"
++        android:pathData="M4,20h3V10H4v10zM10.5,20h3V4h-3v16zM17,20h3v-7h-3v7z" />
++</vector>
+diff --git a/app/src/main/res/values-zh-rCN/strings_activity_summary.xml b/app/src/main/res/values-zh-rCN/strings_activity_summary.xml
+new file mode 100644
+index 0000000..ec677b7
+--- /dev/null
++++ b/app/src/main/res/values-zh-rCN/strings_activity_summary.xml
+@@ -0,0 +1,67 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="activity_summary_title">健康总结</string>
++    <string name="activity_summary_month">月</string>
++    <string name="activity_summary_year">年</string>
++    <string name="activity_summary_total_steps">总步数</string>
++    <string name="activity_summary_average_steps">日均步数</string>
++    <string name="activity_summary_average_hint">按 %1$d 个有记录的天数计算</string>
++    <string name="activity_summary_recorded_days">有记录天数</string>
++    <string name="activity_summary_recorded_days_hint">%1$d / %2$d 天</string>
++    <string name="activity_summary_calendar_average">按日历天数平均：%2$d 天日均 %1$s 步</string>
++    <string name="activity_summary_goal_days">达标天数</string>
++    <string name="activity_summary_goal_days_hint">%1$d / %2$d 天达到 %3$s 步</string>
++    <string name="activity_summary_goal_days_no_goal">未设置步数目标</string>
++    <string name="activity_summary_best_day">最佳：%1$s · %2$s 步</string>
++    <string name="activity_summary_no_best_day">暂无步数</string>
++    <string name="activity_summary_chart_daily">每日步数</string>
++    <string name="activity_summary_chart_monthly">每月步数</string>
++    <string name="activity_summary_monthly_totals">月度汇总</string>
++    <string name="activity_summary_month_row_days">有记录：%1$d 天</string>
++    <string name="activity_summary_month_row_average">日均 %1$s</string>
++    <string name="activity_summary_leaderboard">步数日排行榜</string>
++    <string name="activity_summary_leaderboard_empty">本周期还没有步数记录。</string>
++    <string name="activity_summary_steps_value">%1$s 步</string>
++    <string name="activity_summary_steps_unit">步</string>
++    <string name="activity_summary_goal_reached">已达标</string>
++    <string name="activity_summary_note">日均只统计有步数记录的天数；没有记录的天数不按 0 计算。</string>
++    <string name="activity_summary_empty">本周期没有步数记录。请先同步设备，然后重试。</string>
++    <string name="activity_summary_error">无法读取活动数据：%1$s</string>
++    <string name="activity_summary_retry">重试</string>
++    <string name="activity_summary_refresh">刷新</string>
++    <string name="activity_summary_previous_period">上一周期</string>
++    <string name="activity_summary_next_period">下一周期</string>
++    <string name="activity_summary_pref_summary">月度与年度步数与睡眠总结</string>
++    <string name="sleep_summary_section">睡眠</string>
++    <string name="sleep_summary_average_duration">平均睡眠</string>
++    <string name="sleep_summary_average_duration_hint">按 %1$d 晚计算</string>
++    <string name="sleep_summary_average_score">平均评分</string>
++    <string name="sleep_summary_no_value">—</string>
++    <string name="sleep_summary_average_efficiency">平均睡眠效率</string>
++    <string name="sleep_summary_percent">%1$d%%</string>
++    <string name="sleep_summary_deep_rem">深睡 %1$d%% · REM %2$d%%</string>
++    <string name="sleep_summary_recorded_nights">有记录夜数</string>
++    <string name="sleep_summary_recorded_nights_hint">%1$d / %2$d 晚</string>
++    <string name="sleep_summary_recorded_nights_goal_hint">%1$d / %2$d 晚 · %3$d 晚达标</string>
++    <string name="sleep_summary_duration_hours_minutes">%1$d 小时 %2$d 分</string>
++    <string name="sleep_summary_duration_minutes">%1$d 分钟</string>
++    <string name="sleep_summary_chart_daily">每晚睡眠</string>
++    <string name="sleep_summary_chart_monthly">每月平均睡眠</string>
++    <string name="sleep_summary_monthly_totals">月度睡眠</string>
++    <string name="sleep_summary_month_row_nights">%1$d 晚</string>
++    <string name="sleep_summary_month_row_score">平均评分 %1$d</string>
++    <string name="sleep_summary_leaderboard">睡眠质量排行</string>
++    <string name="sleep_summary_leaderboard_empty">本周期还没有睡眠记录。</string>
++    <string name="sleep_summary_score">分</string>
++    <string name="sleep_summary_night_duration">%1$s 睡眠</string>
++    <string name="sleep_summary_best_night">最佳：%1$s · %2$d</string>
++    <string name="sleep_summary_longest_night">最长：%1$s · %2$s</string>
++    <string name="sleep_summary_note">睡眠按醒来日归属。评分来自设备，或在启用「基于年龄的睡眠评分」时使用估算值。</string>
++    <string name="sleep_summary_empty">本周期没有睡眠记录。请先同步设备，然后重试。</string>
++    <string name="sleep_summary_error">无法读取睡眠数据：%1$s</string>
++    <string name="sleep_summary_quality_excellent">优秀</string>
++    <string name="sleep_summary_quality_good">良好</string>
++    <string name="sleep_summary_quality_fair">一般</string>
++    <string name="sleep_summary_quality_poor">较差</string>
++    <string name="sleep_summary_quality_unknown">未评分</string>
++</resources>
+diff --git a/app/src/main/res/values-zh-rTW/strings_activity_summary.xml b/app/src/main/res/values-zh-rTW/strings_activity_summary.xml
+new file mode 100644
+index 0000000..07a6c04
+--- /dev/null
++++ b/app/src/main/res/values-zh-rTW/strings_activity_summary.xml
+@@ -0,0 +1,67 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="activity_summary_title">健康總結</string>
++    <string name="activity_summary_month">月</string>
++    <string name="activity_summary_year">年</string>
++    <string name="activity_summary_total_steps">總步數</string>
++    <string name="activity_summary_average_steps">日均步數</string>
++    <string name="activity_summary_average_hint">按 %1$d 個有記錄的天數計算</string>
++    <string name="activity_summary_recorded_days">有記錄天數</string>
++    <string name="activity_summary_recorded_days_hint">%1$d / %2$d 天</string>
++    <string name="activity_summary_calendar_average">按日曆天數平均：%2$d 天日均 %1$s 步</string>
++    <string name="activity_summary_goal_days">達標天數</string>
++    <string name="activity_summary_goal_days_hint">%1$d / %2$d 天達到 %3$s 步</string>
++    <string name="activity_summary_goal_days_no_goal">未設定步數目標</string>
++    <string name="activity_summary_best_day">最佳：%1$s · %2$s 步</string>
++    <string name="activity_summary_no_best_day">尚無步數</string>
++    <string name="activity_summary_chart_daily">每日步數</string>
++    <string name="activity_summary_chart_monthly">每月步數</string>
++    <string name="activity_summary_monthly_totals">月度彙總</string>
++    <string name="activity_summary_month_row_days">有記錄：%1$d 天</string>
++    <string name="activity_summary_month_row_average">日均 %1$s</string>
++    <string name="activity_summary_leaderboard">步數日排行榜</string>
++    <string name="activity_summary_leaderboard_empty">本週期還沒有步數記錄。</string>
++    <string name="activity_summary_steps_value">%1$s 步</string>
++    <string name="activity_summary_steps_unit">步</string>
++    <string name="activity_summary_goal_reached">已達標</string>
++    <string name="activity_summary_note">平均只統計有步數記錄的天數；沒有記錄的天數不按 0 計算。</string>
++    <string name="activity_summary_empty">本週期沒有步數記錄。請先同步裝置，然後重試。</string>
++    <string name="activity_summary_error">無法讀取活動資料：%1$s</string>
++    <string name="activity_summary_retry">重試</string>
++    <string name="activity_summary_refresh">重新整理</string>
++    <string name="activity_summary_previous_period">上一週期</string>
++    <string name="activity_summary_next_period">下一週期</string>
++    <string name="activity_summary_pref_summary">月度與年度步數與睡眠總結</string>
++    <string name="sleep_summary_section">睡眠</string>
++    <string name="sleep_summary_average_duration">平均睡眠</string>
++    <string name="sleep_summary_average_duration_hint">按 %1$d 晚計算</string>
++    <string name="sleep_summary_average_score">平均評分</string>
++    <string name="sleep_summary_no_value">—</string>
++    <string name="sleep_summary_average_efficiency">平均睡眠效率</string>
++    <string name="sleep_summary_percent">%1$d%%</string>
++    <string name="sleep_summary_deep_rem">深睡 %1$d%% · REM %2$d%%</string>
++    <string name="sleep_summary_recorded_nights">有記錄夜數</string>
++    <string name="sleep_summary_recorded_nights_hint">%1$d / %2$d 晚</string>
++    <string name="sleep_summary_recorded_nights_goal_hint">%1$d / %2$d 晚 · %3$d 晚達標</string>
++    <string name="sleep_summary_duration_hours_minutes">%1$d 小時 %2$d 分</string>
++    <string name="sleep_summary_duration_minutes">%1$d 分鐘</string>
++    <string name="sleep_summary_chart_daily">每晚睡眠</string>
++    <string name="sleep_summary_chart_monthly">每月平均睡眠</string>
++    <string name="sleep_summary_monthly_totals">月度睡眠</string>
++    <string name="sleep_summary_month_row_nights">%1$d 晚</string>
++    <string name="sleep_summary_month_row_score">平均評分 %1$d</string>
++    <string name="sleep_summary_leaderboard">睡眠品質排行</string>
++    <string name="sleep_summary_leaderboard_empty">本週期還沒有睡眠記錄。</string>
++    <string name="sleep_summary_score">分</string>
++    <string name="sleep_summary_night_duration">%1$s 睡眠</string>
++    <string name="sleep_summary_best_night">最佳：%1$s · %2$d</string>
++    <string name="sleep_summary_longest_night">最長：%1$s · %2$s</string>
++    <string name="sleep_summary_note">睡眠按醒來日歸屬。評分來自裝置，或在啟用「基於年齡的睡眠評分」時使用估算值。</string>
++    <string name="sleep_summary_empty">本週期沒有睡眠記錄。請先同步裝置，然後重試。</string>
++    <string name="sleep_summary_error">無法讀取睡眠資料：%1$s</string>
++    <string name="sleep_summary_quality_excellent">優秀</string>
++    <string name="sleep_summary_quality_good">良好</string>
++    <string name="sleep_summary_quality_fair">一般</string>
++    <string name="sleep_summary_quality_poor">較差</string>
++    <string name="sleep_summary_quality_unknown">未評分</string>
++</resources>
+diff --git a/app/src/main/res/values/strings_activity_summary.xml b/app/src/main/res/values/strings_activity_summary.xml
+new file mode 100644
+index 0000000..cdc37e5
+--- /dev/null
++++ b/app/src/main/res/values/strings_activity_summary.xml
+@@ -0,0 +1,67 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="activity_summary_title">Health summary</string>
++    <string name="activity_summary_month">Month</string>
++    <string name="activity_summary_year">Year</string>
++    <string name="activity_summary_total_steps">Total steps</string>
++    <string name="activity_summary_average_steps">Daily average</string>
++    <string name="activity_summary_average_hint">Over %1$d recorded days</string>
++    <string name="activity_summary_recorded_days">Recorded days</string>
++    <string name="activity_summary_recorded_days_hint">%1$d of %2$d days</string>
++    <string name="activity_summary_calendar_average">Calendar average: %1$s steps/day over %2$d days</string>
++    <string name="activity_summary_goal_days">Goal days</string>
++    <string name="activity_summary_goal_days_hint">%1$d / %2$d days at %3$s steps</string>
++    <string name="activity_summary_goal_days_no_goal">No step goal set</string>
++    <string name="activity_summary_best_day">Best: %1$s · %2$s steps</string>
++    <string name="activity_summary_no_best_day">No steps yet</string>
++    <string name="activity_summary_chart_daily">Steps per day</string>
++    <string name="activity_summary_chart_monthly">Steps per month</string>
++    <string name="activity_summary_monthly_totals">Monthly totals</string>
++    <string name="activity_summary_month_row_days">Days with data: %1$d</string>
++    <string name="activity_summary_month_row_average">avg %1$s</string>
++    <string name="activity_summary_leaderboard">Daily step leaderboard</string>
++    <string name="activity_summary_leaderboard_empty">No step records in this period yet.</string>
++    <string name="activity_summary_steps_value">%1$s steps</string>
++    <string name="activity_summary_steps_unit">steps</string>
++    <string name="activity_summary_goal_reached">Goal reached</string>
++    <string name="activity_summary_note">Averages use only the days that recorded steps; days without data are not counted as zero.</string>
++    <string name="activity_summary_empty">No steps were recorded in this period. Sync your device, then retry.</string>
++    <string name="activity_summary_error">Could not read the activity data: %1$s</string>
++    <string name="activity_summary_retry">Retry</string>
++    <string name="activity_summary_refresh">Refresh</string>
++    <string name="activity_summary_previous_period">Previous period</string>
++    <string name="activity_summary_next_period">Next period</string>
++    <string name="activity_summary_pref_summary">Monthly and yearly step and sleep summaries</string>
++    <string name="sleep_summary_section">Sleep</string>
++    <string name="sleep_summary_average_duration">Average sleep</string>
++    <string name="sleep_summary_average_duration_hint">Over %1$d nights</string>
++    <string name="sleep_summary_average_score">Average score</string>
++    <string name="sleep_summary_no_value">—</string>
++    <string name="sleep_summary_average_efficiency">Average efficiency</string>
++    <string name="sleep_summary_percent">%1$d%%</string>
++    <string name="sleep_summary_deep_rem">Deep %1$d%% · REM %2$d%%</string>
++    <string name="sleep_summary_recorded_nights">Recorded nights</string>
++    <string name="sleep_summary_recorded_nights_hint">%1$d of %2$d nights</string>
++    <string name="sleep_summary_recorded_nights_goal_hint">%1$d of %2$d nights · %3$d at goal</string>
++    <string name="sleep_summary_duration_hours_minutes">%1$d h %2$d min</string>
++    <string name="sleep_summary_duration_minutes">%1$d min</string>
++    <string name="sleep_summary_chart_daily">Sleep per night</string>
++    <string name="sleep_summary_chart_monthly">Average sleep per month</string>
++    <string name="sleep_summary_monthly_totals">Monthly sleep</string>
++    <string name="sleep_summary_month_row_nights">%1$d nights</string>
++    <string name="sleep_summary_month_row_score">Average score %1$d</string>
++    <string name="sleep_summary_leaderboard">Sleep quality leaderboard</string>
++    <string name="sleep_summary_leaderboard_empty">No sleep records in this period yet.</string>
++    <string name="sleep_summary_score">score</string>
++    <string name="sleep_summary_night_duration">%1$s asleep</string>
++    <string name="sleep_summary_best_night">Best: %1$s · %2$d</string>
++    <string name="sleep_summary_longest_night">Longest: %1$s · %2$s</string>
++    <string name="sleep_summary_note">Sleep is attributed to the day it ends on. Scores come from the device, or from the age-based estimate when that setting is enabled.</string>
++    <string name="sleep_summary_empty">No sleep was recorded in this period. Sync your device, then retry.</string>
++    <string name="sleep_summary_error">Could not read the sleep data: %1$s</string>
++    <string name="sleep_summary_quality_excellent">Excellent</string>
++    <string name="sleep_summary_quality_good">Good</string>
++    <string name="sleep_summary_quality_fair">Fair</string>
++    <string name="sleep_summary_quality_poor">Poor</string>
++    <string name="sleep_summary_quality_unknown">Unrated</string>
++</resources>
+diff --git a/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt
+new file mode 100644
+index 0000000..f9e48ab
+--- /dev/null
++++ b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt
+@@ -0,0 +1,127 @@
++package nodomain.freeyourgadget.gadgetbridge.util.activity
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.LocalDate
++
++class ActivitySummaryCalculatorTest {
++
++    @Test
++    fun monthlySummaryUsesRecordedDaysForTheAverage() {
++        val steps = mapOf(
++            LocalDate.of(2026, 11, 1) to 1_000,
++            LocalDate.of(2026, 11, 2) to 0,
++            LocalDate.of(2026, 11, 3) to 3_000,
++            LocalDate.of(2026, 11, 30) to 0,
++        )
++
++        val summary = ActivitySummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.MONTH,
++            anchor = LocalDate.of(2026, 11, 15),
++            today = LocalDate.of(2026, 11, 30),
++            goal = 2_000,
++            stepsByDate = steps,
++        )
++
++        assertEquals(30, summary.days.size)
++        assertEquals(2, summary.recordedDays)
++        assertEquals(4_000L, summary.totalSteps)
++        assertEquals(2_000, summary.averageSteps)
++        assertEquals(133, summary.averagePerElapsedDay)
++        assertEquals(1, summary.goalDays)
++        assertEquals(LocalDate.of(2026, 11, 3), summary.bestDay?.date)
++        assertEquals(
++            listOf(LocalDate.of(2026, 11, 3), LocalDate.of(2026, 11, 1)),
++            summary.leaderboard.map { it.date },
++        )
++    }
++
++    @Test
++    fun yearlySummaryGroupsEveryMonth() {
++        val steps = mapOf(
++            LocalDate.of(2026, 1, 1) to 500,
++            LocalDate.of(2026, 1, 2) to 1_500,
++            LocalDate.of(2026, 2, 1) to 1_000,
++            LocalDate.of(2026, 12, 31) to 2_000,
++        )
++
++        val summary = ActivitySummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.YEAR,
++            anchor = LocalDate.of(2026, 6, 15),
++            today = LocalDate.of(2026, 12, 31),
++            goal = 1_500,
++            stepsByDate = steps,
++        )
++
++        assertEquals(365, summary.days.size)
++        assertEquals(12, summary.months.size)
++        assertEquals(4, summary.recordedDays)
++        assertEquals(5_000L, summary.totalSteps)
++        assertEquals(1_250, summary.averageSteps)
++
++        val january = summary.months.first { it.month.monthValue == 1 }
++        assertEquals(2_000L, january.totalSteps)
++        assertEquals(2, january.recordedDays)
++        assertEquals(1_000, january.averageSteps)
++        assertEquals(1, january.goalDays)
++
++        val december = summary.months.first { it.month.monthValue == 12 }
++        assertEquals(2_000L, december.totalSteps)
++        assertEquals(1, december.recordedDays)
++    }
++
++    @Test
++    fun daysAfterTodayAreNotCounted() {
++        val summary = ActivitySummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.MONTH,
++            anchor = LocalDate.of(2026, 11, 1),
++            today = LocalDate.of(2026, 11, 10),
++            goal = 0,
++            stepsByDate = mapOf(LocalDate.of(2026, 11, 20) to 5_000),
++        )
++
++        assertEquals(10, summary.days.size)
++        assertEquals(0L, summary.totalSteps)
++        assertTrue(summary.isEmpty)
++        assertNull(summary.bestDay)
++        assertTrue(summary.leaderboard.isEmpty())
++    }
++
++    @Test
++    fun leaderboardBreaksTiesByEarliestDay() {
++        val summary = ActivitySummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.MONTH,
++            anchor = LocalDate.of(2026, 11, 1),
++            today = LocalDate.of(2026, 11, 30),
++            goal = 0,
++            stepsByDate = mapOf(
++                LocalDate.of(2026, 11, 2) to 1_000,
++                LocalDate.of(2026, 11, 1) to 1_000,
++            ),
++        )
++
++        assertEquals(LocalDate.of(2026, 11, 1), summary.bestDay?.date)
++        assertEquals(LocalDate.of(2026, 11, 1), summary.leaderboard.first().date)
++    }
++
++    @Test
++    fun leaderboardIsCappedAtTenDays() {
++        val steps = (1..12).associate { day ->
++            LocalDate.of(2026, 11, day) to day * 100
++        }
++
++        val summary = ActivitySummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.MONTH,
++            anchor = LocalDate.of(2026, 11, 1),
++            today = LocalDate.of(2026, 11, 30),
++            goal = 0,
++            stepsByDate = steps,
++        )
++
++        assertEquals(ActivitySummaryCalculator.LEADERBOARD_SIZE, summary.leaderboard.size)
++        assertEquals(1_200, summary.leaderboard.first().steps)
++        assertEquals(300, summary.leaderboard.last().steps)
++    }
++}
+diff --git a/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt
+new file mode 100644
+index 0000000..0bc850b
+--- /dev/null
++++ b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt
+@@ -0,0 +1,161 @@
++package nodomain.freeyourgadget.gadgetbridge.util.sleep
++
++import nodomain.freeyourgadget.gadgetbridge.util.activity.ActivitySummaryPeriod
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.LocalDate
++
++class SleepSummaryCalculatorTest {
++
++    private fun night(
++        date: LocalDate,
++        asleepMinutes: Int,
++        score: Int?,
++        inBedMinutes: Int = asleepMinutes + 30,
++        deepMinutes: Int = asleepMinutes / 5,
++        remMinutes: Int = asleepMinutes / 6,
++    ) = NightSleep(
++        date = date,
++        asleepMinutes = asleepMinutes,
++        timeInBedMinutes = inBedMinutes,
++        awakeMinutes = inBedMinutes - asleepMinutes,
++        deepMinutes = deepMinutes,
++        remMinutes = remMinutes,
++        score = score,
++    )
++
++    @Test
++    fun monthlySummaryAveragesDurationScoreAndStages() {
++        val summary = SleepSummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.MONTH,
++            anchor = LocalDate.of(2026, 11, 15),
++            today = LocalDate.of(2026, 11, 30),
++            goalMinutes = 400,
++            nights = listOf(
++                night(
++                    LocalDate.of(2026, 11, 1),
++                    420,
++                    80,
++                    inBedMinutes = 480,
++                    deepMinutes = 84,
++                    remMinutes = 70,
++                ),
++                night(
++                    LocalDate.of(2026, 11, 2),
++                    480,
++                    90,
++                    inBedMinutes = 510,
++                    deepMinutes = 96,
++                    remMinutes = 80,
++                ),
++                night(
++                    LocalDate.of(2026, 11, 3),
++                    360,
++                    null,
++                    inBedMinutes = 420,
++                    deepMinutes = 72,
++                    remMinutes = 60,
++                ),
++            ),
++        )
++
++        assertEquals(30, summary.elapsedDays)
++        assertEquals(3, summary.nights.size)
++        assertEquals(1_260L, summary.totalAsleepMinutes)
++        assertEquals(420, summary.averageAsleepMinutes)
++        assertEquals(85, summary.averageScore)
++        assertEquals(89, summary.averageEfficiencyPercent)
++        assertEquals(20, summary.averageDeepSharePercent)
++        assertEquals(16, summary.averageRemSharePercent)
++        assertEquals(2, summary.goalNights)
++        assertEquals(LocalDate.of(2026, 11, 2), summary.bestNight?.date)
++        assertEquals(
++            listOf(
++                LocalDate.of(2026, 11, 2),
++                LocalDate.of(2026, 11, 1),
++                LocalDate.of(2026, 11, 3),
++            ),
++            summary.leaderboard.map { it.date },
++        )
++    }
++
++    @Test
++    fun yearlySummaryGroupsEveryMonth() {
++        val summary = SleepSummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.YEAR,
++            anchor = LocalDate.of(2026, 6, 15),
++            today = LocalDate.of(2026, 12, 31),
++            goalMinutes = 400,
++            nights = listOf(
++                night(LocalDate.of(2026, 1, 1), 420, 80),
++                night(LocalDate.of(2026, 1, 2), 480, 90),
++                night(LocalDate.of(2026, 2, 1), 400, 70),
++                night(LocalDate.of(2026, 12, 31), 360, null),
++            ),
++        )
++
++        assertEquals(365, summary.elapsedDays)
++        assertEquals(12, summary.months.size)
++        assertEquals(4, summary.nights.size)
++        assertEquals(1_660L, summary.totalAsleepMinutes)
++
++        val january = summary.months.first { it.month.monthValue == 1 }
++        assertEquals(2, january.nights.size)
++        assertEquals(450, january.averageAsleepMinutes)
++        assertEquals(85, january.averageScore)
++        assertEquals(2, january.goalNights)
++
++        val december = summary.months.first { it.month.monthValue == 12 }
++        assertEquals(1, december.nights.size)
++        assertNull(december.averageScore)
++    }
++
++    @Test
++    fun nightsAfterTodayAreNotCounted() {
++        val summary = SleepSummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.MONTH,
++            anchor = LocalDate.of(2026, 11, 1),
++            today = LocalDate.of(2026, 11, 10),
++            goalMinutes = 0,
++            nights = listOf(night(LocalDate.of(2026, 11, 20), 420, 90)),
++        )
++
++        assertEquals(10, summary.elapsedDays)
++        assertTrue(summary.isEmpty)
++        assertNull(summary.averageScore)
++        assertNull(summary.bestNight)
++        assertTrue(summary.leaderboard.isEmpty())
++    }
++
++    @Test
++    fun leaderboardFallsBackToDurationWhenNoScoreExists() {
++        val summary = SleepSummaryCalculator.calculate(
++            period = ActivitySummaryPeriod.MONTH,
++            anchor = LocalDate.of(2026, 11, 1),
++            today = LocalDate.of(2026, 11, 30),
++            goalMinutes = 0,
++            nights = listOf(
++                night(LocalDate.of(2026, 11, 1), 400, null),
++                night(LocalDate.of(2026, 11, 2), 500, null),
++            ),
++        )
++
++        assertNull(summary.averageScore)
++        assertEquals(LocalDate.of(2026, 11, 2), summary.bestNight?.date)
++        assertEquals(
++            listOf(LocalDate.of(2026, 11, 2), LocalDate.of(2026, 11, 1)),
++            summary.leaderboard.map { it.date },
++        )
++    }
++
++    @Test
++    fun qualityBandsFollowTheScore() {
++        assertEquals(SleepQuality.EXCELLENT, night(LocalDate.of(2026, 11, 1), 420, 90).quality)
++        assertEquals(SleepQuality.GOOD, night(LocalDate.of(2026, 11, 1), 420, 75).quality)
++        assertEquals(SleepQuality.FAIR, night(LocalDate.of(2026, 11, 1), 420, 60).quality)
++        assertEquals(SleepQuality.POOR, night(LocalDate.of(2026, 11, 1), 420, 30).quality)
++        assertEquals(SleepQuality.UNKNOWN, night(LocalDate.of(2026, 11, 1), 420, null).quality)
++    }
++}

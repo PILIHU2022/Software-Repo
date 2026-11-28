@@ -1,0 +1,30 @@
+// Prefer regional mirrors before the repositories declared by each upstream
+// settings.gradle(.kts). GitHub-hosted runners share Maven Central's egress
+// addresses and periodically receive HTTP 429; that used to abort plugin
+// resolution before any task ran. The upstream repositories remain in the
+// list, so a mirror miss still falls back to the official source.
+
+def pluginMirrors = [
+    'https://maven.aliyun.com/repository/gradle-plugin',
+    'https://maven.aliyun.com/repository/public',
+]
+
+def dependencyMirrors = [
+    'https://maven.aliyun.com/repository/public',
+]
+
+beforeSettings { settings ->
+    pluginMirrors.eachWithIndex { mirror, index ->
+        settings.pluginManagement.repositories.maven {
+            name = "patchworkPluginMirror${index}"
+            url = mirror
+        }
+    }
+
+    dependencyMirrors.eachWithIndex { mirror, index ->
+        settings.dependencyResolutionManagement.repositories.maven {
+            name = "patchworkDependencyMirror${index}"
+            url = mirror
+        }
+    }
+}

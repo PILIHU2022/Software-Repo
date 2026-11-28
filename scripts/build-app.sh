@@ -726,7 +726,10 @@ echo "==> Building $GRADLE_TASK"
 chmod +x "$WORK/gradlew"
 (
     cd "$WORK"
-    ./gradlew "$GRADLE_TASK" --no-daemon --stacktrace
+    ./gradlew "$GRADLE_TASK" \
+        --no-daemon \
+        --stacktrace \
+        --init-script "$ROOT/scripts/gradle-repositories.init.gradle"
 )
 
 APK_DIR="$WORK/$APK_SUBDIR"

@@ -1,0 +1,400 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Fri, 27 Nov 2026 13:00:00 +0800
+Subject: [PATCH] Render the device-specific settings with Compose
+
+The 0003 migration left DeviceSpecificSettingsFragment on the View path
+because its preference tree is built at runtime and it uses inline seek bars.
+Finish that migration:
+
+- let the Compose settings model discover screens at any depth, including under
+  categories, and rebuild that index for each model read so pages added before
+  the next read are visible;
+- render SeekBarPreference as an inline Material 3 Expressive slider that
+  respects the preference's adjustable range, is labelled for accessibility and
+  writes back through the live preference when the drag ends;
+- stop opting the device-specific settings out of the Compose host.
+
+Dialogs, intents, drag-sort lists, subtitle lists with custom values and other
+custom widgets still go through Preference.performClick(), so their existing
+listeners, validation and dependencies stay in charge.
+---
+ .../DeviceSpecificSettingsFragment.java                    |  9 ---------
+ .../ui/compose/screens/settings/prefs/PrefsModel.kt        | 60 +++++++++++++++++++++++++++++++----------------------
+ .../ui/compose/screens/settings/prefs/PrefsScreen.kt       | 124 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 160 insertions(+), 33 deletions(-)
+
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java
+@@ -130,13 +130,4 @@
+ public class DeviceSpecificSettingsFragment extends AbstractPreferenceFragment implements DeviceSpecificSettingsHandler {
+-    /**
+-     * This screen keeps the View preference implementation: it builds its entries at runtime and uses custom
+-     * preference widgets that the Compose settings renderer does not reproduce.
+-     */
+-    @Override
+-    protected boolean useComposePreferences() {
+-        return false;
+-    }
+-
+ 
+     private static final Logger LOG = LoggerFactory.getLogger(DeviceSpecificSettingsFragment.class);
+ 
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt
+@@ -45,6 +45,9 @@
+     /** A [TwoStatePreference]: rendered with the Expressive switch and toggled through [Preference.performClick]. */
+     SWITCH,
+ 
++    /** A [SeekBarPreference]: rendered with an inline Expressive slider. */
++    SLIDER,
++
+     /** A [ListPreference]: rendered with its current entry, tapping it opens a Material 3 picker sheet. */
+     LIST,
+ 
+@@ -120,7 +123,7 @@
+     /** The topmost screen of the tree, even when the fragment was rooted at a nested screen. */
+     val root: PreferenceScreen = screen.absoluteRoot()
+ 
+-    /** The key that identifies [root] in [screens]. */
++    /** The key that identifies [root] in the rebuilt screen index. */
+     val rootKey: String = root.key ?: ROOT_KEY
+ 
+     private class ScreenInfo(
+@@ -131,8 +134,6 @@
+         val titles: List<String>,
+     )
+ 
+-    private val screens: Map<String, ScreenInfo> = buildScreens()
+-
+     /** The default shared preferences of the tree, if it stores its values in shared preferences at all. */
+     val sharedPreferences: SharedPreferences? by lazy {
+         try {
+@@ -144,30 +145,35 @@
+ 
+     private fun buildScreens(): Map<String, ScreenInfo> {
+         val out = LinkedHashMap<String, ScreenInfo>()
++        val rootTitle = root.title?.toString().orEmpty()
++        out[rootKey] = ScreenInfo(root, listOf(rootKey), listOf(rootTitle))
++
++        fun visit(group: PreferenceGroup, path: List<String>, titles: List<String>) {
++            for (i in 0 until group.preferenceCount) {
++                when (val child = group.getPreference(i)) {
++                    is PreferenceScreen -> {
++                        val key = child.key ?: ROOT_KEY
++                        if (!out.containsKey(key)) {
++                            val title = child.title?.toString().orEmpty()
++                            val newPath = path + key
++                            val newTitles = titles + title
++                            out[key] = ScreenInfo(child, newPath, newTitles)
++                            visit(child, newPath, newTitles)
++                        }
++                    }
+ 
+-        fun visit(screen: PreferenceScreen, path: List<String>, titles: List<String>) {
+-            val key = screen.key ?: ROOT_KEY
+-            if (out.containsKey(key)) {
+-                return
+-            }
+-            val title = screen.title?.toString().orEmpty()
+-            val newPath = path + key
+-            val newTitles = titles + title
+-            out[key] = ScreenInfo(screen, newPath, newTitles)
+-            for (i in 0 until screen.preferenceCount) {
+-                val child = screen.getPreference(i)
+-                if (child is PreferenceScreen) {
+-                    visit(child, newPath, newTitles)
++                    is PreferenceGroup -> visit(child, path, titles)
+                 }
+             }
+         }
+ 
+-        visit(root, emptyList(), emptyList())
++        visit(root, listOf(rootKey), listOf(rootTitle))
+         return out
+     }
+ 
+     /** The screens to open so that [screenKey] is shown, starting at the root. */
+     fun pathTo(screenKey: String?): List<String> {
++        val screens = buildScreens()
+         if (screenKey == null) {
+             return listOf(rootKey)
+         }
+@@ -176,6 +182,10 @@
+ 
+     /** The model of the screen with [screenKey], or of the root screen if it does not exist. */
+     fun screenModel(screenKey: String?): PrefScreenModel {
++        return screenModel(screenKey, buildScreens())
++    }
++
++    private fun screenModel(screenKey: String?, screens: Map<String, ScreenInfo>): PrefScreenModel {
+         val info = screens[screenKey] ?: screens.getValue(rootKey)
+         val screen = info.screen
+         return PrefScreenModel(
+@@ -197,9 +207,10 @@
+         }
+ 
+         val matches = ArrayList<Pair<Int, PrefSearchResult>>()
++        val screens = buildScreens()
+         for (info in screens.values) {
+             val breadcrumb = info.titles.drop(1).filter { it.isNotBlank() }.joinToString(" › ")
+-            for (row in screenModel(info.screen.key ?: ROOT_KEY).rows) {
++            for (row in screenModel(info.screen.key ?: ROOT_KEY, screens).rows) {
+                 if (row.key.isEmpty()) {
+                     continue
+                 }
+@@ -250,12 +261,14 @@
+                 flushLoose()
+                 val rows = ArrayList<PrefRow>()
+                 collectRows(preference, rows)
+-                sections.add(
+-                    PrefSection(
+-                        title = preference.title?.toString()?.takeIf { it.isNotBlank() },
+-                        rows = rows,
++                if (rows.isNotEmpty()) {
++                    sections.add(
++                        PrefSection(
++                            title = preference.title?.toString()?.takeIf { it.isNotBlank() },
++                            rows = rows,
++                        )
+                     )
+-                )
++                }
+             } else {
+                 // A nested screen is a row that opens it, the loose rows are grouped in an untitled card
+                 val rows = loose ?: ArrayList<PrefRow>().also { loose = it }
+@@ -293,6 +306,7 @@
+     private fun kindOf(preference: Preference): PrefRowKind = when {
+         preference is PreferenceScreen -> PrefRowKind.SCREEN
+         preference is TwoStatePreference -> PrefRowKind.SWITCH
++        preference is SeekBarPreference -> PrefRowKind.SLIDER
+         // Must be checked before ListPreference, its drag-to-sort dialog cannot be reproduced here
+         preference is DragSortListPreference -> PrefRowKind.ACTION
+         // The subtitle picker can offer a free-text entry, so keep its own dialog for that
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
+@@ -68,6 +68,7 @@
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.ModalBottomSheet
+ import androidx.compose.material3.RadioButton
++import androidx.compose.material3.Slider
+ import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TextButton
+@@ -91,13 +92,18 @@
+ import androidx.compose.ui.graphics.asImageBitmap
+ import androidx.compose.ui.graphics.painter.BitmapPainter
+ import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.semantics.contentDescription
++import androidx.compose.ui.semantics.semantics
++import androidx.compose.ui.semantics.stateDescription
+ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
+ import androidx.core.graphics.drawable.toBitmap
+ import androidx.preference.ListPreference
+ import androidx.preference.PreferenceScreen
++import androidx.preference.SeekBarPreference
+ import kotlinx.coroutines.delay
++import kotlin.math.roundToInt
+ import nodomain.freeyourgadget.gadgetbridge.R
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbCardSpacer
+ import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbExpressiveScaffold
+@@ -220,6 +226,16 @@
+         bump()
+     }
+ 
++    fun slide(row: PrefRow, value: Int) {
++        if (!row.enabled) return
++        val preference = row.preference as? SeekBarPreference ?: return
++        if (!preference.isEnabled) return
++        val newValue = value.coerceIn(preference.min, preference.max)
++        if (!preference.callChangeListener(newValue)) return
++        preference.value = newValue
++        bump()
++    }
++
+     BackHandler(enabled = searchOpen || navStack.size > 1) {
+         if (searchOpen) {
+             searchOpen = false
+@@ -267,6 +283,7 @@
+             if (searchOpen) {
+                 PrefsSearch(
+                     tree = tree,
++                    revision = revision,
+                     query = query,
+                     onQueryChange = { query = it },
+                     onClose = {
+@@ -293,6 +310,7 @@
+                     bringIntoView = bringIntoView,
+                     onActivate = { activate(it) },
+                     onToggle = { toggle(it) },
++                    onSlide = { row, value -> slide(row, value) },
+                 )
+             }
+         }
+@@ -316,6 +334,7 @@
+     bringIntoView: BringIntoViewRequester,
+     onActivate: (PrefRow) -> Unit,
+     onToggle: (PrefRow) -> Unit,
++    onSlide: (PrefRow, Int) -> Unit,
+ ) {
+     Column(
+         modifier = Modifier
+@@ -337,6 +356,7 @@
+                     bringIntoView = bringIntoView,
+                     onActivate = onActivate,
+                     onToggle = onToggle,
++                    onSlide = onSlide,
+                 )
+                 GbCardSpacer()
+             }
+@@ -354,6 +374,7 @@
+     bringIntoView: BringIntoViewRequester,
+     onActivate: (PrefRow) -> Unit,
+     onToggle: (PrefRow) -> Unit,
++    onSlide: (PrefRow, Int) -> Unit,
+ ) {
+     GbTonalCard(
+         modifier = Modifier.fillMaxWidth(),
+@@ -368,6 +389,7 @@
+                     bringIntoView = bringIntoView,
+                     onActivate = { onActivate(row) },
+                     onToggle = { onToggle(row) },
++                    onSlide = { value -> onSlide(row, value) },
+                 )
+                 if (index != rows.lastIndex) {
+                     HorizontalDivider(
+@@ -388,7 +410,18 @@
+     bringIntoView: BringIntoViewRequester,
+     onActivate: () -> Unit,
+     onToggle: () -> Unit,
++    onSlide: (Int) -> Unit,
+ ) {
++    if (row.kind == PrefRowKind.SLIDER) {
++        PrefSliderRow(
++            row = row,
++            highlighted = highlighted,
++            bringIntoView = bringIntoView,
++            onValueChange = onSlide,
++        )
++        return
++    }
++
+     val highlightColor by animateColorAsState(
+         targetValue = if (highlighted) {
+             MaterialTheme.colorScheme.primaryContainer
+@@ -457,6 +490,94 @@
+     )
+ }
+ 
++/**
++ * A [SeekBarPreference] as an inline Expressive slider.
++ *
++ * The slider keeps its own value while the thumb is dragged, then writes the final value through the preference, so
++ * its change listener and persistence still run once instead of on every frame.
++ */
++@Composable
++private fun PrefSliderRow(
++    row: PrefRow,
++    highlighted: Boolean,
++    bringIntoView: BringIntoViewRequester,
++    onValueChange: (Int) -> Unit,
++) {
++    val preference = row.preference as? SeekBarPreference ?: return
++    val min = preference.min
++    val max = preference.max
++    val safeMax = max.coerceAtLeast(min + 1)
++    val increment = preference.seekBarIncrement.takeIf { it > 0 } ?: 1
++    val adjustable = preference.isAdjustable && max > min
++    val current = remember(preference) { mutableIntStateOf(preference.value.coerceIn(min, safeMax)) }
++    LaunchedEffect(preference.value, min, max) {
++        current.intValue = preference.value.coerceIn(min, safeMax)
++    }
++    val highlightColor by animateColorAsState(
++        targetValue = if (highlighted) {
++            MaterialTheme.colorScheme.primaryContainer
++        } else {
++            Color.Transparent
++        },
++        animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
++        label = "prefs-slider-highlight",
++    )
++
++    Column(
++        modifier = Modifier
++            .fillMaxWidth()
++            .background(highlightColor)
++            .alpha(if (row.enabled) 1f else DISABLED_ALPHA)
++            .let { if (highlighted) it.bringIntoViewRequester(bringIntoView) else it }
++            .padding(vertical = 4.dp),
++    ) {
++        GbSettingRow(
++            title = row.title,
++            supporting = row.summary,
++            leading = when {
++                row.icon != null -> ({ PrefIcon(row.icon) })
++                row.iconSpaceReserved -> ({ Spacer(Modifier.size(LEADING_ICON_SIZE)) })
++                else -> null
++            },
++            trailing = {
++                if (preference.showSeekBarValue) {
++                    Text(
++                        text = current.intValue.toString(),
++                        style = MaterialTheme.typography.labelLarge,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                }
++            },
++        )
++        Slider(
++            value = current.intValue.toFloat(),
++            onValueChange = { value ->
++                current.intValue = snapSliderValue(value, min, safeMax, increment)
++            },
++            valueRange = min.toFloat()..safeMax.toFloat(),
++            steps = 0,
++            enabled = row.enabled && preference.isEnabled && adjustable,
++            onValueChangeFinished = {
++                onValueChange(current.intValue)
++                // A change listener may reject the value, so the preference remains authoritative.
++                current.intValue = preference.value.coerceIn(min, safeMax)
++            },
++            modifier = Modifier
++                .fillMaxWidth()
++                .padding(horizontal = 16.dp)
++                .semantics {
++                    contentDescription = row.title
++                    stateDescription = current.intValue.toString()
++                },
++        )
++    }
++}
++
++private fun snapSliderValue(value: Float, min: Int, max: Int, increment: Int): Int {
++    val steps = ((value - min) / increment).roundToInt()
++    return (min + steps * increment).coerceIn(min, max)
++}
++
+ /** The preference icon, tinted like the Material 3 symbols around it. */
+ @Composable
+ private fun PrefIcon(icon: Drawable?) {
+@@ -483,13 +604,14 @@
+ @Composable
+ private fun PrefsSearch(
+     tree: PrefsTree,
++    revision: Int,
+     query: String,
+     onQueryChange: (String) -> Unit,
+     onClose: () -> Unit,
+     onOpenFullSearch: () -> Unit,
+     onResultClick: (PrefSearchResult) -> Unit,
+ ) {
+-    val results = remember(query, tree) { tree.search(query) }
++    val results = remember(query, tree, revision, PrefsRefresh.revision) { tree.search(query) }
+     val focusRequester = remember { FocusRequester() }
+     LaunchedEffect(Unit) { focusRequester.requestFocus() }
+ 

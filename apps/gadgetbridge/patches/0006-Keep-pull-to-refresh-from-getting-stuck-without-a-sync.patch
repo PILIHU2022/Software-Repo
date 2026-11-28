@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Wed, 25 Nov 2026 12:00:00 +0800
+Subject: [PATCH] Keep pull-to-refresh from getting stuck without a sync
+
+A refresh request can be skipped while the device is disconnected, still
+initializing, or already busy. Gadgetbridge normally stops the spinner
+from the recorded-data completion broadcast, so those paths leave it
+running and SwipeRefreshLayout then swallows later pull gestures.
+
+Watch the release of a pull gesture on the main dashboard and clear a
+still-running indicator after 30 seconds. Normal fetches still end through
+the existing completion broadcast, but the timeout is an upper bound: a
+slow sync can also lose its indicator while continuing in the background.
+The point is to free the gesture stream so the next pull can start a new sync.
+---
+ .../gadgetbridge/widgets/SwipeRefreshWatchdog.java                 | 63 +++++++++++++++++++++
+ .../gadgetbridge/activities/ControlCenterv2.java                    |  2 +
+ 2 files changed, 65 insertions(+)
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java
+
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java
+@@ -0,0 +1,63 @@
++package nodomain.freeyourgadget.gadgetbridge.widgets;
++
++import android.annotation.SuppressLint;
++import android.view.MotionEvent;
++import android.view.View;
++import android.view.ViewGroup;
++
++import androidx.annotation.NonNull;
++import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
++
++/**
++ * Bounds a pull-to-refresh spinner whose request never reports completion.
++ *
++ * SwipeRefreshLayout accepts a refresh when the user releases a pull gesture and
++ * then consumes further pulls until isRefreshing() is false. If Gadgetbridge
++ * skips a sync because no device is ready, or because the device is busy, no
++ * completion broadcast follows and the indicator owns the gesture stream. Watch
++ * the gesture release and clear only that orphaned state after a generous
++ * timeout; normal completions still happen immediately through the activity.
++ */
++public final class SwipeRefreshWatchdog {
++    private static final long REFRESH_TIMEOUT_MS = 30_000L;
++
++    private SwipeRefreshWatchdog() {
++    }
++
++    public static void attach(@NonNull final View root) {
++        attachToView(root);
++    }
++
++    @SuppressLint("ClickableViewAccessibility")
++    private static void attachToView(@NonNull final View view) {
++        if (view instanceof SwipeRefreshLayout) {
++            final SwipeRefreshLayout layout = (SwipeRefreshLayout) view;
++            layout.setOnTouchListener((touchView, event) -> {
++                final int action = event.getActionMasked();
++                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
++                    touchView.postDelayed(() -> watch(layout), 100L);
++                }
++                return false;
++            });
++        }
++
++        if (view instanceof ViewGroup) {
++            final ViewGroup group = (ViewGroup) view;
++            for (int i = 0; i < group.getChildCount(); i++) {
++                attachToView(group.getChildAt(i));
++            }
++        }
++    }
++
++    private static void watch(@NonNull final SwipeRefreshLayout layout) {
++        if (!layout.isRefreshing()) {
++            return;
++        }
++
++        layout.postDelayed(() -> {
++            if (layout.isRefreshing()) {
++                layout.setRefreshing(false);
++            }
++        }, REFRESH_TIMEOUT_MS);
++    }
++}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+@@ -101,1 +101,2 @@
+ import nodomain.freeyourgadget.gadgetbridge.util.backup.OnOpenBackupRunner;
++import nodomain.freeyourgadget.gadgetbridge.widgets.SwipeRefreshWatchdog;
+@@ -362,2 +363,3 @@
+         // Configure ViewPager2 with fragment adapter and default fragment
+         viewPager = findViewById(R.id.dashboard_viewpager);
++        SwipeRefreshWatchdog.attach(findViewById(android.R.id.content));

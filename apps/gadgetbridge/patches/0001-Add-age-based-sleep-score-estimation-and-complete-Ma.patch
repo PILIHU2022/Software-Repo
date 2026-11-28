@@ -7,6 +7,7 @@ Subject: [PATCH] Add age-based sleep score estimation and complete Material 3
 Sleep score:
 - Add AgeSleepScoreCalculator, a transparent 0-100 sleep score that follows the sleep duration recommended for the user's age, age-adjusted deep sleep targets, REM share and sleep efficiency.
 - Use the estimate in the sleep charts (day and period), the dashboard day summary and the sleep widgets when a device does not report a native score.
+- Attribute a night to the day it ends on, so a session from 23:00 to 07:00 counts for the following day instead of the day it started.
 - Add a Material 3 bottom sheet with the score breakdown, opened by tapping the age-adjusted score gauge.
 - Add a Charts preference to disable the age-based estimate.
 
@@ -14,25 +15,26 @@ Material 3:
 - Migrate the remaining MaterialComponents filter chip, dialog, translucent and text input styles to their Material 3 equivalents.
 - Add Material 3 bottom sheet styles and component styles for the new score details sheet.
 ---
- app/src/main/AndroidManifest.xml              |   4 +-
- .../charts/DefaultChartsProvider.kt           |  28 +-
- .../activities/charts/SleepDailyFragment.java |  46 +-
- .../activities/charts/SleepFragment.java      |  28 +-
+ app/src/main/AndroidManifest.xml              |   4 +
+ .../charts/DefaultChartsProvider.kt           |  56 ++++++-
+ .../activities/charts/SleepDailyFragment.java |  46 +++++-
+ .../activities/charts/SleepFragment.java      |  62 +++++--
  .../charts/SleepPeriodFragment.java           |  17 +-
- .../charts/SleepScoreDetailsSheet.kt          | 170 +++++++
- .../util/sleep/AgeSleepScore.java             |  55 +++
- .../util/sleep/AgeSleepScoreCalculator.java   | 414 ++++++++++++++++++
- .../widgets/impl/SleepScoreWidget.kt          |  87 +++-
- .../gadgetbridge/widgets/impl/SleepWidget.kt  |   9 +-
- app/src/main/res/layout/activity_auth_key.xml |   4 +-
- .../res/layout/activity_installer_gpx.xml     |   2 +-
- .../layout/fragment_sleep_score_details.xml   | 231 ++++++++++
+ .../charts/SleepScoreDetailsSheet.kt          | 170 +++++++++++++++++++++
+ .../util/sleep/AgeSleepScore.java             |  66 ++++++++
+ .../util/sleep/AgeSleepScoreCalculator.java   | 414 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ .../gadgetbridge/widgets/WidgetDataScope.kt   |  56 +++++++
+ .../widgets/impl/SleepScoreWidget.kt          | 252 +++++++++++++++++++++++++++---
+ .../gadgetbridge/widgets/impl/SleepWidget.kt  |  13 +-
+ app/src/main/res/layout/activity_auth_key.xml |   4 +
+ .../res/layout/activity_installer_gpx.xml     |   2 +
+ .../layout/fragment_sleep_score_details.xml   | 231 ++++++++++++++++++++++++++++
  .../main/res/layout/fragment_sleepchart.xml   |   1 +
- app/src/main/res/values/strings.xml           |  13 +
- app/src/main/res/values/styles.xml            |  34 +-
+ app/src/main/res/values/strings.xml           |  13 ++
+ app/src/main/res/values/styles.xml            |  34 +++-
  app/src/main/res/xml/charts_preferences.xml   |   8 +
- .../sleep/AgeSleepScoreCalculatorTest.java    | 203 +++++++++
- 18 files changed, 1328 insertions(+), 26 deletions(-)
+ .../sleep/AgeSleepScoreCalculatorTest.java    | 203 +++++++++++++++++++++++++
+19 files changed, 1585 insertions(+), 67 deletions(-)
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepScoreDetailsSheet.kt
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java
@@ -62,51 +64,91 @@ index 160485cbad..9ded9abd11 100644
          <!-- Settings screen for Quick Settings tiles and Device Controls. -->
          <activity
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
-index 0d3b3a74f0..9b47d5484f 100644
+index 0d3b3a74f0..29c0ab4f62 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
-@@ -22,6 +22,7 @@ import nodomain.freeyourgadget.gadgetbridge.model.TemperatureUnit
+@@ -22,6 +22,8 @@ import nodomain.freeyourgadget.gadgetbridge.model.TemperatureUnit
  import nodomain.freeyourgadget.gadgetbridge.model.WeightUnit
  import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
  import nodomain.freeyourgadget.gadgetbridge.util.FormatUtils
++import nodomain.freeyourgadget.gadgetbridge.util.SleepRangeUtils
 +import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore
  import java.text.DecimalFormat
  import java.text.NumberFormat
  import java.time.Instant
-@@ -291,13 +292,26 @@ open class DefaultChartsProvider : DeviceChartsProvider {
+@@ -39,6 +41,9 @@ open class DefaultChartsProvider : DeviceChartsProvider {
+         @JvmField
+         val INSTANCE = DefaultChartsProvider()
+ 
++        /** A score may be stored slightly before bedtime or after wake-up. */
++        private const val SCORE_MARGIN_MILLIS = 60L * 60L * 1000L
++
+         const val OVERVIEW = "overview"
+     }
+ 
+@@ -290,17 +295,56 @@ open class DefaultChartsProvider : DeviceChartsProvider {
+ 
              // Sleep - score (if available), followed by sleep time
              "sleep" -> {
-                 val minutes = DailyTotals.getDailyTotalsForDevice(device, calendarOf(timestamp), db).sleep
+-                val minutes = DailyTotals.getDailyTotalsForDevice(device, calendarOf(timestamp), db).sleep
 -                val score = if (coordinator.supportsSleepScore(device)) {
--                    coordinator.getSleepScoreProvider(device, db.daoSession)
++                // A night belongs to the day it ends on: a session from 23:00 to 07:00 is the
++                // sleep of the following day, not of the day it started. DailyTotals follows the
++                // chart's "sleep range" preference, so resolve the calendar day here instead.
++                val sleepZone = ZoneId.systemDefault()
++                val sleepDate = Instant.ofEpochMilli(timestamp * 1000L).atZone(sleepZone).toLocalDate()
++                val sleepDayStart = sleepDate.atStartOfDay(sleepZone).toEpochSecond().toInt()
++                val sleepDayEnd = sleepDate.plusDays(1).atStartOfDay(sleepZone).toEpochSecond().toInt()
++                val daySessions = if (coordinator.supportsSleepMeasurement(device)) {
++                    // getSleepSessionsEndingIn() matches (from, to], so shift the half-open day.
++                    coordinator.getSleepSessionProvider(device, db.daoSession)
++                        .getSleepSessionsEndingIn(sleepDayStart - 1, sleepDayEnd - 1)
++                } else {
++                    emptyList()
++                }
++                // Score samples are stamped either at bedtime or at wake-up, depending on the
++                // device, so search the whole session rather than only the calendar day. Without
++                // sessions to anchor on, fall back to the chart's sleep window, which also spans
++                // the previous evening so a score stored at bedtime is not lost.
++                val nativeScore = if (coordinator.supportsSleepScore(device)) {
++                    val scoreWindow = if (daySessions.isNotEmpty()) {
++                        // A score can be stamped just before bedtime or after wake-up, so allow
++                        // a small margin around the recorded sessions.
++                        val scoreFrom = daySessions.minOf { it.startTime } - SCORE_MARGIN_MILLIS
++                        val scoreTo = daySessions.maxOf { it.endTime } + SCORE_MARGIN_MILLIS
++                        scoreFrom to scoreTo
++                    } else {
++                        val range = SleepRangeUtils.getSleepRange(calendarOf(timestamp))
++                        range[0] * 1000L to (range[1] - 1) * 1000L
++                    }
+                     coordinator.getSleepScoreProvider(device, db.daoSession)
 -                        ?.getAllSamples(start, end)
 -                        ?.lastOrNull()
--                        ?.sleepScore
--                } else {
--                    null
-+                val score = when {
-+                    coordinator.supportsSleepScore(device) -> {
-+                        coordinator.getSleepScoreProvider(device, db.daoSession)
-+                            ?.getAllSamples(start, end)
-+                            ?.lastOrNull()
-+                            ?.sleepScore
-+                    }
-+
-+                    AgeSleepScore.isEnabled() && coordinator.supportsSleepMeasurement(device) -> {
-+                        // No native score: estimate one from the recorded stages, adjusted for age.
-+                        val sessions = coordinator.getSleepSessionProvider(device, db.daoSession)
-+                            .getSleepSessionsEndingIn(tsStart, tsEnd)
-+                        if (sessions.isEmpty()) {
-+                            null
-+                        } else {
-+                            AgeSleepScore.calculate(sessions).score.takeIf { it > 0 }
-+                        }
-+                    }
-+
-+                    else -> null
++                        ?.getAllSamples(scoreWindow.first, scoreWindow.second)
++                        ?.lastOrNull { it.sleepScore > 0 }
+                         ?.sleepScore
+                 } else {
+                     null
                  }
-                 val sleepTime = DateTimeUtils.formatDurationHoursMinutes(minutes, TimeUnit.MINUTES)
-                 if (minutes > 0) {
+-                val sleepTime = DateTimeUtils.formatDurationHoursMinutes(minutes, TimeUnit.MINUTES)
+-                if (minutes > 0) {
++                // No usable native score: estimate one from the recorded stages, adjusted for age.
++                val estimatedScore = if (AgeSleepScore.isEnabled() && daySessions.isNotEmpty()) {
++                    AgeSleepScore.calculate(daySessions).score.takeIf { it > 0 }
++                } else {
++                    null
++                }
++                val score = nativeScore ?: estimatedScore
++                val sleepMinutes = if (daySessions.isNotEmpty()) {
++                    AgeSleepScore.totalSleepMinutes(daySessions).toInt()
++                } else {
++                    DailyTotals.getDailyTotalsForDevice(device, calendarOf(timestamp), db).sleep
++                }
++                val sleepTime = DateTimeUtils.formatDurationHoursMinutes(sleepMinutes, TimeUnit.MINUTES)
++                if (sleepMinutes > 0) {
+                     if (score != null) {
+                         "$score • $sleepTime"
+                     } else {
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
 index 4a52f0cd9d..0e79c4a320 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
@@ -125,7 +167,7 @@ index 4a52f0cd9d..0e79c4a320 100644
  
          int sleepScore = 0;
 +        AgeSleepScoreCalculator.Result sleepScoreResult = null;
-         if (!sleepScoreSamples.isEmpty()) {
+         if (!sleepScoreSamples.isEmpty() && sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore() > 0) {
              sleepScore = sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore();
 +        } else if (AgeSleepScore.isEnabled() && !sleepSessions.isEmpty()) {
 +            // No native score: estimate one from the recorded stages, adjusted for the user's age.
@@ -213,10 +255,10 @@ index 4a52f0cd9d..0e79c4a320 100644
              return sleepSessions;
          }
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java
-index 513b23fcb5..356a9ebd0d 100644
+index 513b23fcb5..fe11694562 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepFragment.java
-@@ -1,14 +1,17 @@
+@@ -1,16 +1,23 @@
  package nodomain.freeyourgadget.gadgetbridge.activities.charts;
  
  import java.util.Calendar;
@@ -230,11 +272,17 @@ index 513b23fcb5..356a9ebd0d 100644
  import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice;
  import nodomain.freeyourgadget.gadgetbridge.model.ActivitySample;
  import nodomain.freeyourgadget.gadgetbridge.model.SleepScoreSample;
++import nodomain.freeyourgadget.gadgetbridge.model.SleepSession;
++import nodomain.freeyourgadget.gadgetbridge.util.SleepRangeUtils;
 +import nodomain.freeyourgadget.gadgetbridge.util.sleep.AgeSleepScore;
  
  abstract class SleepFragment<D extends ChartsData> extends AbstractActivityChartFragment<D> {
++    private static final long SCORE_MARGIN_MILLIS = 60L * 60L * 1000L;
++
      @Override
-@@ -21,17 +24,37 @@ abstract class SleepFragment<D extends ChartsData> extends AbstractActivityChart
+     public String getTitle() {
+         return getString(R.string.sleepchart_your_sleep);
+@@ -21,30 +28,57 @@ abstract class SleepFragment<D extends ChartsData> extends AbstractActivityChart
          return super.getAllSamples(db, device, tsFrom, tsTo);
      }
  
@@ -253,36 +301,59 @@ index 513b23fcb5..356a9ebd0d 100644
      }
  
      protected List<SleepScoreSample> getSleepScoreSamples(DBHandler db, GBDevice device, int tsFrom, int tsTo) {
-+        // Devices without native score support have no provider; the caller falls back to the
-+        // age-based estimation from the sleep sessions instead.
-+        if (!device.getDeviceCoordinator().supportsSleepScore(device)) {
-+            return Collections.emptyList();
-+        }
-         TimeSampleProvider<? extends SleepScoreSample> provider = device.getDeviceCoordinator().getSleepScoreProvider(device, db.getDaoSession());
-+        if (provider == null) {
-+            return Collections.emptyList();
-+        }
-         return (List<SleepScoreSample>) provider.getAllSamples(tsFrom * 1000L, tsTo * 1000L);
+-        TimeSampleProvider<? extends SleepScoreSample> provider = device.getDeviceCoordinator().getSleepScoreProvider(device, db.getDaoSession());
+-        return (List<SleepScoreSample>) provider.getAllSamples(tsFrom * 1000L, tsTo * 1000L);
++        final Calendar day = Calendar.getInstance();
++        day.setTimeInMillis(tsTo * 1000L);
++        return getSleepScoreSamples(db, device, day);
      }
  
      protected List<SleepScoreSample> getSleepScoreSamples(DBHandler db, GBDevice device, Calendar day) {
+-        int startTs;
+-        int endTs;
 +        if (!device.getDeviceCoordinator().supportsSleepScore(device)) {
 +            return Collections.emptyList();
 +        }
-+
-         int startTs;
-         int endTs;
  
-@@ -44,6 +67,9 @@ abstract class SleepFragment<D extends ChartsData> extends AbstractActivityChart
-         endTs = startTs + 24 * 60 * 60 - 1;
+-        day = (Calendar) day.clone(); // do not modify the caller's argument
+-        day.set(Calendar.HOUR_OF_DAY, 0);
+-        day.set(Calendar.MINUTE, 0);
+-        day.set(Calendar.SECOND, 0);
+-        day.add(Calendar.HOUR, 0);
+-        startTs = (int) (day.getTimeInMillis() / 1000);
+-        endTs = startTs + 24 * 60 * 60 - 1;
++        // A score may be stamped at bedtime or at wake-up, so query the times of the sleep
++        // sessions shown for this day instead of the calendar day. Otherwise a score stored at
++        // 23:00 for a night ending the next morning is dropped or lands one day early.
++        final int[] range = SleepRangeUtils.getSleepRange(day);
++        long from = range[0] * 1000L;
++        long to = (range[1] - 1) * 1000L;
++        if (device.getDeviceCoordinator().supportsSleepMeasurement(device)) {
++            final List<SleepSession> sessions = device.getDeviceCoordinator()
++                    .getSleepSessionProvider(device, db.getDaoSession())
++                    .getSleepSessionsEndingIn(range[0], range[1]);
++            if (!sessions.isEmpty()) {
++                long firstStart = Long.MAX_VALUE;
++                long lastEnd = Long.MIN_VALUE;
++                for (final SleepSession session : sessions) {
++                    firstStart = Math.min(firstStart, session.getStartTime());
++                    lastEnd = Math.max(lastEnd, session.getEndTime());
++                }
++                // A score can be stamped just before bedtime or after wake-up.
++                from = firstStart - SCORE_MARGIN_MILLIS;
++                to = lastEnd + SCORE_MARGIN_MILLIS;
++            }
++        }
  
          TimeSampleProvider<? extends SleepScoreSample> provider = device.getDeviceCoordinator().getSleepScoreProvider(device, db.getDaoSession());
+-        return (List<SleepScoreSample>) provider.getAllSamples(startTs * 1000L, endTs * 1000L);
 +        if (provider == null) {
 +            return Collections.emptyList();
 +        }
-         return (List<SleepScoreSample>) provider.getAllSamples(startTs * 1000L, endTs * 1000L);
++        return (List<SleepScoreSample>) provider.getAllSamples(from, to);
      }
- 
+-
+ }
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
 index 9ca790768e..3d7c5f465d 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
@@ -503,7 +574,7 @@ new file mode 100644
 index 0000000000..785c538449
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,66 @@
 +/*  Copyright (C) 2026 Gadgetbridge contributors
 +
 +    This file is part of Gadgetbridge.
@@ -557,6 +628,17 @@ index 0000000000..785c538449
 +    @NonNull
 +    public static AgeSleepScoreCalculator.Result calculate(@NonNull final List<SleepSession> sessions) {
 +        return AgeSleepScoreCalculator.calculate(getAge(), sessions);
++    }
++
++    /**
++     * The summed asleep time of {@code sessions}, rounded down to whole minutes.
++     */
++    public static long totalSleepMinutes(@NonNull final List<SleepSession> sessions) {
++        long seconds = 0;
++        for (final SleepSession session : sessions) {
++            seconds += session.getTotalSleepDuration();
++        }
++        return seconds / 60L;
 +    }
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java
@@ -979,11 +1061,97 @@ index 0000000000..04816ccf70
 +        }
 +    }
 +}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/WidgetDataScope.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/WidgetDataScope.kt
+index 2d0cdf6561..02da2927dc 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/WidgetDataScope.kt
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/WidgetDataScope.kt
+@@ -13,6 +13,7 @@ import nodomain.freeyourgadget.gadgetbridge.model.ActivityKind
+ import nodomain.freeyourgadget.gadgetbridge.model.ActivitySample
+ import nodomain.freeyourgadget.gadgetbridge.model.ActivityUser
+ import nodomain.freeyourgadget.gadgetbridge.model.DailyTotals
++import nodomain.freeyourgadget.gadgetbridge.model.SleepSession
+ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
+ import nodomain.freeyourgadget.gadgetbridge.util.SleepRangeUtils
+ import java.time.Instant
+@@ -146,6 +147,61 @@ class WidgetDataScope(
+         LongArray(4) { stage -> if (stages.isEmpty()) 0L else stages.map { it[stage] }.average().roundToInt().toLong() }
+     }
+ 
++    /**
++     * The sessions that ended on the selected day, in full. The sleep-range preference shifts the
++     * charts' evening window, but a night belongs to the day it ends on, so the widgets always use
++     * the calendar day here.
++     */
++    private fun sleepSessionsEndingOnDay(db: DBHandler, device: GBDevice): List<SleepSession> {
++        val from = dayStart.toInt() - 1
++        val to = day.plusDays(1).atStartOfDay(zone).toEpochSecond().toInt() - 1
++        return device.deviceCoordinator.getSleepSessionProvider(device, db.daoSession)
++            .getSleepSessionsEndingIn(from, to)
++    }
++
++    /**
++     * Asleep minutes of the sessions that ended on the selected day, awake excluded, averaged over
++     * the devices that recorded any, like [sleepMinutesTotal].
++     */
++    suspend fun sleepMinutesEndingOnDay(): Long = db { db ->
++        val sleepValues = devices.filter { it.deviceCoordinator.supportsSleepMeasurement(it) }
++            .map { dev ->
++                // Includes SLEEP_ANY, so a device that records whole sessions without a stage
++                // breakdown still reports its sleep instead of zero.
++                val minutes = sleepSessionsEndingOnDay(db, dev).sumOf {
++                    it.totalSleepDuration
++                } / 60
++                // Fall back to the upstream totals when the provider returns no session, so a
++                // device whose session query is empty does not turn the dashboard into zero.
++                if (minutes > 0) minutes else dailyTotals(db, dev).sleep
++            }
++            .filter { it > 0 }
++        if (sleepValues.isEmpty()) 0L else sleepValues.average().roundToInt().toLong()
++    }
++
++    /**
++     * Light, deep, REM and awake minutes of the sessions that ended on the selected day, averaged
++     * over the devices that recorded sleep.
++     */
++    suspend fun sleepStageMinutesEndingOnDay(): LongArray = db { db ->
++        val stages = devices.filter { it.deviceCoordinator.supportsSleepMeasurement(it) }
++            .mapNotNull { dev ->
++                val sessions = sleepSessionsEndingOnDay(db, dev)
++                if (sessions.any { it.totalSleepDuration > 0 }) {
++                    longArrayOf(
++                        sessions.sumOf { it.lightSleepDuration },
++                        sessions.sumOf { it.deepSleepDuration },
++                        sessions.sumOf { it.remSleepDuration },
++                        sessions.sumOf { it.awakeSleepDuration },
++                    ).map { it / 60L }.toLongArray()
++                } else {
++                    // Same fallback as sleepMinutesEndingOnDay().
++                    dailyTotals(db, dev).sleepStages.takeIf { totals -> totals.any { it > 0 } }
++                }
++            }
++        LongArray(4) { stage -> if (stages.isEmpty()) 0L else stages.map { it[stage] }.average().roundToInt().toLong() }
++    }
++
+     fun sleepGoalFactor(sleepMinutesTotal: Long): Float {
+         val goal = ActivityUser().sleepDurationGoal
+         return (sleepMinutesTotal.toFloat() / goal).coerceAtMost(1f)
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
-index d42ba69d6b..b1f762cd36 100644
+index d42ba69d6b..bc743c9fa8 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
-@@ -16,7 +16,10 @@ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetColors
+@@ -3,8 +3,10 @@ package nodomain.freeyourgadget.gadgetbridge.widgets.impl
+ import android.content.Context
+ import android.graphics.Color
+ import nodomain.freeyourgadget.gadgetbridge.R
++import nodomain.freeyourgadget.gadgetbridge.database.DBHandler
+ import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice
+-import nodomain.freeyourgadget.gadgetbridge.model.SleepScoreSample
++import nodomain.freeyourgadget.gadgetbridge.model.SleepSession
++import nodomain.freeyourgadget.gadgetbridge.util.SleepRangeUtils
+ import nodomain.freeyourgadget.gadgetbridge.widgets.GaugeSpec
+ import nodomain.freeyourgadget.gadgetbridge.widgets.MiniChart
+ import nodomain.freeyourgadget.gadgetbridge.widgets.Stat
+@@ -16,7 +18,10 @@ import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetColors
  import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetHistory
  import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetDataScope
  import nodomain.freeyourgadget.gadgetbridge.widgets.WidgetConfig
@@ -994,7 +1162,16 @@ index d42ba69d6b..b1f762cd36 100644
  import java.time.LocalDate
  
  /**
-@@ -34,7 +37,8 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
+@@ -28,20 +33,24 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
+     private const val HISTORY_MIN = 40f
+     private const val HISTORY_MAX = 100f
+ 
++    /** A score may be stored slightly before bedtime or after wake-up. */
++    private const val SCORE_MARGIN_MILLIS = 60L * 60L * 1000L
++
+     override val id = "sleepscore"
+     override val label = R.string.sleep_score
+     override val icon = R.drawable.ic_widget_sleep_score
      override val chartTab = "sleep"
  
      override fun isSupportedBy(device: GBDevice): Boolean =
@@ -1004,39 +1181,160 @@ index d42ba69d6b..b1f762cd36 100644
  
      override suspend fun loadData(scope: WidgetDataScope, config: WidgetConfig): Data = Data(
          latestScore(scope),
-@@ -116,9 +120,44 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
-         } catch (e: Exception) {
-             LOG.error("Could not get sleep score", e)
-         }
+         if (config.needsHistory) nights(scope) else null,
+-        if (config.isLargeStyle) scope.sleepStageMinutes() else null,
++        if (config.isLargeStyle) scope.sleepStageMinutesEndingOnDay() else null,
+         scope.day,
+-        if (config.isLargeStyle) scope.sleepMinutesTotal() else 0L,
++        if (config.isLargeStyle) scope.sleepMinutesEndingOnDay() else 0L,
+         SleepWidget.StageSupport.of(scope.devices),
+     )
+ 
+@@ -98,44 +107,229 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
+      * The latest sleep score of the selected day, or -1.
+      */
+     internal suspend fun latestScore(scope: WidgetDataScope): Int {
+-        try {
+-            var latest: SleepScoreSample? = null
+-            for (dev in scope.devices.filter { it.deviceCoordinator.supportsSleepScore(it) }) {
+-                val sample = scope.db { db ->
+-                    dev.deviceCoordinator.getSleepScoreProvider(dev, db.daoSession)?.getLatestSample(
+-                        scope.query.timeTo * 1000L
+-                    )
+-                }?.takeIf { it.timestamp >= scope.dayStart * 1000L }
+-                if (sample != null && (latest == null || sample.timestamp > latest.timestamp)) {
+-                    latest = sample
++        val window = sleepDayWindow(scope, scope.day)
++        if (window != null) {
++            try {
++                val native = nativeScoreForDay(scope, window.first, window.second)
++                if (native > 0) {
++                    return native
+                 }
++            } catch (e: Exception) {
++                LOG.error("Could not get sleep score", e)
+             }
+-            if (latest != null) {
+-                return latest.sleepScore
++        }
 +        if (AgeSleepScore.isEnabled()) {
 +            try {
 +                return localScoreForDay(scope)
 +            } catch (e: Exception) {
 +                LOG.error("Could not estimate the sleep score", e)
-+            }
-+        }
+             }
+-        } catch (e: Exception) {
+-            LOG.error("Could not get sleep score", e)
+         }
          return -1
      }
  
+-    private suspend fun nights(scope: WidgetDataScope): FloatArray {
+-        val from = scope.dayStartMinusDays(NIGHTS - 1) * 1000L
+-        val samples = try {
+-            scope.db { db ->
+-                scope.devices.flatMap { dev ->
+-                    dev.deviceCoordinator.getSleepScoreProvider(dev, db.daoSession)
+-                        ?.getAllSamples(from, scope.query.timeTo * 1000L)
+-                        .orEmpty()
+-                        .filter { it.sleepScore > 0 }
+-                        .map { TimedValue(it.timestamp / 1000L, it.sleepScore.toFloat()) }
++    /**
++     * The half-open epoch-second window [start, endExclusive) of one sleep day, clamped to the
++     * queried range and to now.
++     *
++     * A session belongs to the day it ends on, so the window is the whole calendar day: a night
++     * from 23:00 to 07:00 ends on the following day and is therefore scored for that day. The
++     * window is based on the calendar day rather than the chart's "sleep range" preference, so the
++     * previous evening (or the previous night) is not pulled into the day.
++     * The window also stops at the current second: on the selected day, sessions that end later
++     * have not happened yet and must not be scored as if the night were complete.
++     * [allowFuture], when set, is used for the history chart: the night that ended this morning
++     * still has to be read from the database even though the selected day itself is only partly
++     * over. It does not change the day the score is plotted on.
++     */
++    private fun sleepDayWindow(
++        scope: WidgetDataScope,
++        day: LocalDate,
++        allowFuture: Boolean = false,
++    ): Pair<Int, Int>? {
++        val start = day.atStartOfDay(scope.zone).toEpochSecond().toInt()
++        val endExclusive = minOf(
++            day.plusDays(1).atStartOfDay(scope.zone).toEpochSecond(),
++            scope.query.timeTo.toLong() + 1L,
++            if (allowFuture) Long.MAX_VALUE else Instant.now().epochSecond + 1L,
++        ).toInt()
++        return if (endExclusive > start) start to endExclusive else null
++    }
++
++    /**
++     * The chart's sleep window that ends on [day], used only to locate score samples when no sleep
++     * session is available to read exact bounds. Anchored at noon so every preference mode covers
++     * the previous evening and the morning of [day].
++     */
++    private fun chartSleepWindow(scope: WidgetDataScope, day: LocalDate): Pair<Long, Long> {
++        val anchor = java.util.GregorianCalendar()
++        anchor.timeInMillis = day.atTime(12, 0).atZone(scope.zone).toInstant().toEpochMilli()
++        val range = SleepRangeUtils.getSleepRange(anchor)
++        return range[0] * 1000L to (range[1] - 1) * 1000L
++    }
++
++    /** The sessions of [device] that ended in the half-open day [start, endExclusive). */
++    private fun sessionsEndingIn(
++        db: DBHandler,
++        device: GBDevice,
++        start: Int,
++        endExclusive: Int,
++    ): List<SleepSession> = device.deviceCoordinator.getSleepSessionProvider(device, db.daoSession)
++        .getSleepSessionsEndingIn(start - 1, endExclusive - 1)
++
++    /**
++     * The latest native score of the night that ends on the selected day, or -1.
++     *
++     * A score sample may be stamped at bedtime or at wake-up depending on the device, so the whole
++     * recorded night is searched instead of only the calendar day.
++     */
++    private suspend fun nativeScoreForDay(scope: WidgetDataScope, start: Int, endExclusive: Int): Int =
++        scope.db { db ->
++            var best = 0
++            var bestTimestamp = Long.MIN_VALUE
++            for (dev in scope.devices.filter { it.deviceCoordinator.supportsSleepScore(it) }) {
++                val sessions = if (dev.deviceCoordinator.supportsSleepMeasurement(dev)) {
++                    sessionsEndingIn(db, dev, start, endExclusive)
++                } else {
++                    emptyList()
++                }
++                val window = if (sessions.isNotEmpty()) {
++                    (sessions.minOf { it.startTime } - SCORE_MARGIN_MILLIS) to
++                        (sessions.maxOf { it.endTime } + SCORE_MARGIN_MILLIS)
++                } else {
++                    // No sessions to anchor on: use the chart's evening window, which also spans
++                    // a score stamped at bedtime.
++                    chartSleepWindow(scope, scope.day)
++                }
++                val sample = dev.deviceCoordinator.getSleepScoreProvider(dev, db.daoSession)
++                    ?.getAllSamples(window.first, window.second)
++                    ?.filter { it.sleepScore > 0 }
++                    ?.maxByOrNull { it.timestamp }
++                if (sample != null && sample.timestamp > bestTimestamp) {
++                    bestTimestamp = sample.timestamp
++                    best = sample.sleepScore
+                 }
+             }
++            best
++        }
++
 +    /**
 +     * Estimates the score of the selected day from the recorded sleep stages, adjusted for the
 +     * user's age. Returns -1 when the day has no sleep sessions.
 +     */
 +    private suspend fun localScoreForDay(scope: WidgetDataScope): Int {
 +        val age = AgeSleepScore.getAge()
-+        val dayStart = scope.dayStart.toInt()
-+        val dayEnd = minOf(
-+            scope.day.plusDays(1).atStartOfDay(scope.zone).toEpochSecond().toInt(),
-+            scope.query.timeTo,
-+        )
-+        if (dayEnd <= dayStart) {
-+            return -1
-+        }
++        val (dayStart, dayEndExclusive) = sleepDayWindow(scope, scope.day) ?: return -1
 +        val score = scope.db { db ->
 +            var best = 0
 +            for (dev in scope.devices.filter { it.deviceCoordinator.supportsSleepMeasurement(it) }) {
-+                val sessions = dev.deviceCoordinator.getSleepSessionProvider(dev, db.daoSession)
-+                    .getSleepSessionsEndingIn(dayStart, dayEnd)
++                val sessions = sessionsEndingIn(db, dev, dayStart, dayEndExclusive)
 +                if (sessions.isNotEmpty()) {
 +                    best = maxOf(best, AgeSleepScoreCalculator.calculate(age, sessions).score)
 +                }
@@ -1046,10 +1344,10 @@ index d42ba69d6b..b1f762cd36 100644
 +        return if (score > 0) score else -1
 +    }
 +
-     private suspend fun nights(scope: WidgetDataScope): FloatArray {
-         val from = scope.dayStartMinusDays(NIGHTS - 1) * 1000L
-         val samples = try {
-@@ -135,7 +174,51 @@ object SleepScoreWidget : MetricWidget<SleepScoreWidget.Data>() {
++    private suspend fun nights(scope: WidgetDataScope): FloatArray {
++        val samples = try {
++            nativeNightScores(scope)
+         } catch (e: Exception) {
              LOG.error("Could not get sleep score history", e)
              emptyList()
          }
@@ -1057,19 +1355,70 @@ index d42ba69d6b..b1f762cd36 100644
 +        if (!AgeSleepScore.isEnabled()) {
 +            return WidgetHistory.dailyLatest(samples, scope.day, NIGHTS, scope.zone)
 +        }
-+        // Estimated scores only fill days without a native score, so a device-reported score is
-+        // never silently replaced by the local estimate.
++        // Estimated scores only fill days without a usable native score, so a device-reported
++        // score is never silently replaced by the local estimate, while a zero placeholder does
++        // not suppress one.
 +        val nativeDays = samples
++            .filter { it.value > 0f }
 +            .map { Instant.ofEpochSecond(it.seconds).atZone(scope.zone).toLocalDate() }
 +            .toSet()
-+        val local = localNightScores(scope).filter {
++        val local = try {
++            localNightScores(scope)
++        } catch (e: Exception) {
++            LOG.error("Could not estimate sleep score history", e)
++            emptyList()
++        }.filter {
 +            Instant.ofEpochSecond(it.seconds).atZone(scope.zone).toLocalDate() !in nativeDays
 +        }
 +        return WidgetHistory.dailyLatest(samples + local, scope.day, NIGHTS, scope.zone)
 +    }
 +
 +    /**
-+     * One estimated score per night of the last [NIGHTS] days, timestamped at the end of the day.
++     * One native score per night of the last [NIGHTS] days, stamped inside the day the night ends
++     * on. Each day is resolved on its own so a score is never plotted twice or on the wrong day,
++     * whichever timestamp the device uses for it.
++     */
++    private suspend fun nativeNightScores(scope: WidgetDataScope): List<TimedValue> =
++        scope.db { db ->
++            val result = mutableListOf<TimedValue>()
++            for (daysAgo in (NIGHTS - 1) downTo 0) {
++                val day = scope.day.minusDays(daysAgo.toLong())
++                val (start, endExclusive) = sleepDayWindow(scope, day, allowFuture = true) ?: continue
++                var best = 0
++                var bestTimestamp = Long.MIN_VALUE
++                for (dev in scope.devices.filter { it.deviceCoordinator.supportsSleepScore(it) }) {
++                    val sessions = if (dev.deviceCoordinator.supportsSleepMeasurement(dev)) {
++                        sessionsEndingIn(db, dev, start, endExclusive)
++                    } else {
++                        emptyList()
++                    }
++                    // A score may be stamped at bedtime, so anchor the search on the recorded
++                    // session instead of the calendar day. Without sessions, use the chart's
++                    // evening window, which also covers a bedtime timestamp.
++                    val window = if (sessions.isNotEmpty()) {
++                        (sessions.minOf { it.startTime } - SCORE_MARGIN_MILLIS) to
++                            (sessions.maxOf { it.endTime } + SCORE_MARGIN_MILLIS)
++                    } else {
++                        chartSleepWindow(scope, day)
++                    }
++                    val sample = dev.deviceCoordinator.getSleepScoreProvider(dev, db.daoSession)
++                        ?.getAllSamples(window.first, window.second)
++                        ?.filter { it.sleepScore > 0 }
++                        ?.maxByOrNull { it.timestamp }
++                    if (sample != null && sample.timestamp > bestTimestamp) {
++                        bestTimestamp = sample.timestamp
++                        best = sample.sleepScore
++                    }
++                }
++                if (best > 0) {
++                    result.add(TimedValue(endExclusive.toLong() - 1, best.toFloat()))
++                }
++            }
++            result
++        }
++
++    /**
++     * One estimated score per night of the last [NIGHTS] days, stamped inside the day it describes.
 +     */
 +    private suspend fun localNightScores(scope: WidgetDataScope): List<TimedValue> {
 +        val age = AgeSleepScore.getAge()
@@ -1077,24 +1426,18 @@ index d42ba69d6b..b1f762cd36 100644
 +            val result = mutableListOf<TimedValue>()
 +            for (daysAgo in (NIGHTS - 1) downTo 0) {
 +                val day = scope.day.minusDays(daysAgo.toLong())
-+                val start = day.atStartOfDay(scope.zone).toEpochSecond().toInt()
-+                val end = minOf(
-+                    day.plusDays(1).atStartOfDay(scope.zone).toEpochSecond().toInt(),
-+                    scope.query.timeTo,
-+                )
-+                if (end <= start) {
-+                    continue
-+                }
++                val (start, endExclusive) = sleepDayWindow(scope, day, allowFuture = true) ?: continue
 +                var best = 0
 +                for (dev in scope.devices.filter { it.deviceCoordinator.supportsSleepMeasurement(it) }) {
-+                    val sessions = dev.deviceCoordinator.getSleepSessionProvider(dev, db.daoSession)
-+                        .getSleepSessionsEndingIn(start, end)
++                    val sessions = sessionsEndingIn(db, dev, start, endExclusive)
 +                    if (sessions.isNotEmpty()) {
 +                        best = maxOf(best, AgeSleepScoreCalculator.calculate(age, sessions).score)
 +                    }
 +                }
 +                if (best > 0) {
-+                    result.add(TimedValue(end.toLong(), best.toFloat()))
++                    // Stamp the last second of the day. Stamping the exclusive end would plot the
++                    // score on the following midnight, one day late.
++                    result.add(TimedValue(endExclusive.toLong() - 1, best.toFloat()))
 +                }
 +            }
 +            result
@@ -1103,7 +1446,7 @@ index d42ba69d6b..b1f762cd36 100644
  
      /**
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt
-index 31bee093a4..4eef2fbff3 100644
+index 31bee093a4..c51a8b883e 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepWidget.kt
 @@ -4,6 +4,7 @@ import android.content.Context
@@ -1114,11 +1457,21 @@ index 31bee093a4..4eef2fbff3 100644
  import nodomain.freeyourgadget.gadgetbridge.widgets.GaugeSpec
  import nodomain.freeyourgadget.gadgetbridge.widgets.HypnogramSegment
  import nodomain.freeyourgadget.gadgetbridge.widgets.LegendRow
-@@ -61,7 +62,13 @@ object SleepWidget : MetricWidget<SleepWidget.Data>() {
+@@ -53,15 +54,21 @@ object SleepWidget : MetricWidget<SleepWidget.Data>() {
+         device.deviceCoordinator.supportsSleepMeasurement(device)
+ 
+     override suspend fun loadData(scope: WidgetDataScope, config: WidgetConfig): Data {
+-        val total = scope.sleepMinutesTotal()
++        val total = scope.sleepMinutesEndingOnDay()
+         if (!config.needsHistory) {
+             return Data(total, scope.sleepGoalFactor(total))
+         }
+         return Data(
              total,
              scope.sleepGoalFactor(total),
-             scope.sleepStageMinutes(),
+-            scope.sleepStageMinutes(),
 -            if (scope.devices.any { it.deviceCoordinator.supportsSleepScore(it) }) SleepScoreWidget.latestScore(scope) else -1,
++            scope.sleepStageMinutesEndingOnDay(),
 +            if (scope.devices.any { it.deviceCoordinator.supportsSleepScore(it) } ||
 +                (AgeSleepScore.isEnabled() && scope.devices.any { it.deviceCoordinator.supportsSleepMeasurement(it) })
 +            ) {

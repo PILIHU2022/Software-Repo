@@ -1,0 +1,603 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Fri, 27 Nov 2026 12:30:00 +0800
+Subject: [PATCH] Add an offline security check to browser and desktop
+
+Port the useful parts of NodeWarden's security dashboard to the clients
+without adding a server-side dependency. The page reads the unlocked vault
+locally, flags weak and reused passwords, asks Have I Been Pwned with the
+standard SHA-1 k-anonymity prefix, and lists logins that have no TOTP saved.
+
+The HIBP request never sends a password or a full hash. The page only creates a
+five-character prefix, so it continues to work with the same privacy model as
+the upstream breach report. The check is available in both the browser popup
+and the Electron desktop window.
+---
+ apps/browser/src/popup/app-routing.module.ts | 8 +++++++
+ apps/browser/src/popup/index.html | 2 ++
+ apps/desktop/src/app/app-routing.module.ts | 8 +++++++
+ apps/desktop/src/index.html | 2 ++
+ libs/common/src/patchwork/security-check.component.ts | 538 +++++++++++++++++++++
+ 5 files changed, 558 insertions(+)
+
+diff --git a/apps/browser/src/popup/app-routing.module.ts b/apps/browser/src/popup/app-routing.module.ts
+--- a/apps/browser/src/popup/app-routing.module.ts
++++ b/apps/browser/src/popup/app-routing.module.ts
+@@ -20,1 +20,9 @@
+ const routes: Routes = [
++  {
++    path: "security-check",
++    loadComponent: () =>
++      import("@bitwarden/common/patchwork/security-check.component").then(
++        (m) => m.SecurityCheckComponent,
++      ),
++  },
+diff --git a/apps/browser/src/popup/index.html b/apps/browser/src/popup/index.html
+--- a/apps/browser/src/popup/index.html
++++ b/apps/browser/src/popup/index.html
+@@ -14,1 +14,3 @@
+     <app-root></app-root>
++<a id="patchwork-security-check" href="#/security-check" title="打开安全检测">安全检测</a>
++<style>#patchwork-security-check{position:fixed;right:8px;bottom:56px;z-index:2147483647;padding:6px 10px;border-radius:999px;background:#175ddc;color:#fff;font:600 12px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 2px 8px #0003}</style>
+diff --git a/apps/desktop/src/app/app-routing.module.ts b/apps/desktop/src/app/app-routing.module.ts
+--- a/apps/desktop/src/app/app-routing.module.ts
++++ b/apps/desktop/src/app/app-routing.module.ts
+@@ -20,1 +20,9 @@
+ const routes: Routes = [
++  {
++    path: "security-check",
++    loadComponent: () =>
++      import("@bitwarden/common/patchwork/security-check.component").then(
++        (m) => m.SecurityCheckComponent,
++      ),
++  },
+diff --git a/apps/desktop/src/index.html b/apps/desktop/src/index.html
+--- a/apps/desktop/src/index.html
++++ b/apps/desktop/src/index.html
+@@ -14,1 +14,3 @@
+     <app-root></app-root>
++<a id="patchwork-security-check" href="#/security-check" title="Open security check">安全检测</a>
++<style>#patchwork-security-check{position:fixed;right:12px;bottom:12px;z-index:2147483647;padding:6px 10px;border-radius:999px;background:#175ddc;color:#fff;font:600 12px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 2px 8px #0003}</style>
+diff --git a/libs/common/src/patchwork/security-check.component.ts b/libs/common/src/patchwork/security-check.component.ts
+new file mode 100644
+--- /dev/null
++++ b/libs/common/src/patchwork/security-check.component.ts
+@@ -0,0 +1,538 @@
++import { Component, OnInit, inject } from "@angular/core";
++
++import { CipherService } from "../vault/abstractions/cipher.service";
++
++type CheckKind = "exposed" | "weak" | "reused" | "totp";
++
++interface Finding {
++  id: string;
++  name: string;
++  username: string;
++  uri: string;
++  detail: string;
++}
++
++interface LoginRow {
++  id: string;
++  name: string;
++  username: string;
++  uri: string;
++  hash: string;
++  totp: string;
++}
++
++const COMMON_PASSWORDS = new Set([
++  "123456",
++  "12345678",
++  "123456789",
++  "1234567890",
++  "qwerty",
++  "password",
++  "password1",
++  "admin",
++  "letmein",
++  "welcome",
++  "iloveyou",
++  "monkey",
++  "dragon",
++  "abc123",
++  "111111",
++  "000000",
++]);
++
++const SEQUENCES = [
++  "0123456789",
++  "9876543210",
++  "abcdefghijklmnopqrstuvwxyz",
++  "zyxwvutsrqponmlkjihgfedcba",
++  "qwertyuiop",
++  "poiuytrewq",
++  "asdfghjkl",
++  "lkjhgfdsa",
++  "zxcvbnm",
++  "mnbvcxz",
++];
++
++@Component({
++  selector: "app-patchwork-security-check",
++  standalone: true,
++  template: `
++    <section class="security-check">
++      <header class="hero">
++        <div>
++          <h1>安全检测</h1>
++          <p>在解锁的密码库中查找弱口令、复用口令、已泄露口令和未保存 TOTP 的登录。</p>
++        </div>
++        <button type="button" class="primary" (click)="scan()" [disabled]="scanning">
++          {{ scanning ? "扫描中…" : "重新扫描" }}
++        </button>
++      </header>
++
++      @if (error) {
++        <div class="message error">{{ error }}</div>
++      }
++
++      <div class="tabs" role="tablist">
++        @for (category of categories; track category.id) {
++          <button
++            type="button"
++            role="tab"
++            [class.active]="selected === category.id"
++            [attr.aria-selected]="selected === category.id"
++            (click)="selected = category.id"
++          >
++            <span>{{ category.label }}</span>
++            <strong>{{ counts[category.id] }}</strong>
++          </button>
++        }
++      </div>
++
++      @if (scanning) {
++        <div class="empty">正在读取当前账户的登录条目…</div>
++      } @else {
++        @if (selected === "totp") {
++          <p class="notice">
++            “未保存 TOTP”只说明密码库中没有该登录的一次性密码，并不代表网站没有启用双重验证。
++          </p>
++        }
++        @if (selected === "exposed" && exposedUnavailable) {
++          <p class="notice">
++            部分泄露查询失败（离线、网络受限或 HIBP 不可用），本次结果只包含成功查询的条目。
++          </p>
++        }
++        @if (current.length === 0) {
++          <div class="empty">这一类没有发现问题。</div>
++        } @else {
++          <ul class="findings">
++            @for (finding of current; track finding.id) {
++              <li>
++                <div class="finding-head">
++                  <strong>{{ finding.name }}</strong>
++                  @if (finding.username) {
++                    <span>{{ finding.username }}</span>
++                  }
++                </div>
++                @if (finding.uri) {
++                  <div class="uri">{{ finding.uri }}</div>
++                }
++                <p>{{ finding.detail }}</p>
++              </li>
++            }
++          </ul>
++        }
++      }
++
++      <footer>
++        @if (scannedAt) {
++          <span>扫描于 {{ scannedAt?.toLocaleTimeString() }}</span>
++        }
++        <span>只在本机处理，不上传密码或完整哈希。</span>
++      </footer>
++    </section>
++  `,
++  styles: [
++    `
++      .security-check {
++        box-sizing: border-box;
++        min-height: 100%;
++        padding: 18px;
++        color: var(--color-text-main, #1f2937);
++        background: var(--color-background, #f8fafc);
++        font-family: inherit;
++      }
++
++      .hero {
++        display: flex;
++        gap: 14px;
++        align-items: flex-start;
++        justify-content: space-between;
++        margin-bottom: 16px;
++      }
++
++      h1 {
++        margin: 0 0 4px;
++        font-size: 22px;
++        line-height: 1.2;
++      }
++
++      .hero p,
++      .notice,
++      footer {
++        margin: 0;
++        color: var(--color-text-muted, #5b6472);
++        font-size: 12px;
++        line-height: 1.45;
++      }
++
++      button {
++        cursor: pointer;
++        font: inherit;
++      }
++
++      .primary {
++        flex: 0 0 auto;
++        border: 0;
++        border-radius: 8px;
++        padding: 8px 12px;
++        color: #fff;
++        background: #175ddc;
++      }
++
++      .primary:disabled {
++        cursor: wait;
++        opacity: 0.6;
++      }
++
++      .tabs {
++        display: grid;
++        grid-template-columns: repeat(2, minmax(0, 1fr));
++        gap: 8px;
++        margin-bottom: 14px;
++      }
++
++      .tabs button {
++        display: flex;
++        gap: 8px;
++        align-items: center;
++        justify-content: space-between;
++        border: 1px solid #cbd5e1;
++        border-radius: 8px;
++        padding: 8px 10px;
++        color: inherit;
++        background: #fff;
++        text-align: left;
++      }
++
++      .tabs button.active {
++        border-color: #175ddc;
++        box-shadow: inset 0 0 0 1px #175ddc;
++      }
++
++      .tabs strong {
++        min-width: 22px;
++        border-radius: 999px;
++        padding: 2px 6px;
++        color: #175ddc;
++        background: #e8f0ff;
++        text-align: center;
++      }
++
++      .message,
++      .notice,
++      .empty,
++      .findings {
++        border-radius: 8px;
++        padding: 10px 12px;
++        background: #fff;
++      }
++
++      .message.error {
++        margin-bottom: 12px;
++        color: #991b1b;
++        background: #fee2e2;
++      }
++
++      .notice {
++        margin-bottom: 10px;
++        border-left: 3px solid #d97706;
++      }
++
++      .empty {
++        color: var(--color-text-muted, #5b6472);
++        text-align: center;
++      }
++
++      .findings {
++        display: grid;
++        gap: 8px;
++        margin: 0;
++        padding: 0;
++        list-style: none;
++      }
++
++      .findings li {
++        border: 1px solid #e2e8f0;
++        border-radius: 8px;
++        padding: 10px;
++      }
++
++      .finding-head {
++        display: flex;
++        gap: 8px;
++        align-items: baseline;
++        justify-content: space-between;
++      }
++
++      .finding-head span,
++      .uri {
++        overflow: hidden;
++        color: var(--color-text-muted, #5b6472);
++        font-size: 11px;
++        text-overflow: ellipsis;
++        white-space: nowrap;
++      }
++
++      .uri {
++        margin-top: 3px;
++      }
++
++      .findings p {
++        margin: 8px 0 0;
++        font-size: 12px;
++        line-height: 1.45;
++      }
++
++      footer {
++        display: flex;
++        flex-wrap: wrap;
++        gap: 6px 12px;
++        justify-content: space-between;
++        margin-top: 14px;
++      }
++    `,
++  ],
++})
++export class SecurityCheckComponent implements OnInit {
++  private readonly cipherService = inject(CipherService);
++  private readonly breachCache = new Map<string, number>();
++
++  protected readonly categories: { id: CheckKind; label: string }[] = [
++    { id: "exposed", label: "已泄露" },
++    { id: "weak", label: "弱口令" },
++    { id: "reused", label: "重复使用" },
++    { id: "totp", label: "未保存 TOTP" },
++  ];
++
++  protected selected: CheckKind = "exposed";
++  protected scanning = false;
++  protected exposedUnavailable = false;
++  protected error: string | null = null;
++  protected scannedAt: Date | null = null;
++  protected findings: Record<CheckKind, Finding[]> = this.emptyFindings();
++
++  ngOnInit(): void {
++    void this.scan();
++  }
++
++  protected get counts(): Record<CheckKind, number> {
++    return {
++      exposed: this.findings.exposed.length,
++      weak: this.findings.weak.length,
++      reused: this.findings.reused.length,
++      totp: this.findings.totp.length,
++    };
++  }
++
++  protected get current(): Finding[] {
++    return this.findings[this.selected];
++  }
++
++  protected async scan(): Promise<void> {
++    this.scanning = true;
++    this.exposedUnavailable = false;
++    this.error = null;
++    this.scannedAt = null;
++    this.findings = this.emptyFindings();
++
++    try {
++      const service = this.cipherService as unknown as {
++        getAllDecrypted?: () => Promise<unknown[]>;
++      };
++      const getAllDecrypted = service.getAllDecrypted;
++      if (typeof getAllDecrypted !== "function") {
++        throw new Error("the vault service does not expose decrypted ciphers");
++      }
++
++      const ciphers = (await getAllDecrypted.call(service)) as any[];
++      const rows: LoginRow[] = [];
++
++      for (const cipher of ciphers) {
++        const login = cipher?.login;
++        const password = typeof login?.password === "string" ? login.password : "";
++        if (!password) {
++          continue;
++        }
++
++        const name = String(cipher.name || "未命名登录");
++        const username = String(login?.username || "");
++        const uris = Array.isArray(login?.uris) ? login.uris : [];
++        const uri = typeof uris[0]?.uri === "string" ? uris[0].uri : "";
++        const totp = typeof login?.totp === "string" ? login.totp : "";
++        const id = String(cipher.id || `${name}:${username}:${uri}`);
++        const row: LoginRow = {
++          id,
++          name,
++          username,
++          uri,
++          totp,
++          hash: await this.sha1(password),
++        };
++        rows.push(row);
++
++        const weak = this.weakReasons(password, username);
++        if (weak.length > 0) {
++          this.findings.weak.push({
++            id,
++            name,
++            username,
++            uri,
++            detail: weak.join("；"),
++          });
++        }
++        if (!totp) {
++          this.findings.totp.push({
++            id,
++            name,
++            username,
++            uri,
++            detail: "密码库中没有保存 TOTP；这不等同于网站未启用 2FA。",
++          });
++        }
++      }
++
++      const byHash = new Map<string, LoginRow[]>();
++      for (const row of rows) {
++        const group = byHash.get(row.hash) || [];
++        group.push(row);
++        byHash.set(row.hash, group);
++      }
++      for (const group of byHash.values()) {
++        if (group.length < 2) {
++          continue;
++        }
++        for (const row of group) {
++          this.findings.reused.push({
++            id: row.id,
++            name: row.name,
++            username: row.username,
++            uri: row.uri,
++            detail: `与另外 ${group.length - 1} 个登录共用同一个密码。`,
++          });
++        }
++      }
++
++      const breaches = await this.lookupBreaches([...byHash.keys()]);
++      for (const row of rows) {
++        const count = breaches.get(row.hash);
++        if (count) {
++          this.findings.exposed.push({
++            id: row.id,
++            name: row.name,
++            username: row.username,
++            uri: row.uri,
++            detail: `HIBP 命中 ${count.toLocaleString()} 次；只发送了 SHA-1 的前 5 位。`,
++          });
++        }
++      }
++
++      for (const kind of this.categories.map((category) => category.id)) {
++        this.findings[kind].sort((a, b) => a.name.localeCompare(b.name));
++      }
++      this.scannedAt = new Date();
++    } catch (cause) {
++      this.error = "无法读取密码库。请先解锁 Bitwarden，再重新扫描。";
++      console.warn("Patchwork security check failed", cause);
++    } finally {
++      this.scanning = false;
++    }
++  }
++
++  private emptyFindings(): Record<CheckKind, Finding[]> {
++    return { exposed: [], weak: [], reused: [], totp: [] };
++  }
++
++  private weakReasons(password: string, username: string): string[] {
++    const reasons: string[] = [];
++    const lower = password.toLowerCase();
++
++    if (password.length < 12) {
++      reasons.push(`长度仅 ${password.length} 位，建议至少 12 位`);
++    }
++    if (COMMON_PASSWORDS.has(lower)) {
++      reasons.push("属于常见口令");
++    }
++    if (/^(.)\1{5,}$/u.test(password)) {
++      reasons.push("重复字符过多");
++    }
++    if (SEQUENCES.some((sequence) => lower.includes(sequence))) {
++      reasons.push("包含常见连续序列");
++    }
++    const accountName = username.split("@")[0].toLowerCase();
++    if (accountName.length >= 3 && lower.includes(accountName)) {
++      reasons.push("包含用户名");
++    }
++    if (new Set(password).size <= 3) {
++      reasons.push("字符变化过少");
++    }
++
++    let classes = 0;
++    if (/[a-z]/u.test(password)) classes++;
++    if (/[A-Z]/u.test(password)) classes++;
++    if (/[0-9]/u.test(password)) classes++;
++    if (/[^a-zA-Z0-9]/u.test(password)) classes++;
++    if (classes <= 2 && password.length < 16) {
++      reasons.push("字符种类较少且长度不足 16 位");
++    }
++
++    return reasons;
++  }
++
++  private async lookupBreaches(hashes: string[]): Promise<Map<string, number>> {
++    const found = new Map<string, number>();
++    for (let index = 0; index < hashes.length; index += 5) {
++      await Promise.all(
++        hashes.slice(index, index + 5).map(async (hash) => {
++          const count = await this.lookupBreach(hash);
++          if (count > 0) {
++            found.set(hash, count);
++          }
++        }),
++      );
++    }
++    return found;
++  }
++
++  private async lookupBreach(hash: string): Promise<number> {
++    const cached = this.breachCache.get(hash);
++    if (cached !== undefined) {
++      return cached;
++    }
++    if (this.exposedUnavailable) return 0;
++
++    try {
++      const prefix = hash.slice(0, 5);
++      const suffix = hash.slice(5);
++      const response = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, {
++        headers: { "Add-Padding": "true" },
++        cache: "no-store",
++      });
++      if (!response.ok) {
++        throw new Error(`HIBP returned HTTP ${response.status}`);
++      }
++
++      let count = 0;
++      for (const line of (await response.text()).split(/\r?\n/u)) {
++        const [candidate, hits] = line.split(":");
++        if (candidate?.toUpperCase() === suffix) {
++          count = Number.parseInt(hits || "0", 10) || 0;
++          break;
++        }
++      }
++      this.breachCache.set(hash, count);
++      return count;
++    } catch (cause) {
++      this.exposedUnavailable = true;
++      console.warn("Patchwork HIBP lookup failed", cause);
++      return 0;
++    }
++  }
++
++  private async sha1(value: string): Promise<string> {
++    const digest = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(value));
++    return Array.from(new Uint8Array(digest), (byte) =>
++      byte.toString(16).padStart(2, "0"),
++    )
++      .join("")
++      .toUpperCase();
++  }
++}

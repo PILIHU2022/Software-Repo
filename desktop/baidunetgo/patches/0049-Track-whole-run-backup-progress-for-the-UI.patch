@@ -1,0 +1,368 @@
+From d8d3bbcef1054a15c1e5e7167d51409c002690ee Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Mon, 23 Nov 2026 23:59:00 +0800
+Subject: [PATCH] Track whole-run backup progress for the page
+
+---
+ internal/backup/backup.go      | 159 +++++++++++++++++++++++++++++----
+ internal/backup/backup_test.go |  37 ++++++++
+ 2 files changed, 179 insertions(+), 17 deletions(-)
+
+diff --git a/internal/backup/backup.go b/internal/backup/backup.go
+index 92efa27..1f4a115 100644
+--- a/internal/backup/backup.go
++++ b/internal/backup/backup.go
+@@ -133,6 +133,14 @@ type Progress struct {
+ 	// bytes as the client sends them, and its end with Done equal to Total.
+ 	Done  int64
+ 	Total int64
++	// RunDone and RunTotal are the bytes of the whole run: RunTotal is the
++	// size of every file the scan will upload, and RunDone counts those
++	// already finished plus the bytes of every file still in flight. RunTotal
++	// is 0 while the run is still scanning, and is set once before the
++	// uploads start, so a page can show one percentage for the run rather
++	// than one that restarts with every file.
++	RunDone  int64
++	RunTotal int64
+ 	// Files is how many files the walk has found so far in the whole run;
+ 	// Uploaded, Skipped and Failed count the files finished so far.
+ 	Files     int
+@@ -218,6 +226,7 @@ func Run(ctx context.Context, cl Client, cfg Config, st *State, passphrase strin
+ 		listings: map[string]map[string]bool{},
+ 		made:     map[string]bool{},
+ 		dirErr:   map[string]error{},
++		live:     map[int64]int64{},
+ 	}
+ 	return r.run(ctx)
+ }
+@@ -267,6 +276,10 @@ type pending struct {
+ 	remote  string // full netdisk path, ".gpg" suffix included when encrypting
+ 	size    int64
+ 	modNano int64
++	// id is unique among the run's uploads. Two configured folders may map
++	// to the same netdisk path, so the remote path alone cannot key the
++	// bytes in flight without one upload overwriting the other's progress.
++	id int64
+ }
+ 
+ // runner is one run's state.
+@@ -284,6 +297,15 @@ type runner struct {
+ 	mu    sync.Mutex // guards st, res and the counters below
+ 	res   Result
+ 	files int // files the walk found so far, for Progress.Files
++	// totalBytes is every file the scan will upload, and doneBytes the bytes
++	// of the files finished. live holds the bytes the client reports for each
++	// upload still in flight, by the job's id, so that RunDone counts all
++	// parallel uploads: a file that starts reads 0 there, and the finished
++	// bytes move to doneBytes when it leaves, which keeps RunDone from going
++	// back or jumping as the workers take turns.
++	totalBytes int64
++	doneBytes  int64
++	live       map[int64]int64
+ 
+ 	// The walk and the directory creation run in one goroutine.
+ 	listings map[string]map[string]bool // known entries of a listed parent
+@@ -291,8 +313,10 @@ type runner struct {
+ 	dirErr   map[string]error           // directories whose creation failed
+ }
+ 
+-// run walks and uploads every configured folder.
++// run walks every configured folder first, so that it knows the run's total
++// bytes before the first upload starts, and then uploads all the files.
+ func (r *runner) run(ctx context.Context) (Result, error) {
++	var jobs []pending
+ 	for _, f := range r.cfg.Folders {
+ 		if ctx.Err() != nil {
+ 			break
+@@ -319,11 +343,34 @@ func (r *runner) run(ctx context.Context) (Result, error) {
+ 		r.mu.Lock()
+ 		r.res.Folders++
+ 		r.mu.Unlock()
+-		if err := r.folder(ctx, abs, base); err != nil {
++		todo, err := r.planFolder(ctx, abs, base)
++		if err != nil {
+ 			// Only cancellation stops the run; file and folder failures were
+ 			// collected as they happened.
+ 			break
+ 		}
++		jobs = append(jobs, todo...)
++	}
++	if ctx.Err() == nil && len(jobs) > 0 {
++		var total int64
++		for i := range jobs {
++			jobs[i].id = int64(i + 1)
++		}
++		for _, p := range jobs {
++			total += p.size
++		}
++		r.mu.Lock()
++		r.totalBytes = total
++		r.mu.Unlock()
++		// The scan is done: the run's total is known from here on, and every
++		// later report can show one percentage for the whole run.
++		r.emit(Progress{})
++		if err := r.uploadAll(ctx, jobs); err != nil {
++			r.mu.Lock()
++			res := r.res
++			r.mu.Unlock()
++			return res, err
++		}
+ 	}
+ 	r.mu.Lock()
+ 	res := r.res
+@@ -334,26 +381,28 @@ func (r *runner) run(ctx context.Context) (Result, error) {
+ 	return res, nil
+ }
+ 
+-// folder backs up one local directory into the netdisk directory base.
+-func (r *runner) folder(ctx context.Context, local, base string) error {
++// planFolder collects what one local directory needs uploaded into the netdisk
++// directory base, and makes the netdisk folders they go in. Nothing is
++// uploaded here, so a run can add up every folder's bytes first.
++func (r *runner) planFolder(ctx context.Context, local, base string) ([]pending, error) {
+ 	files, err := r.walk(ctx, local, base)
+ 	if err != nil {
+-		return err
++		return nil, err
+ 	}
+ 	if len(files) == 0 {
+-		return nil
++		return nil, nil
+ 	}
+ 	// Make the remote folders first, in a fixed order, and only for the
+ 	// directories that hold something to upload.
+ 	var todo []pending
+ 	for _, p := range files {
+ 		if err := ctx.Err(); err != nil {
+-			return err
++			return nil, err
+ 		}
+ 		dir := path.Dir(p.remote)
+ 		if err := r.ensureDir(ctx, dir); err != nil {
+ 			if ctx.Err() != nil {
+-				return ctx.Err()
++				return nil, ctx.Err()
+ 			}
+ 			// One error for the directory; the files in it count as failed
+ 			// and are left out of the state, so the next run retries them.
+@@ -366,10 +415,7 @@ func (r *runner) folder(ctx context.Context, local, base string) error {
+ 		}
+ 		todo = append(todo, p)
+ 	}
+-	if len(todo) == 0 {
+-		return nil
+-	}
+-	return r.uploadAll(ctx, todo)
++	return todo, nil
+ }
+ 
+ // walk collects the files under local, in sorted order, reporting the ones
+@@ -412,6 +458,8 @@ func (r *runner) walk(ctx context.Context, local, base string) ([]pending, error
+ 		if d.Type()&fs.ModeSymlink != 0 {
+ 			// Symbolic links are not followed: what they point at is not part
+ 			// of this tree, and their own size would never match the upload.
++			// Nothing is sent for it, so its bytes are not in RunTotal either,
++			// and its report carries no byte counts.
+ 			r.mu.Lock()
+ 			r.files++
+ 			r.res.Skipped++
+@@ -439,7 +487,9 @@ func (r *runner) walk(ctx context.Context, local, base string) ([]pending, error
+ 			r.mu.Lock()
+ 			r.res.Skipped++
+ 			r.mu.Unlock()
+-			r.emit(Progress{Folder: local, File: rel, Remote: remote, Done: pd.size, Total: pd.size, Encrypted: r.cfg.Encrypt})
++			// A skipped file is not part of the run's bytes: reporting its
++			// size as done would make the run finish before it starts.
++			r.emit(Progress{Folder: local, File: rel, Remote: remote, Encrypted: r.cfg.Encrypt})
+ 			return nil
+ 		}
+ 		out = append(out, pd)
+@@ -577,10 +627,19 @@ feed:
+ 	for _, p := range jobs {
+ 		// The start of a file is reported here, by the one goroutine that
+ 		// hands the files out, so that the reports come in sorted order
+-		// however the workers happen to be scheduled.
++		// however the workers happen to be scheduled. Its slot in live starts
++		// at 0, so the run's done bytes count it as soon as it is handed out.
++		r.mu.Lock()
++		r.live[p.id] = 0
++		r.mu.Unlock()
+ 		r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Total: p.size, Encrypted: r.cfg.Encrypt})
+ 		select {
+ 		case <-ctx.Done():
++			// It was never handed to a worker: it leaves live again, so a
++			// canceled run does not count a file it never started.
++			r.mu.Lock()
++			delete(r.live, p.id)
++			r.mu.Unlock()
+ 			break feed
+ 		case ch <- p:
+ 		}
+@@ -610,11 +669,36 @@ func (r *runner) upload(ctx context.Context, p pending) {
+ 		local = temp
+ 	}
+ 	err := r.cl.Upload(ctx, local, p.remote, func(done, total int64) {
++		// An encrypted file is sent as its slightly larger .gpg copy: cap its
++		// contribution at the local size the run counts, so RunDone stays
++		// monotonic and never passes RunTotal. A client that reports a count
++		// smaller than before is ignored for the same reason.
++		sent := done
++		if sent > p.size {
++			sent = p.size
++		}
++		r.mu.Lock()
++		if sent < r.live[p.id] {
++			// A client that reports a smaller count than before must not
++			// make the run's total step back.
++			sent = r.live[p.id]
++		}
++		r.live[p.id] = sent
++		r.mu.Unlock()
+ 		r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Done: done, Total: total, Encrypted: r.cfg.Encrypt})
+ 	})
+ 	if err != nil {
+ 		if ctx.Err() != nil {
+-			// Canceled: not a failure of this file.
++			// Canceled: not a failure of this file. What it had sent is
++			// finished for the run's counters, so moving it to doneBytes
++			// keeps RunDone from stepping back as the other workers report
++			// before they stop.
++			r.mu.Lock()
++			if sent := r.live[p.id]; sent > 0 {
++				r.doneBytes += sent
++			}
++			delete(r.live, p.id)
++			r.mu.Unlock()
+ 			return
+ 		}
+ 		r.fail(p, err)
+@@ -624,8 +708,12 @@ func (r *runner) upload(ctx context.Context, p pending) {
+ 	r.st.Entries[p.local] = Entry{Size: p.size, ModNano: p.modNano, Remote: p.remote, At: time.Now()}
+ 	r.res.Uploaded++
+ 	r.res.Bytes += p.size
++	// The last report of a file counts all of it, even when the client sent
++	// no byte callback of its own.
++	r.live[p.id] = p.size
+ 	r.mu.Unlock()
+ 	r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Done: p.size, Total: p.size, Encrypted: r.cfg.Encrypt})
++	r.finishBytes(p)
+ }
+ 
+ // encrypted writes p's file encrypted into a new temporary file in os.TempDir
+@@ -668,6 +756,19 @@ func (c checkedReader) Read(p []byte) (int, error) {
+ 	return c.r.Read(p)
+ }
+ 
++// finishBytes moves a file's bytes from live to the run's finished total. It
++// runs after the file's last report, so that report still counts the file's
++// exact bytes in RunDone. A file that never started has no place in live and
++// no place in RunTotal either: it just leaves the run's counters alone.
++func (r *runner) finishBytes(p pending) {
++	r.mu.Lock()
++	if _, ok := r.live[p.id]; ok {
++		delete(r.live, p.id)
++		r.doneBytes += p.size
++	}
++	r.mu.Unlock()
++}
++
+ // fail records a file that could not be uploaded.
+ func (r *runner) fail(p pending, err error) {
+ 	r.addError(FileError{Local: p.local, Remote: p.remote, Err: err})
+@@ -675,12 +776,21 @@ func (r *runner) fail(p pending, err error) {
+ }
+ 
+ // failedFile counts a file as failed and reports the end of it, without
+-// recording another error (for the files under a failed directory).
++// recording another error (for the files under a failed directory). The
++// report still counts the file's bytes in live, as any last report does;
++// finishBytes then moves them to doneBytes, so the run's total keeps rising
++// to its end rather than stepping back on a failure.
+ func (r *runner) failedFile(p pending) {
+ 	r.mu.Lock()
+ 	r.res.Failed++
++	// A failed file is finished too: its last report counts its bytes, then
++	// finishBytes moves them to the run's finished total.
++	if _, ok := r.live[p.id]; ok {
++		r.live[p.id] = p.size
++	}
+ 	r.mu.Unlock()
+-	r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Total: p.size, Encrypted: r.cfg.Encrypt})
++	r.emit(Progress{Folder: p.folder, File: p.rel, Remote: p.remote, Done: p.size, Total: p.size, Encrypted: r.cfg.Encrypt})
++	r.finishBytes(p)
+ }
+ 
+ // addError collects an error of the run.
+@@ -701,6 +811,21 @@ func (r *runner) emit(p Progress) {
+ 	}
+ 	r.mu.Lock()
+ 	p.Files, p.Uploaded, p.Skipped, p.Failed = r.files, r.res.Uploaded, r.res.Skipped, r.res.Failed
++	// RunDone sums the finished files and every file still in flight: a
++	// finished file's last report already carries its bytes, so moving them
++	// to doneBytes afterwards keeps the total steady rather than resetting it
++	// to the one file a worker happens to report.
++	done := r.doneBytes
++	for _, n := range r.live {
++		done += n
++	}
++	// An encrypted file is sent as its slightly larger .gpg copy, so the
++	// client's byte count can pass the local total; the run never reads over
++	// 100%.
++	if r.totalBytes > 0 && done > r.totalBytes {
++		done = r.totalBytes
++	}
++	p.RunDone, p.RunTotal = done, r.totalBytes
+ 	r.mu.Unlock()
+ 	r.report(p)
+ }
+diff --git a/internal/backup/backup_test.go b/internal/backup/backup_test.go
+index 100bc0c..9a5d53a 100644
+--- a/internal/backup/backup_test.go
++++ b/internal/backup/backup_test.go
+@@ -447,6 +447,43 @@ func TestSecondRunSkips(t *testing.T) {
+ 	}
+ }
+ 
++// TestRunTotalProgress checks that a run reports its total bytes once it has
++// scanned every folder, that the done bytes never pass the total, and that the
++// last report of the run reaches it.
++func TestRunTotalProgress(t *testing.T) {
++	dir := t.TempDir()
++	write(t, dir, "a.txt", "hello")
++	write(t, dir, "sub/b.txt", "world!")
++	cl := newFake()
++	log := &reportLog{}
++	cfg := Config{Dest: "/备份", Folders: []Folder{{Local: dir, Remote: "照片"}}, Parallel: 2}
++	if _, err := Run(context.Background(), cl, cfg, NewState(), "", log.add); err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	total := int64(len("hello") + len("world!"))
++	var sawTotal, sawDone bool
++	for _, e := range log.all() {
++		if e.RunTotal != 0 && e.RunTotal != total {
++			t.Errorf("event %+v reports total %d, want 0 while scanning or %d", e, e.RunTotal, total)
++		}
++		if e.RunTotal > 0 && e.RunDone > e.RunTotal {
++			t.Errorf("event %+v counts more done than the run's total", e)
++		}
++		if e.RunTotal == total {
++			sawTotal = true
++			if e.RunDone == total {
++				sawDone = true
++			}
++		}
++	}
++	if !sawTotal {
++		t.Fatalf("no report carries the run's total %d: %+v", total, log.all())
++	}
++	if !sawDone {
++		t.Errorf("the run never reached its total: %+v", log.all())
++	}
++}
++
+ // TestChangedFileReuploaded checks that a file changed with its size kept is
+ // uploaded again, that a renamed file goes to a new, added remote path, and
+ // that nothing old is deleted.
+-- 
+2.47.3
+

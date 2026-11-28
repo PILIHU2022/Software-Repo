@@ -1,0 +1,434 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Tue, 24 Nov 2026 07:05:00 +0800
+Subject: [PATCH] Add long-press drag selection to the Android files screen
+
+The Android files browser had no way to pick rows, so a long press had
+nowhere to go and a drag only scrolled the list. Rows now carry a
+transient selection: a long press starts a range at that row, dragging
+extends it in display order (folders first, then files), and a second
+long press while rows are selected keeps the current selection as its
+base and adds another range instead of replacing it.
+
+Tapping a row toggles it while anything is selected and opens it
+otherwise, the path capsule shows the count and offers to clear the
+selection, and the system back clears it before unwinding the folder stack. The
+list watcher takes over the gesture on the Initial pass only once a row's
+own long press has started the selection, so a press that turns into a
+scroll before the timeout still scrolls and pull-to-refresh keeps
+working. Selection keys are pruned when the listing changes and cleared
+when the folder does.
+
+---
+  android/README.md                                  |   4 +-
+  .../pengstem/baidunetgo/ui/screens/FilesScreen.kt  | 218 +++++++++++++++++++--
+  android/app/src/main/res/values/strings.xml        |   3 +
+  3 files changed, 205 insertions(+), 20 deletions(-)
+
+diff --git a/android/README.md b/android/README.md
+index f583cc0..f6d8021 100644
+--- a/android/README.md
++++ b/android/README.md
+@@ -32,7 +32,9 @@ segment at its top.
+ - **文件** — the launch tab: a read-only browser of the netdisk in the Material 3
+   Expressive style — a floating capsule path bar, rounded tonal rows with rounded
+   icon containers grouped under 文件夹 / 文件; open folders, go up, pull to refresh,
+-  and a file's details (path, size, modified, MD5).
++  and a file's details (path, size, modified, MD5). Long-press and drag to select
++  a range of rows; long-press again to add another range, tap a row to toggle it,
++  and use the clear button or the system back to leave the selection.
+ - **查重** — a duplicate finder mirroring the desktop page: scan the whole netdisk by
+   size + MD5, view by 按重复组 or 按文件夹 (both foldable), the earliest copy of each
+   group is kept by default, and the selected spare copies are rechecked then moved to
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/FilesScreen.kt b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/FilesScreen.kt
+index bef8ba4..ffac5bf 100644
+--- a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/FilesScreen.kt
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/FilesScreen.kt
+@@ -1,8 +1,11 @@
+ package com.pengstem.baidunetgo.ui.screens
+ 
+ import androidx.activity.compose.BackHandler
++import androidx.compose.foundation.ExperimentalFoundationApi
+ import androidx.compose.foundation.background
+-import androidx.compose.foundation.clickable
++import androidx.compose.foundation.combinedClickable
++import androidx.compose.foundation.gestures.awaitEachGesture
++import androidx.compose.foundation.gestures.awaitFirstDown
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+@@ -16,12 +19,15 @@ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.foundation.lazy.items
++import androidx.compose.foundation.lazy.rememberLazyListState
+ import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.filled.ArrowBack
+ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
++import androidx.compose.material.icons.filled.Check
++import androidx.compose.material.icons.filled.Close
+ import androidx.compose.material.icons.filled.ErrorOutline
+ import androidx.compose.material.icons.filled.FolderOpen
+ import androidx.compose.material.icons.filled.FolderZip
+@@ -47,7 +53,10 @@ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
++import androidx.compose.ui.geometry.Offset
+ import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.input.pointer.PointerEventPass
++import androidx.compose.ui.input.pointer.pointerInput
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
+@@ -65,6 +74,8 @@ import com.pengstem.baidunetgo.ui.components.LabeledValue
+  * language. The path sits in a fixed capsule above the list; folders and files
+  * are rounded tonal rows grouped under small section labels. Folders open in
+  * place, files open a details dialog; nothing is downloaded or changed here.
++ * Long-pressing a row starts a drag selection, and long-pressing again while
++ * rows are selected adds another range to that selection.
+  */
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+@@ -74,15 +85,74 @@ fun FilesScreen(
+     modifier: Modifier = Modifier,
+ ) {
+     val files = state.files
++    val listState = rememberLazyListState()
+     var detail by remember { mutableStateOf<RemoteFile?>(null) }
++    var selected by remember { mutableStateOf(emptySet<String>()) }
++    // The selection as it stood when the current long-press drag began, so a
++    // second long-press drag adds a range instead of replacing the first one.
++    var dragBase by remember { mutableStateOf(emptySet<String>()) }
++    var dragAnchor by remember { mutableStateOf<String?>(null) }
++
++    val folders = files.entries.filter { it.isDir }
++    val plainFiles = files.entries.filterNot { it.isDir }
++    // The order the rows are drawn in, which is also the order a drag selects.
++    val rowKeys = (folders + plainFiles).map(::entryKey)
++    val rowKeySet = rowKeys.toSet()
+ 
+     // Load "/" the first time the tab is shown; after that the ViewModel keeps
+     // the listing until the user refreshes or opens another folder.
+     LaunchedEffect(Unit) {
+         if (!state.files.loaded) vm.filesEnter()
+     }
+-    // The system back unwinds our own path stack before it leaves the app.
+-    BackHandler(enabled = files.stack.isNotEmpty()) { vm.filesBack() }
++    // A selection belongs to the folder shown; leaving it or refreshing away
++    // some of its rows must not leave stale keys behind.
++    LaunchedEffect(files.path) {
++        selected = emptySet()
++        dragBase = emptySet()
++        dragAnchor = null
++    }
++    LaunchedEffect(rowKeys) {
++        selected = selected.intersect(rowKeySet)
++        dragBase = dragBase.intersect(rowKeySet)
++        val anchor = dragAnchor
++        if (anchor != null && anchor !in rowKeySet) dragAnchor = null
++    }
++    // The system back clears the selection first, then unwinds our own path
++    // stack, then leaves the app.
++    BackHandler(enabled = files.stack.isNotEmpty() || selected.isNotEmpty()) {
++        if (selected.isNotEmpty()) selected = emptySet() else vm.filesBack()
++    }
++
++    /** Starts a selection session at [key], keeping what was already selected. */
++    fun beginSelection(key: String) {
++        dragBase = selected
++        dragAnchor = key
++        selected = dragBase + key
++    }
++
++    /** A tap selects while a selection is active, and otherwise opens the row. */
++    fun tap(key: String, open: () -> Unit) {
++        if (selected.isEmpty()) {
++            open()
++        } else {
++            selected = if (key in selected) selected - key else selected + key
++        }
++    }
++
++    /** The row under [position], ignoring section labels and other list items. */
++    fun rowAt(position: Offset): String? =
++        listState.layoutInfo.visibleItemsInfo
++            .firstOrNull { position.y >= it.offset && position.y < it.offset + it.size }
++            ?.key
++            ?.let { it as? String }
++            ?.takeIf { it in rowKeySet }
++
++    /** Extends the current drag's range up to the row under [position]. */
++    fun extendSelection(position: Offset) {
++        val anchor = dragAnchor ?: return
++        val current = rowAt(position) ?: return
++        selected = dragBase + rangeKeys(rowKeys, anchor, current)
++    }
+ 
+     Column(modifier = modifier.fillMaxSize()) {
+         // The path bar is a fixed capsule above the list, not a scrolling row:
+@@ -92,6 +162,8 @@ fun FilesScreen(
+             path = files.path,
+             canGoUp = files.stack.isNotEmpty(),
+             onUp = vm::filesUp,
++            selectedCount = selected.size,
++            onClearSelection = { selected = emptySet() },
+         )
+ 
+         PullToRefreshBox(
+@@ -102,7 +174,53 @@ fun FilesScreen(
+                 .fillMaxWidth(),
+         ) {
+             LazyColumn(
+-                modifier = Modifier.fillMaxSize(),
++                state = listState,
++                modifier = Modifier
++                    .fillMaxSize()
++                    // A row's long press starts the selection; from there this
++                    // watcher takes over the gesture on the Initial pass, before
++                    // the list can scroll, and extends the range across rows.
++                    // Before the long press it consumes nothing, so a press
++                    // that becomes a scroll still scrolls. Keyed on the folder
++                    // and its rows only, so a selection change never cancels a
++                    // running gesture.
++                    .pointerInput(files.path, rowKeys) {
++                        awaitEachGesture {
++                            // A gesture that is just beginning cannot be the
++                            // continuation of an older drag, so drop any anchor
++                            // a cancelled or interrupted gesture left behind.
++                            dragAnchor = null
++                            val down = awaitFirstDown(
++                                requireUnconsumed = false,
++                                pass = PointerEventPass.Initial,
++                            )
++                            val pressed = rowAt(down.position)
++                            if (pressed == null) return@awaitEachGesture
++
++                            var dragging = false
++                            while (true) {
++                                val event = awaitPointerEvent(PointerEventPass.Initial)
++                                val change = event.changes.firstOrNull { it.id == down.id }
++                                if (change == null || !change.pressed) {
++                                    // The gesture is over, whether or not it ever
++                                    // moved; a long press that stayed put still
++                                    // leaves its own selection behind.
++                                    if (dragAnchor == pressed) dragAnchor = null
++                                    return@awaitEachGesture
++                                }
++                                if (!dragging) {
++                                    // The row turns this press into a long press
++                                    // on its own timeout; until it does, leave
++                                    // the gesture to it and to the list's scroll.
++                                    if (dragAnchor == null) continue
++                                    if (dragAnchor != pressed) return@awaitEachGesture
++                                    dragging = true
++                                }
++                                change.consume()
++                                extendSelection(change.position)
++                            }
++                        }
++                    },
+                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                 verticalArrangement = Arrangement.spacedBy(6.dp),
+             ) {
+@@ -143,19 +261,23 @@ fun FilesScreen(
+                     }
+ 
+                     else -> {
+-                        val folders = files.entries.filter { it.isDir }
+-                        val plainFiles = files.entries.filterNot { it.isDir }
+                         if (folders.isNotEmpty()) {
+                             item(key = "files-section-folders") {
+                                 SectionLabel(stringResource(R.string.files_section_folders))
+                             }
+                             items(
+                                 items = folders,
+-                                key = { entry -> "dir:${entry.fsId}:${entry.name}" },
++                                key = { entry -> entryKey(entry) },
+                             ) { entry ->
+                                 EntryRow(
+                                     entry = entry,
+-                                    onClick = { vm.openFilesDir(fullPath(files.path, entry.name)) },
++                                    selected = entryKey(entry) in selected,
++                                    onClick = {
++                                        tap(entryKey(entry)) {
++                                            vm.openFilesDir(fullPath(files.path, entry.name))
++                                        }
++                                    },
++                                    onLongClick = { beginSelection(entryKey(entry)) },
+                                 )
+                             }
+                         }
+@@ -165,9 +287,14 @@ fun FilesScreen(
+                             }
+                             items(
+                                 items = plainFiles,
+-                                key = { entry -> "file:${entry.fsId}:${entry.name}" },
++                                key = { entry -> entryKey(entry) },
+                             ) { entry ->
+-                                EntryRow(entry = entry, onClick = { detail = entry })
++                                EntryRow(
++                                    entry = entry,
++                                    selected = entryKey(entry) in selected,
++                                    onClick = { tap(entryKey(entry)) { detail = entry } },
++                                    onLongClick = { beginSelection(entryKey(entry)) },
++                                )
+                             }
+                         }
+                     }
+@@ -185,12 +312,17 @@ fun FilesScreen(
+     }
+ }
+ 
+-/** The capsule path bar: up button, a leading folder glyph and the netdisk path. */
++/**
++ * The capsule path bar: up button, a leading folder glyph and the netdisk path.
++ * While rows are selected it shows how many and offers a way out of selection.
++ */
+ @Composable
+ private fun FilesPathBar(
+     path: String,
+     canGoUp: Boolean,
+     onUp: () -> Unit,
++    selectedCount: Int,
++    onClearSelection: () -> Unit,
+ ) {
+     Surface(
+         shape = CircleShape,
+@@ -204,7 +336,14 @@ private fun FilesPathBar(
+             modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+             verticalAlignment = Alignment.CenterVertically,
+         ) {
+-            if (canGoUp) {
++            if (selectedCount > 0) {
++                IconButton(onClick = onClearSelection) {
++                    Icon(
++                        imageVector = Icons.Filled.Close,
++                        contentDescription = stringResource(R.string.files_clear_selection),
++                    )
++                }
++            } else if (canGoUp) {
+                 IconButton(onClick = onUp) {
+                     Icon(
+                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+@@ -215,16 +354,24 @@ private fun FilesPathBar(
+                 Spacer(Modifier.width(8.dp))
+             }
+             Icon(
+-                imageVector = Icons.Filled.FolderOpen,
++                imageVector = if (selectedCount > 0) Icons.Filled.Check else Icons.Filled.FolderOpen,
+                 contentDescription = null,
+                 tint = MaterialTheme.colorScheme.primary,
+                 modifier = Modifier.size(20.dp),
+             )
+             Spacer(Modifier.width(8.dp))
+             Text(
+-                text = path.ifBlank { "/" },
++                text = if (selectedCount > 0) {
++                    stringResource(R.string.files_selected_count, selectedCount)
++                } else {
++                    path.ifBlank { "/" }
++                },
+                 style = MaterialTheme.typography.titleSmall,
+-                color = MaterialTheme.colorScheme.onSurface,
++                color = if (selectedCount > 0) {
++                    MaterialTheme.colorScheme.primary
++                } else {
++                    MaterialTheme.colorScheme.onSurface
++                },
+                 maxLines = 1,
+                 overflow = TextOverflow.Ellipsis,
+                 modifier = Modifier
+@@ -246,20 +393,35 @@ private fun SectionLabel(text: String) {
+     )
+ }
+ 
+-/** One listing row: a rounded tonal row with an icon container; folders open, files show details. */
++/**
++ * One listing row: a rounded tonal row with an icon container. A tap opens it
++ * unless rows are selected, in which case it toggles this row; a long press
++ * starts a drag selection.
++ */
++@OptIn(ExperimentalFoundationApi::class)
+ @Composable
+ private fun EntryRow(
+     entry: RemoteFile,
++    selected: Boolean,
+     onClick: () -> Unit,
++    onLongClick: () -> Unit,
+ ) {
+     Surface(
+         shape = MaterialTheme.shapes.large,
+-        color = MaterialTheme.colorScheme.surfaceBright,
++        color = if (selected) {
++            MaterialTheme.colorScheme.secondaryContainer
++        } else {
++            MaterialTheme.colorScheme.surfaceBright
++        },
+         modifier = Modifier.fillMaxWidth(),
+     ) {
+         Row(
+             modifier = Modifier
+-                .clickable(onClick = onClick)
++                .combinedClickable(
++                    onClick = onClick,
++                    onLongClickLabel = stringResource(R.string.files_select),
++                    onLongClick = onLongClick,
++                )
+                 .padding(horizontal = 12.dp, vertical = 10.dp),
+             verticalAlignment = Alignment.CenterVertically,
+         ) {
+@@ -309,7 +471,13 @@ private fun EntryRow(
+                     )
+                 }
+             }
+-            if (entry.isDir) {
++            if (selected) {
++                Icon(
++                    imageVector = Icons.Filled.Check,
++                    contentDescription = null,
++                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
++                )
++            } else if (entry.isDir) {
+                 Icon(
+                     imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                     contentDescription = stringResource(R.string.files_folder),
+@@ -355,6 +523,18 @@ private fun FileDetailsDialog(
+ private fun fullPath(dir: String, name: String): String =
+     if (dir.isBlank() || dir == "/") "/$name" else "$dir/$name"
+ 
++/** The selection key of [entry]: its type, fs id and name, so it is unique in a folder. */
++private fun entryKey(entry: RemoteFile): String =
++    "${if (entry.isDir) "dir" else "file"}:${entry.fsId}:${entry.name}"
++
++/** Every key from [from] to [to] in display order, both ends included. */
++private fun rangeKeys(order: List<String>, from: String, to: String): List<String> {
++    val start = order.indexOf(from)
++    val end = order.indexOf(to)
++    if (start < 0 || end < 0) return emptyList()
++    return order.subList(minOf(start, end), maxOf(start, end) + 1)
++}
++
+ /** A file-type icon chosen from the extension (picture/movie/music/pdf/archive/generic). */
+ private fun fileIcon(name: String): ImageVector {
+     val extension = name.substringAfterLast('.', "").lowercase()
+diff --git a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
+index 69cc6ae..9601921 100644
+--- a/android/app/src/main/res/values/strings.xml
++++ b/android/app/src/main/res/values/strings.xml
+@@ -68,6 +68,9 @@
+     <string name="files_size">大小</string>
+     <string name="files_modified">修改时间</string>
+     <string name="files_md5">MD5</string>
++    <string name="files_select">选择</string>
++    <string name="files_selected_count">已选 %1$d 项</string>
++    <string name="files_clear_selection">取消选择</string>
+ 
+     <!-- 查重 screen -->
+     <string name="dedup_scope">扫描范围</string>
+
+-- 
+2.47.3
