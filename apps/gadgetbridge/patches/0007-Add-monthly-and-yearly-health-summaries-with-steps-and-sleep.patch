@@ -151,7 +151,7 @@ index f2f8cbb8e1..a68ba1f8e6 100644
 +        final MenuItem activitySummaryItem = drawerMenu.add(
 +                activitySummaryGroup,
 +                MENU_ACTIVITY_SUMMARY,
-+                Integer.MAX_VALUE,
++                0xFFFF, // 16-bit max menu order; larger values set an invalid category
 +                R.string.activity_summary_title);
 +        activitySummaryItem.setIcon(R.drawable.ic_activity_summary);
          final List<GbDrawerNavItem> drawerItems = new ArrayList<>(drawerMenu.size());
