@@ -386,6 +386,14 @@ jobs:
       (needs.build.result == 'success' || needs.build.result == 'failure')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Serialize every publish. Several app pipelines (basicsync, gadgetbridge,
+    # ...) can reach this job within minutes of each other; without a shared
+    # concurrency group they race on fdroid/repo/index-* and leave git conflict
+    # markers that the Pages steps below then deploy. cancel-in-progress: false
+    # queues the runs instead of cancelling them, so no app's APK is dropped.
+    concurrency:
+      group: fdroid-publish
+      cancel-in-progress: false
     outputs:
       # True only when this run really had an APK to publish. The download is
       # allowed to fail, so "the publish job succeeded" alone is not enough.
@@ -522,6 +530,10 @@ jobs:
             echo "::warning::No build-info.txt or APK for '$APP' (build failed or artifact missing); keeping previous build state"
           fi
           printf 'Build state: %s\n' "$state"
+          # Hand the computed state to the commit step: if a concurrent publish
+          # forces us to regenerate the index there, it must merge the same
+          # state instead of dropping this app's upstream commit.
+          printf '%s' "$state" > "$RUNNER_TEMP/publish-state.json"
           ./scripts/publish-fdroid.sh --apk-dir dist --state-json "$state"
 
       # Keep README.md / README.zh-CN.md in sync with what was actually built:
@@ -548,14 +560,52 @@ jobs:
           set -euo pipefail
           git config user.name "DeepSeek Harness"
           git config user.email "noreply@deepseek.com"
+
+          state="$(cat "$RUNNER_TEMP/publish-state.json" 2>/dev/null || true)"
+          [[ -n "$state" ]] || state='{}'
+          push_remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
           git add fdroid/repo fdroid/.build-state.json README.md README.zh-CN.md
           if git diff --cached --quiet; then
             echo "No repository changes to commit"
             exit 0
           fi
           git commit -m "Update F-Droid repo [skip ci]"
-          git pull --rebase origin main
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:main
+
+          # Two independent `fdroid update` runs never produce byte-identical
+          # JSON, so when a concurrent publish landed first, `git pull --rebase`
+          # conflicts on the *generated* index files. Leaving that rebase in
+          # place is what put `<<<<<<<` markers into the deployed index. So on
+          # every failed attempt we abort the rebase and rebuild the whole index
+          # from the *current* origin/main tree plus dist/, which yields a clean,
+          # complete index again. Retry the push up to three times.
+          for attempt in 1 2 3; do
+            echo "==> Publish attempt ${attempt}/3"
+            git rebase --abort 2>/dev/null || true
+            # Fast path: nothing else moved, so a plain rebase + push works.
+            if git pull --rebase origin main; then
+              if git push "$push_remote" HEAD:main; then
+                echo "::notice::Published fdroid/repo to main"
+                exit 0
+              fi
+            fi
+            # Conflict or push race: discard the conflicted/generated index and
+            # regenerate it on top of the latest main.
+            git rebase --abort 2>/dev/null || true
+            git fetch --quiet origin main
+            git reset --hard origin/main
+            ./scripts/publish-fdroid.sh --apk-dir dist --state-json "$state"
+            ./scripts/update-readme.sh --apk-dir dist
+            git add fdroid/repo fdroid/.build-state.json README.md README.zh-CN.md
+            if git diff --cached --quiet; then
+              echo "No repository changes to commit after regenerate"
+              exit 0
+            fi
+            git commit -m "Update F-Droid repo [skip ci]"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::error::Could not publish fdroid/repo to main after 3 attempts"
+          exit 1
 
       - name: Report commit-back failure
         if: steps.commit.outcome == 'failure'
@@ -563,13 +613,68 @@ jobs:
           echo "::warning title=Commit-back failed::Pushing fdroid/repo to main failed (often HTTP 403)."
           echo "::warning::Pages will still be deployed from this run's artifact. To fix the commit-back, set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions'."
 
+      # Last line of defence before anything reaches Pages. The publish job
+      # deploys fdroid/ verbatim, so refuse to upload if the generated indexes
+      # are unparseable or still carry git conflict markers — even if the commit
+      # step above failed for some other reason. This step is NOT
+      # continue-on-error: a broken index must fail the job (and therefore skip
+      # every Pages step below) rather than go live.
+      - name: Verify F-Droid index is clean
+        id: index_check
+        if: steps.apks.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          git rebase --abort 2>/dev/null || true
+          python3 - <<'PY'
+          import json
+          import re
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          repo = Path("fdroid/repo")
+          errors = []
+
+          for name in ("index-v1.json", "index-v2.json"):
+              try:
+                  json.loads((repo / name).read_text(encoding="utf-8"))
+              except Exception as exc:
+                  errors.append(f"{name}: invalid JSON ({exc})")
+
+          try:
+              ET.parse(repo / "index.xml")
+          except Exception as exc:
+              errors.append(f"index.xml: invalid XML ({exc})")
+
+          marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)")
+          for name in ("index-v1.json", "index-v2.json", "index.xml"):
+              path = repo / name
+              if not path.is_file():
+                  errors.append(f"{name}: missing")
+                  continue
+              for lineno, line in enumerate(
+                  path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+              ):
+                  if marker.match(line):
+                      errors.append(f"{name}: git conflict marker on line {lineno}")
+                      break
+
+          if errors:
+              for message in errors:
+                  print(f"::error::{message}")
+              print("::error::Refusing to deploy a corrupted F-Droid index")
+              sys.exit(1)
+
+          print("F-Droid indexes are clean: index-v1/v2 JSON parse, index.xml parses, no conflict markers")
+          PY
+
       # Pages is optional: enablement needs a PAT/App token (a plain
       # GITHUB_TOKEN cannot create the Pages site), so these steps must not
       # turn a successful publish into a red run. The owner enables Pages once
       # in Settings -> Pages -> Source: GitHub Actions.
       - name: Configure Pages
         id: pages
-        if: steps.apks.outputs.found == 'true'
+        if: steps.apks.outputs.found == 'true' && steps.index_check.outcome == 'success'
         continue-on-error: true
         uses: actions/configure-pages@v6
         with:
@@ -577,7 +682,7 @@ jobs:
 
       - name: Upload Pages artifact
         id: pages_artifact
-        if: steps.apks.outputs.found == 'true'
+        if: steps.apks.outputs.found == 'true' && steps.index_check.outcome == 'success'
         continue-on-error: true
         uses: actions/upload-pages-artifact@v5
         with:
@@ -585,7 +690,7 @@ jobs:
 
       - name: Deploy Pages
         id: deployment
-        if: steps.apks.outputs.found == 'true'
+        if: steps.apks.outputs.found == 'true' && steps.index_check.outcome == 'success'
         continue-on-error: true
         uses: actions/deploy-pages@v5
 

@@ -42,6 +42,59 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Refuse to publish a corrupted index. This safety net deploys the
+      # committed fdroid/ directory verbatim, so a bad merge that left git
+      # conflict markers or invalid JSON/XML must stop the deployment here.
+      # Deliberately NOT continue-on-error: a broken index must fail the run
+      # and skip every Pages step below.
+      - name: Verify F-Droid index is clean
+        id: index_check
+        run: |
+          set -euo pipefail
+          git rebase --abort 2>/dev/null || true
+          python3 - <<'PY'
+          import json
+          import re
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          repo = Path("fdroid/repo")
+          errors = []
+
+          for name in ("index-v1.json", "index-v2.json"):
+              try:
+                  json.loads((repo / name).read_text(encoding="utf-8"))
+              except Exception as exc:
+                  errors.append(f"{name}: invalid JSON ({exc})")
+
+          try:
+              ET.parse(repo / "index.xml")
+          except Exception as exc:
+              errors.append(f"index.xml: invalid XML ({exc})")
+
+          marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)")
+          for name in ("index-v1.json", "index-v2.json", "index.xml"):
+              path = repo / name
+              if not path.is_file():
+                  errors.append(f"{name}: missing")
+                  continue
+              for lineno, line in enumerate(
+                  path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+              ):
+                  if marker.match(line):
+                      errors.append(f"{name}: git conflict marker on line {lineno}")
+                      break
+
+          if errors:
+              for message in errors:
+                  print(f"::error::{message}")
+              print("::error::Refusing to deploy a corrupted F-Droid index")
+              sys.exit(1)
+
+          print("F-Droid indexes are clean: index-v1/v2 JSON parse, index.xml parses, no conflict markers")
+          PY
+
       # No `enablement: true`: a plain GITHUB_TOKEN cannot create the Pages
       # site (that needs a PAT / GitHub App token). The owner enables Pages
       # once in Settings -> Pages -> Source: GitHub Actions.

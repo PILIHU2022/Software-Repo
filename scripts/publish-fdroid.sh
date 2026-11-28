@@ -241,11 +241,23 @@ fi
 
 # `fdroid update` only fills the icon field from APK raster icons, and adding a
 # new package can prune the content-addressed index-v2 icons of the others.
-# fdroid-icons.py restores those and patches the legacy index-v1 field, then
-# re-sign both index-v1.jar and entry.jar.
+# fdroid-icons.py restores those, patches the legacy index-v1 field and
+# index.xml, and generates the icons-<density>/ copies; signing is left to
+# `fdroid signindex` below so the jars are not signed twice.
+#
+# The per-density resize needs Pillow. The runner's system python3 often lacks
+# it, but the fdroidserver venv that runs `fdroid update` always has it, so
+# prefer the interpreter next to the fdroid executable when there is one.
+ICONS_PYTHON="python3"
+if [[ -n "${FDROID_BIN:-}" ]]; then
+    fdroid_real="$(readlink -f "$(command -v "$FDROID_BIN" 2>/dev/null || printf '%s' "$FDROID_BIN")" 2>/dev/null || true)"
+    if [[ -n "$fdroid_real" && -x "$(dirname "$fdroid_real")/python" ]]; then
+        ICONS_PYTHON="$(dirname "$fdroid_real")/python"
+    fi
+fi
 echo "==> Repairing index icons"
-python3 "$ROOT/scripts/fdroid-icons.py" --repo "$REPO_DIR"
-echo "==> Re-signing index-v1 and entry"
+"$ICONS_PYTHON" "$ROOT/scripts/fdroid-icons.py" --repo "$REPO_DIR" --no-sign
+echo "==> Re-signing index-v1 and entry (and index.jar)"
 (
     cd "$ROOT/fdroid"
     "$FDROID_BIN" signindex </dev/null
@@ -271,4 +283,54 @@ done < <(find "$REPO_DIR" -maxdepth 1 -type f \( -name 'index-*' -o -name 'entry
     || die "fdroid update did not produce fdroid/repo/index-v2.json"
 python3 "$ROOT/scripts/fdroid-icons.py" --repo "$REPO_DIR" --check \
     || die "F-Droid indexes have missing or inconsistent icons"
+
+# Final guard: never leave a broken index behind. A concurrent publish or a
+# botched merge must not be able to stage git conflict markers or invalid
+# JSON/XML into fdroid/repo, because the Pages step deploys this directory
+# verbatim. Assert the three indexes parse and carry no conflict markers.
+if ! python3 - "$REPO_DIR" <<'PY'
+import json
+import re
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+errors = []
+
+for name in ("index-v1.json", "index-v2.json"):
+    try:
+        json.loads((repo / name).read_text(encoding="utf-8"))
+    except Exception as exc:
+        errors.append(f"{name}: invalid JSON ({exc})")
+
+try:
+    ET.parse(repo / "index.xml")
+except Exception as exc:
+    errors.append(f"index.xml: invalid XML ({exc})")
+
+marker = re.compile(r"^(<<<<<<<|=======|>>>>>>>)")
+for name in ("index-v1.json", "index-v2.json", "index.xml"):
+    path = repo / name
+    if not path.is_file():
+        errors.append(f"{name}: missing")
+        continue
+    for lineno, line in enumerate(
+        path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+    ):
+        if marker.match(line):
+            errors.append(f"{name}: git conflict marker on line {lineno}")
+            break
+
+if errors:
+    for message in errors:
+        print(f"  {message}", file=sys.stderr)
+    sys.exit(1)
+
+print("==> Verified indexes: index-v1/v2 JSON parse, index.xml parses, no conflict markers")
+PY
+then
+    die "F-Droid indexes are corrupt (invalid JSON/XML or git conflict markers)"
+fi
+
 echo "==> Published repository index: $REPO_DIR/index-v2.json"
