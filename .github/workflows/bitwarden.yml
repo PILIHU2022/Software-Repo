@@ -177,11 +177,7 @@ jobs:
   desktop:
     name: Build desktop (${{ matrix.target }})
     needs: check
-    # macOS runners are not available for this repository ("The configuration
-    # 'macos-14-arm64-us-default' is not supported"), so the macOS leg would
-    # cancel every run. Keep it behind a repository variable: set
-    # PATCHWORK_ENABLE_MACOS=true once a macOS runner is available.
-    if: needs.check.result == 'success' && needs.check.outputs.build == 'true' && (matrix.target != 'desktop-macos' || vars.PATCHWORK_ENABLE_MACOS == 'true')
+    if: needs.check.result == 'success' && needs.check.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -190,8 +186,14 @@ jobs:
             target: desktop-linux
           - os: windows-latest
             target: desktop-windows
-          - os: macos-14
-            target: desktop-macos
+          # macOS runners are not available for this repository
+          # ("The configuration 'macos-14-arm64-us-default' is not supported"),
+          # so that leg is cancelled as soon as it is created and would turn
+          # the whole run cancelled. Build desktop-macos locally with
+          # `scripts/build-bitwarden.sh --target desktop-macos`, or re-add this
+          # entry once a macOS runner is available.
+          # - os: macos-14
+          #   target: desktop-macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
