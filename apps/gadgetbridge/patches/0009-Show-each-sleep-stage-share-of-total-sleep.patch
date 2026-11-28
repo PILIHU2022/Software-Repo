@@ -18,17 +18,18 @@ week stage tiles.
 This uses the existing sleep sessions; no additional device data or setting is
 needed.
 ---
- .../activities/charts/SleepDailyFragment.java          | 21 +++++++++++++--------
- .../activities/charts/SleepPeriodFragment.java         | 35 +++++++++++++++++++++++++++++++-----
- .../main/res/values-zh-rCN/strings.xml                 |  2 ++
- .../main/res/values-zh-rTW/strings.xml                 |  2 ++
- app/src/main/res/values/strings.xml                    |  2 ++
+ .../activities/charts/SleepDailyFragment.java | 21 ++++++++---
+ .../charts/SleepPeriodFragment.java           | 35 ++++++++++++++++---
+ app/src/main/res/values-zh-rCN/strings.xml    |  2 ++
+ app/src/main/res/values-zh-rTW/strings.xml    |  2 ++
+ app/src/main/res/values/strings.xml           |  2 ++
  5 files changed, 54 insertions(+), 8 deletions(-)
 
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
+index e0f918ead3..4d08eefe15 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
-@@ -383,6 +383,14 @@
+@@ -383,6 +383,14 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
          return DateTimeUtils.formatDurationHoursMinutes(seconds, TimeUnit.SECONDS);
      }
  
@@ -43,7 +44,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
      private StatTileData buildSleepStageTile(final int colorRes, final int labelRes, final String value) {
          return new StatTileData(value, getString(labelRes), null, null, null, null, ContextCompat.getColor(requireContext(), colorRes));
      }
-@@ -400,16 +408,21 @@
+@@ -400,16 +408,21 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart
          final boolean hasSleepSessions = !pieData.sleepSessions.isEmpty();
          final List<StatTileData> legendStats = new ArrayList<>();
          legendStats.add(buildSleepStageTile(R.color.chart_deep_sleep_dark, R.string.sleep_colored_stats_deep,
@@ -70,9 +71,10 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
          binding.sleepLegendStatsContainer.removeAllViews();
          StatTileGridUtilKt.addStatTileGrid(binding.sleepLegendStatsContainer, requireContext(), legendStats, 0);
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
+index 3d7c5f465d..4490a892f8 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepPeriodFragment.java
-@@ -93,6 +93,7 @@
+@@ -93,6 +93,7 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
          long remWeeklyTotal = 0;
          long deepWeeklyTotal = 0;
          long lightWeeklyTotal = 0;
@@ -80,7 +82,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
  
          for (List<SleepSession> daySessions : sessionsByDay) {
              if (calculateBalance(daySessions) > 0) {
-@@ -109,6 +110,9 @@
+@@ -109,6 +110,9 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
              if (showAwakeSleep) {
                  awakeWeeklyTotal += totalAmounts.get(i++).longValue();
              }
@@ -90,7 +92,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
          }
  
          return new MySleepWeeklyData(
-@@ -116,6 +120,7 @@
+@@ -116,6 +120,7 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
                  remWeeklyTotal,
                  deepWeeklyTotal,
                  lightWeeklyTotal,
@@ -98,7 +100,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
                  totalDaysForAverage);
      }
  
-@@ -206,23 +211,29 @@
+@@ -206,23 +211,29 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
  
          final MySleepWeeklyData sleepWeeklyData = mcd.getSleepWeeklyData();
          final int totalDaysForAverage = sleepWeeklyData.getTotalDaysForAverage();
@@ -132,7 +134,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
              }
          } else {
              legendStats.add(buildSleepStageTile(R.color.chart_deep_sleep_dark, R.string.sleep_colored_stats_deep_avg, "-"));
-@@ -538,6 +549,15 @@
+@@ -538,6 +549,15 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
          return DateTimeUtils.formatDurationHoursMinutes(value, TimeUnit.MINUTES);
      }
  
@@ -148,7 +150,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
      private StatTileData buildSleepStageTile(final int colorRes, final int labelRes, final String value) {
          return new StatTileData(value, getString(labelRes), null, null, null, null, ContextCompat.getColor(requireContext(), colorRes));
      }
-@@ -627,17 +647,20 @@
+@@ -627,17 +647,20 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
          private final long totalRem;
          private final long totalDeep;
          private final long totalLight;
@@ -169,7 +171,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
              this.totalDaysForAverage = totalDaysForAverage;
          }
  
-@@ -657,6 +680,10 @@
+@@ -657,6 +680,10 @@ public class SleepPeriodFragment extends SleepFragment<SleepPeriodFragment.MyCha
              return this.totalLight;
          }
  
@@ -181,6 +183,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/c
              return this.totalDaysForAverage;
          }
 diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index 0c3eaf52b6..6ee9ef8a9f 100644
 --- a/app/src/main/res/values-zh-rCN/strings.xml
 +++ b/app/src/main/res/values-zh-rCN/strings.xml
 @@ -5419,6 +5419,8 @@
@@ -193,6 +196,7 @@ diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/value
      <string name="hrv_status_trend">HRV 趋势</string>
      <string name="day_timeline">白天时间线</string>
 diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index 7f95a2385b..6af5b4c5ed 100644
 --- a/app/src/main/res/values-zh-rTW/strings.xml
 +++ b/app/src/main/res/values-zh-rTW/strings.xml
 @@ -3273,6 +3273,8 @@
@@ -205,6 +209,7 @@ diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/value
      <string name="date_placeholders__date__time">%1$s，%2$s</string>
      <string name="date_placeholders__start_time__end_time">%1$s – %2$s</string>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index a134a4960d..63e87ca6b5 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1337,6 +1337,8 @@

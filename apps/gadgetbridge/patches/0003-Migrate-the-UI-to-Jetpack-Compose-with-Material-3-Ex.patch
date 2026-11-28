@@ -165,7 +165,7 @@ verified with the existing sha256.
  create mode 100644 app/src/main/res/values/styles_expressive.xml
 
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index 0ab59e97eb..5398245eb5 100644
+index 841b16f002..d9cd74a393 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -10,6 +10,7 @@ plugins {
@@ -198,7 +198,7 @@ index 0ab59e97eb..5398245eb5 100644
          getByName("release") {
              isMinifyEnabled = true
              proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-@@ -281,6 +290,21 @@ dependencies {
+@@ -285,6 +294,21 @@ dependencies {
      implementation(libs.material)
      implementation(libs.flexbox)
  
@@ -8295,7 +8295,7 @@ index cd1ef15e66..afbf75ada7 100644
      alias(libs.plugins.kaitai) apply false
      alias(libs.plugins.ksp) apply false
 diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
-index b7d2b85490..0f19329d03 100644
+index 9826b777e6..70dbf35e7a 100644
 --- a/gradle/libs.versions.toml
 +++ b/gradle/libs.versions.toml
 @@ -9,6 +9,10 @@ androidx-browser = "1.10.0"
@@ -8309,7 +8309,7 @@ index b7d2b85490..0f19329d03 100644
  androidx-core = "1.19.1"
  androidx-core-splashscreen = "1.2.0"
  androidx-exifinterface = "1.4.2"
-@@ -127,6 +131,20 @@ mapsforge-map-android = { group = "com.github.mapsforge.mapsforge", name = "maps
+@@ -133,6 +137,20 @@ mapsforge-map-android = { group = "com.github.mapsforge.mapsforge", name = "maps
  mapsforge-map-reader = { group = "com.github.mapsforge.mapsforge", name = "mapsforge-map-reader", version.ref = "mapsforge" }
  mapsforge-themes = { group = "com.github.mapsforge.mapsforge", name = "mapsforge-themes", version.ref = "mapsforge" }
  material = { group = "com.google.android.material", name = "material", version.ref = "material" }
@@ -8330,7 +8330,7 @@ index b7d2b85490..0f19329d03 100644
  mockito = { group = "org.mockito", name = "mockito-core", version.ref = "mockito" }
  mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
  mpandroidchart = { group = "com.github.PhilJay.MPAndroidChart", name = "MPChartLib", version.ref = "mpandroidchart" }
-@@ -172,6 +190,7 @@ unit-test = [
+@@ -180,6 +198,7 @@ unit-test = [
  [plugins]
  android-application = { id = "com.android.application", version.ref = "android-gradle-plugin" }
  kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize", version.ref = "kotlin" }
@@ -8357,7 +8357,7 @@ index bdc1ff0ac9..7bdd54912c 100644
  validateDistributionUrl=true
  zipStoreBase=GRADLE_USER_HOME
 diff --git a/settings.gradle.kts b/settings.gradle.kts
-index cba11f57bf..44e9d35ffd 100644
+index cba11f57bf..12efee5a60 100644
 --- a/settings.gradle.kts
 +++ b/settings.gradle.kts
 @@ -1,7 +1,18 @@

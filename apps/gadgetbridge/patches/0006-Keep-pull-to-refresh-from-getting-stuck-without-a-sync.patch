@@ -14,13 +14,34 @@ the existing completion broadcast, but the timeout is an upper bound: a
 slow sync can also lose its indicator while continuing in the background.
 The point is to free the gesture stream so the next pull can start a new sync.
 ---
- .../gadgetbridge/widgets/SwipeRefreshWatchdog.java                 | 63 +++++++++++++++++++++
- .../gadgetbridge/activities/ControlCenterv2.java                    |  2 +
+ .../activities/ControlCenterv2.java           |  2 +
+ .../widgets/SwipeRefreshWatchdog.java         | 63 +++++++++++++++++++
  2 files changed, 65 insertions(+)
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java
 
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+index 16ec771a64..f2f8cbb8e1 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+@@ -98,6 +98,7 @@ import nodomain.freeyourgadget.gadgetbridge.util.GB;
+ import nodomain.freeyourgadget.gadgetbridge.util.GBChangeLog;
+ import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs;
+ import nodomain.freeyourgadget.gadgetbridge.util.backup.OnOpenBackupRunner;
++import nodomain.freeyourgadget.gadgetbridge.widgets.SwipeRefreshWatchdog;
+ 
+ //TODO: extend AbstractGBActivity, but it requires actionbar that is not available
+ public class ControlCenterv2 extends AppCompatActivity
+@@ -364,6 +365,7 @@ public class ControlCenterv2 extends AppCompatActivity
+ 
+         // Configure ViewPager2 with fragment adapter and default fragment
+         viewPager = findViewById(R.id.dashboard_viewpager);
++        SwipeRefreshWatchdog.attach(findViewById(android.R.id.content));
+         pagerAdapter = new MainFragmentsPagerAdapter(this);
+         viewPager.setAdapter(pagerAdapter);
+ 
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java
 new file mode 100644
+index 0000000000..855d4c2180
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/SwipeRefreshWatchdog.java
 @@ -0,0 +1,63 @@
@@ -87,13 +108,3 @@ new file mode 100644
 +        }, REFRESH_TIMEOUT_MS);
 +    }
 +}
-diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
---- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
-+++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
-@@ -101,1 +101,2 @@
- import nodomain.freeyourgadget.gadgetbridge.util.backup.OnOpenBackupRunner;
-+import nodomain.freeyourgadget.gadgetbridge.widgets.SwipeRefreshWatchdog;
-@@ -362,2 +363,3 @@
-         // Configure ViewPager2 with fragment adapter and default fragment
-         viewPager = findViewById(R.id.dashboard_viewpager);
-+        SwipeRefreshWatchdog.attach(findViewById(android.R.id.content));

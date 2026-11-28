@@ -27,22 +27,22 @@ Material 3 settings screen:
  app/src/main/AndroidManifest.xml              |   4 +
  .../activities/ControlCenterv2.java           |   6 +
  .../activities/SettingsActivity.java          |   3 +
- .../AbstractAutoExportSettingsFragment.kt     |  54 +-
+ .../AbstractAutoExportSettingsFragment.kt     |  54 ++-
  .../OnOpenBackupSettingsActivity.kt           | 286 ++++++++++++
  .../activities/welcome/WelcomeActivity.java   |   5 +
  .../gadgetbridge/util/PeriodicExporter.kt     |  17 +-
  .../util/backup/AbstractZipBackupJob.java     |   7 +
  .../util/backup/BackupRetention.kt            |  64 +++
- .../gadgetbridge/util/backup/BackupStorage.kt | 441 +++++++++++++++++++
+ .../gadgetbridge/util/backup/BackupStorage.kt | 441 ++++++++++++++++++
  .../util/backup/OnOpenBackupPrefs.kt          | 141 ++++++
- .../util/backup/OnOpenBackupRunner.kt         | 440 ++++++++++++++++++
+ .../util/backup/OnOpenBackupRunner.kt         | 440 +++++++++++++++++
  .../util/backup/ZipBackupExportJob.java       | 183 +++++++-
  .../util/backup/ZipExportWorker.kt            |  35 +-
  app/src/main/res/values/arrays.xml            |  15 +
  app/src/main/res/values/strings.xml           |  19 +
  app/src/main/res/xml/automations_settings.xml |   8 +
  .../main/res/xml/on_open_backup_settings.xml  |  70 +++
- .../util/backup/OnOpenBackupRetentionTest.kt  | 154 +++++++
+ .../util/backup/OnOpenBackupRetentionTest.kt  | 154 ++++++
  19 files changed, 1929 insertions(+), 23 deletions(-)
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/OnOpenBackupSettingsActivity.kt
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupRetention.kt
@@ -113,7 +113,7 @@ index 0d043853fa..0ce31e737d 100644
                  index(R.xml.internethelper_preferences, R.string.prefs_internet_helper_title);
  
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
-index 5bb5f45d79..d855c29ce6 100644
+index 5bb5f45d79..d3bdc1e636 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
 @@ -38,6 +38,7 @@ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
@@ -661,7 +661,7 @@ index 0000000000..e5fad37ee1
 \ No newline at end of file
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt
 new file mode 100644
-index 0000000000..ee50ce7730
+index 0000000000..e06665c42b
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/BackupStorage.kt
 @@ -0,0 +1,441 @@
@@ -1257,7 +1257,7 @@ index 0000000000..c3d87be1e9
 \ No newline at end of file
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt
 new file mode 100644
-index 0000000000..70756e35cc
+index 0000000000..cf89234bda
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/OnOpenBackupRunner.kt
 @@ -0,0 +1,440 @@
@@ -1957,7 +1957,7 @@ index be28ecc0c9..42c76d8ba4 100644
 +}
 \ No newline at end of file
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
-index 441e786b29..6652ec7540 100644
+index 441e786b29..96f967290b 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/backup/ZipExportWorker.kt
 @@ -52,13 +52,40 @@ class ZipExportWorker(
@@ -1969,8 +1969,7 @@ index 441e786b29..6652ec7540 100644
 +        // single one, and apply the same retention as the on-open backup, so that a failing run
 +        // can never destroy the last good backup
 +        val storage = BackupStorages.forAutoExport(mContext, dst)
- 
--        LOG.info("Zip export completed, success={}", success)
++
 +        val result = if (storage != null) {
 +            OnOpenBackupRunner.exportToStorage(mContext, storage, this)
 +        } else if (BackupStorages.hasLegacyDocumentTarget(mContext, dst)) {
@@ -1994,7 +1993,8 @@ index 441e786b29..6652ec7540 100644
 +            onFailure(message)
 +            OnOpenBackupRunner.Result(false, message, null)
 +        }
-+
+ 
+-        LOG.info("Zip export completed, success={}", success)
 +        LOG.info("Zip export completed, success={}, {}", result.success, result.message)
  
 -        broadcastSuccess(success)

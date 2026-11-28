@@ -19,15 +19,18 @@ Dialogs, intents, drag-sort lists, subtitle lists with custom values and other
 custom widgets still go through Preference.performClick(), so their existing
 listeners, validation and dependencies stay in charge.
 ---
- .../DeviceSpecificSettingsFragment.java                    |  9 ---------
- .../ui/compose/screens/settings/prefs/PrefsModel.kt        | 60 +++++++++++++++++++++++++++++++----------------------
- .../ui/compose/screens/settings/prefs/PrefsScreen.kt       | 124 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
- 3 files changed, 160 insertions(+), 33 deletions(-)
+ .../DeviceSpecificSettingsFragment.java       |   9 --
+ .../screens/settings/prefs/PrefsModel.kt      |  62 +++++----
+ .../screens/settings/prefs/PrefsScreen.kt     | 124 +++++++++++++++++-
+ 3 files changed, 161 insertions(+), 34 deletions(-)
 
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java
+index d47f8c41c1..9fffbc7c09 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/devicesettings/DeviceSpecificSettingsFragment.java
-@@ -130,13 +130,4 @@
+@@ -128,15 +128,6 @@ import nodomain.freeyourgadget.gadgetbridge.util.preferences.PreferenceCategoryM
+ import nodomain.freeyourgadget.gadgetbridge.util.preferences.SubtitleListPreference;
+ 
  public class DeviceSpecificSettingsFragment extends AbstractPreferenceFragment implements DeviceSpecificSettingsHandler {
 -    /**
 -     * This screen keeps the View preference implementation: it builds its entries at runtime and uses custom
@@ -42,9 +45,10 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/d
      private static final Logger LOG = LoggerFactory.getLogger(DeviceSpecificSettingsFragment.class);
  
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt
+index 86a0972cb7..dae0e15e90 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsModel.kt
-@@ -45,6 +45,9 @@
+@@ -45,6 +45,9 @@ enum class PrefRowKind {
      /** A [TwoStatePreference]: rendered with the Expressive switch and toggled through [Preference.performClick]. */
      SWITCH,
  
@@ -54,7 +58,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
      /** A [ListPreference]: rendered with its current entry, tapping it opens a Material 3 picker sheet. */
      LIST,
  
-@@ -120,7 +123,7 @@
+@@ -120,7 +123,7 @@ class PrefsTree(
      /** The topmost screen of the tree, even when the fragment was rooted at a nested screen. */
      val root: PreferenceScreen = screen.absoluteRoot()
  
@@ -63,7 +67,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
      val rootKey: String = root.key ?: ROOT_KEY
  
      private class ScreenInfo(
-@@ -131,8 +134,6 @@
+@@ -131,8 +134,6 @@ class PrefsTree(
          val titles: List<String>,
      )
  
@@ -72,10 +76,24 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
      /** The default shared preferences of the tree, if it stores its values in shared preferences at all. */
      val sharedPreferences: SharedPreferences? by lazy {
          try {
-@@ -144,30 +145,35 @@
+@@ -144,30 +145,35 @@ class PrefsTree(
  
      private fun buildScreens(): Map<String, ScreenInfo> {
          val out = LinkedHashMap<String, ScreenInfo>()
+-
+-        fun visit(screen: PreferenceScreen, path: List<String>, titles: List<String>) {
+-            val key = screen.key ?: ROOT_KEY
+-            if (out.containsKey(key)) {
+-                return
+-            }
+-            val title = screen.title?.toString().orEmpty()
+-            val newPath = path + key
+-            val newTitles = titles + title
+-            out[key] = ScreenInfo(screen, newPath, newTitles)
+-            for (i in 0 until screen.preferenceCount) {
+-                val child = screen.getPreference(i)
+-                if (child is PreferenceScreen) {
+-                    visit(child, newPath, newTitles)
 +        val rootTitle = root.title?.toString().orEmpty()
 +        out[rootKey] = ScreenInfo(root, listOf(rootKey), listOf(rootTitle))
 +
@@ -92,20 +110,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
 +                            visit(child, newPath, newTitles)
 +                        }
 +                    }
- 
--        fun visit(screen: PreferenceScreen, path: List<String>, titles: List<String>) {
--            val key = screen.key ?: ROOT_KEY
--            if (out.containsKey(key)) {
--                return
--            }
--            val title = screen.title?.toString().orEmpty()
--            val newPath = path + key
--            val newTitles = titles + title
--            out[key] = ScreenInfo(screen, newPath, newTitles)
--            for (i in 0 until screen.preferenceCount) {
--                val child = screen.getPreference(i)
--                if (child is PreferenceScreen) {
--                    visit(child, newPath, newTitles)
++
 +                    is PreferenceGroup -> visit(child, path, titles)
                  }
              }
@@ -122,7 +127,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
          if (screenKey == null) {
              return listOf(rootKey)
          }
-@@ -176,6 +182,10 @@
+@@ -176,6 +182,10 @@ class PrefsTree(
  
      /** The model of the screen with [screenKey], or of the root screen if it does not exist. */
      fun screenModel(screenKey: String?): PrefScreenModel {
@@ -133,7 +138,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
          val info = screens[screenKey] ?: screens.getValue(rootKey)
          val screen = info.screen
          return PrefScreenModel(
-@@ -197,9 +207,10 @@
+@@ -197,9 +207,10 @@ class PrefsTree(
          }
  
          val matches = ArrayList<Pair<Int, PrefSearchResult>>()
@@ -145,7 +150,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
                  if (row.key.isEmpty()) {
                      continue
                  }
-@@ -250,12 +261,14 @@
+@@ -250,12 +261,14 @@ class PrefsTree(
                  flushLoose()
                  val rows = ArrayList<PrefRow>()
                  collectRows(preference, rows)
@@ -165,7 +170,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
              } else {
                  // A nested screen is a row that opens it, the loose rows are grouped in an untitled card
                  val rows = loose ?: ArrayList<PrefRow>().also { loose = it }
-@@ -293,6 +306,7 @@
+@@ -293,6 +306,7 @@ class PrefsTree(
      private fun kindOf(preference: Preference): PrefRowKind = when {
          preference is PreferenceScreen -> PrefRowKind.SCREEN
          preference is TwoStatePreference -> PrefRowKind.SWITCH
@@ -174,9 +179,10 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
          preference is DragSortListPreference -> PrefRowKind.ACTION
          // The subtitle picker can offer a free-text entry, so keep its own dialog for that
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
+index 6332e00e62..44f6ab3580 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/settings/prefs/PrefsScreen.kt
-@@ -68,6 +68,7 @@
+@@ -68,6 +68,7 @@ import androidx.compose.material3.IconButton
  import androidx.compose.material3.MaterialTheme
  import androidx.compose.material3.ModalBottomSheet
  import androidx.compose.material3.RadioButton
@@ -184,7 +190,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
  import androidx.compose.material3.Surface
  import androidx.compose.material3.Text
  import androidx.compose.material3.TextButton
-@@ -91,13 +92,18 @@
+@@ -91,13 +92,18 @@ import androidx.compose.ui.graphics.ImageBitmap
  import androidx.compose.ui.graphics.asImageBitmap
  import androidx.compose.ui.graphics.painter.BitmapPainter
  import androidx.compose.ui.res.stringResource
@@ -203,7 +209,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
  import nodomain.freeyourgadget.gadgetbridge.R
  import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbCardSpacer
  import nodomain.freeyourgadget.gadgetbridge.ui.compose.components.GbExpressiveScaffold
-@@ -220,6 +226,16 @@
+@@ -220,6 +226,16 @@ fun PrefsSettingsScreen(
          bump()
      }
  
@@ -220,7 +226,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
      BackHandler(enabled = searchOpen || navStack.size > 1) {
          if (searchOpen) {
              searchOpen = false
-@@ -267,6 +283,7 @@
+@@ -267,6 +283,7 @@ fun PrefsSettingsScreen(
              if (searchOpen) {
                  PrefsSearch(
                      tree = tree,
@@ -228,7 +234,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
                      query = query,
                      onQueryChange = { query = it },
                      onClose = {
-@@ -293,6 +310,7 @@
+@@ -293,6 +310,7 @@ fun PrefsSettingsScreen(
                      bringIntoView = bringIntoView,
                      onActivate = { activate(it) },
                      onToggle = { toggle(it) },
@@ -236,7 +242,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
                  )
              }
          }
-@@ -316,6 +334,7 @@
+@@ -316,6 +334,7 @@ private fun PrefsSections(
      bringIntoView: BringIntoViewRequester,
      onActivate: (PrefRow) -> Unit,
      onToggle: (PrefRow) -> Unit,
@@ -244,7 +250,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
  ) {
      Column(
          modifier = Modifier
-@@ -337,6 +356,7 @@
+@@ -337,6 +356,7 @@ private fun PrefsSections(
                      bringIntoView = bringIntoView,
                      onActivate = onActivate,
                      onToggle = onToggle,
@@ -252,7 +258,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
                  )
                  GbCardSpacer()
              }
-@@ -354,6 +374,7 @@
+@@ -354,6 +374,7 @@ private fun PrefsCard(
      bringIntoView: BringIntoViewRequester,
      onActivate: (PrefRow) -> Unit,
      onToggle: (PrefRow) -> Unit,
@@ -260,7 +266,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
  ) {
      GbTonalCard(
          modifier = Modifier.fillMaxWidth(),
-@@ -368,6 +389,7 @@
+@@ -368,6 +389,7 @@ private fun PrefsCard(
                      bringIntoView = bringIntoView,
                      onActivate = { onActivate(row) },
                      onToggle = { onToggle(row) },
@@ -268,7 +274,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
                  )
                  if (index != rows.lastIndex) {
                      HorizontalDivider(
-@@ -388,7 +410,18 @@
+@@ -388,7 +410,18 @@ private fun PrefsRowItem(
      bringIntoView: BringIntoViewRequester,
      onActivate: () -> Unit,
      onToggle: () -> Unit,
@@ -287,7 +293,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
      val highlightColor by animateColorAsState(
          targetValue = if (highlighted) {
              MaterialTheme.colorScheme.primaryContainer
-@@ -457,6 +490,94 @@
+@@ -457,6 +490,94 @@ private fun PrefsRowItem(
      )
  }
  
@@ -382,7 +388,7 @@ diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/s
  /** The preference icon, tinted like the Material 3 symbols around it. */
  @Composable
  private fun PrefIcon(icon: Drawable?) {
-@@ -483,13 +604,14 @@
+@@ -483,13 +604,14 @@ private fun PrefIcon(icon: Drawable?) {
  @Composable
  private fun PrefsSearch(
      tree: PrefsTree,

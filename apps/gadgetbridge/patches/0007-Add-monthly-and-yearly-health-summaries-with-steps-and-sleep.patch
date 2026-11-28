@@ -32,28 +32,40 @@ only when it is enabled and the device has none. When several devices recorded
 the same day or night, the largest total is used, so wearing two watches does
 not double the summary.
 ---
- app/src/main/AndroidManifest.xml                                             |   4 +
- app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt |  43 +++++
- app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java     |  20 +++++
- app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt | 1234 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt    | 181 ++++++++++++++
- app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt | 117 ++++++++++
- app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt            | 218 ++++++++++++++++
- app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt  | 173 +++++++++++++
- app/src/main/res/drawable/ic_activity_summary.xml                            |  11 +
- app/src/main/res/values-zh-rCN/strings_activity_summary.xml                  |  67 ++++
- app/src/main/res/values-zh-rTW/strings_activity_summary.xml                  |  67 ++++
- app/src/main/res/values/strings_activity_summary.xml                         |  67 ++++
- app/src/main/res/xml/charts_preferences.xml                                  |  10 +
- app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt | 127 +++++++++
- app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt | 161 ++++++++++
- 15 files changed, 2500 insertions(+)
+ app/src/main/AndroidManifest.xml              |    4 +
+ .../activities/ActivitySummaryActivity.kt     |   43 +
+ .../activities/ControlCenterv2.java           |   21 +
+ .../screens/activity/ActivitySummaryScreen.kt | 1234 +++++++++++++++++
+ .../util/activity/ActivitySummary.kt          |  181 +++
+ .../activity/ActivitySummaryRepository.kt     |  117 ++
+ .../gadgetbridge/util/sleep/SleepSummary.kt   |  219 +++
+ .../util/sleep/SleepSummaryRepository.kt      |  173 +++
+ .../main/res/drawable/ic_activity_summary.xml |   11 +
+ .../strings_activity_summary.xml              |   67 +
+ .../strings_activity_summary.xml              |   67 +
+ .../res/values/strings_activity_summary.xml   |   67 +
+ app/src/main/res/xml/charts_preferences.xml   |   10 +
+ .../activity/ActivitySummaryCalculatorTest.kt |  127 ++
+ .../util/sleep/SleepSummaryCalculatorTest.kt  |  161 +++
+ 15 files changed, 2502 insertions(+)
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt
+ create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt
+ create mode 100644 app/src/main/res/drawable/ic_activity_summary.xml
+ create mode 100644 app/src/main/res/values-zh-rCN/strings_activity_summary.xml
+ create mode 100644 app/src/main/res/values-zh-rTW/strings_activity_summary.xml
+ create mode 100644 app/src/main/res/values/strings_activity_summary.xml
+ create mode 100644 app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt
+ create mode 100644 app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt
 
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 0f81f13835..5820e48098 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -246,6 +246,10 @@
-         <activity
+@@ -247,6 +247,10 @@
              android:name=".activities.automations.OnOpenBackupSettingsActivity"
              android:label="@string/pref_header_backup_on_open"
              android:parentActivityName=".activities.SettingsActivity" />
@@ -63,72 +75,10 @@ diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
 +            android:parentActivityName=".activities.ControlCenterv2" />
          <activity
              android:name=".activities.maps.MapsTrackActivity"
-diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
---- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
-+++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
-@@ -105,3 +105,6 @@ public class ControlCenterv2 extends AppCompatActivity
-     private static final Logger LOG = LoggerFactory.getLogger(ControlCenterv2.class);
-     public static final long REALTIME_HR_SAMPLE_TTL_MS = 5_000L;
-     public static final int MENU_REFRESH_CODE = 1;
-+
-+    /** Id of the activity summary entry, appended to R.menu.activity_main_drawer at runtime. */
-+    private static final int MENU_ACTIVITY_SUMMARY = 1001;
-@@ -344,3 +347,14 @@ public class ControlCenterv2 extends AppCompatActivity
-         drawerMenuPopup.inflate(R.menu.activity_main_drawer);
-         final Menu drawerMenu = drawerMenuPopup.getMenu();
-+        // Append the downstream activity summary without editing the shared menu resource; it
-+        // joins the last group so the drawer does not draw an extra separator before it.
-+        final int activitySummaryGroup = drawerMenu.size() > 0
-+                ? drawerMenu.getItem(drawerMenu.size() - 1).getGroupId()
-+                : Menu.NONE;
-+        final MenuItem activitySummaryItem = drawerMenu.add(
-+                activitySummaryGroup,
-+                MENU_ACTIVITY_SUMMARY,
-+                Integer.MAX_VALUE,
-+                R.string.activity_summary_title);
-+        activitySummaryItem.setIcon(R.drawable.ic_activity_summary);
-         final List<GbDrawerNavItem> drawerItems = new ArrayList<>(drawerMenu.size());
-@@ -642,3 +656,9 @@ public class ControlCenterv2 extends AppCompatActivity
-     public boolean onNavigationItemSelected(@NonNull final MenuItem item) {
-         final DrawerLayout drawer = findViewById(R.id.drawer_layout);
-         drawer.closeDrawer(GravityCompat.START, AndroidUtils.areAnimationsEnabled(this));
-+        if (item.getItemId() == MENU_ACTIVITY_SUMMARY) {
-+            startActivity(new android.content.Intent(
-+                    this,
-+                    nodomain.freeyourgadget.gadgetbridge.activities.ActivitySummaryActivity.class));
-+            return false;
-+        }
-diff --git a/app/src/main/res/xml/charts_preferences.xml b/app/src/main/res/xml/charts_preferences.xml
---- a/app/src/main/res/xml/charts_preferences.xml
-+++ b/app/src/main/res/xml/charts_preferences.xml
-@@ -71,14 +71,24 @@
-             android:title="@string/pref_title_charts_average"
-             app:iconSpaceReserved="false" />
- 
-         <SwitchPreferenceCompat
-             android:defaultValue="true"
-             android:key="charts_age_based_sleep_score"
-             android:layout="@layout/preference_checkbox"
-             android:summary="@string/pref_summary_age_based_sleep_score"
-             android:title="@string/pref_title_age_based_sleep_score"
-             app:iconSpaceReserved="false" />
- 
-+        <Preference
-+            android:icon="@drawable/ic_activity_summary"
-+            android:key="charts_activity_summary"
-+            android:summary="@string/activity_summary_pref_summary"
-+            android:title="@string/activity_summary_title">
-+            <intent
-+                android:targetClass="nodomain.freeyourgadget.gadgetbridge.activities.ActivitySummaryActivity"
-+                android:targetPackage="@string/applicationId" />
-+        </Preference>
-+
-         <MultiSelectListPreference
-             android:defaultValue="@array/pref_chart_weight_body_composition_default"
-             android:dialogTitle="@string/pref_title_chart_weight_body_composition"
+             android:label="@string/maps"
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt
 new file mode 100644
-index 0000000..db600c8
+index 0000000000..db600c8dac
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ActivitySummaryActivity.kt
 @@ -0,0 +1,43 @@
@@ -175,9 +125,55 @@ index 0000000..db600c8
 +        setComposeHandlesSystemBarInsets()
 +    }
 +}
+diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+index f2f8cbb8e1..a68ba1f8e6 100644
+--- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
++++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/ControlCenterv2.java
+@@ -106,6 +106,9 @@ public class ControlCenterv2 extends AppCompatActivity
+     private static final Logger LOG = LoggerFactory.getLogger(ControlCenterv2.class);
+     public static final long REALTIME_HR_SAMPLE_TTL_MS = 5_000L;
+     public static final int MENU_REFRESH_CODE = 1;
++
++    /** Id of the activity summary entry, appended to R.menu.activity_main_drawer at runtime. */
++    private static final int MENU_ACTIVITY_SUMMARY = 1001;
+     private boolean isLanguageInvalid = false;
+     private boolean isLayoutInvalid = false;
+     private ViewPager2 viewPager;
+@@ -343,6 +346,17 @@ public class ControlCenterv2 extends AppCompatActivity
+         final PopupMenu drawerMenuPopup = new PopupMenu(this, drawerComposeView);
+         drawerMenuPopup.inflate(R.menu.activity_main_drawer);
+         final Menu drawerMenu = drawerMenuPopup.getMenu();
++        // Append the downstream activity summary without editing the shared menu resource; it
++        // joins the last group so the drawer does not draw an extra separator before it.
++        final int activitySummaryGroup = drawerMenu.size() > 0
++                ? drawerMenu.getItem(drawerMenu.size() - 1).getGroupId()
++                : Menu.NONE;
++        final MenuItem activitySummaryItem = drawerMenu.add(
++                activitySummaryGroup,
++                MENU_ACTIVITY_SUMMARY,
++                Integer.MAX_VALUE,
++                R.string.activity_summary_title);
++        activitySummaryItem.setIcon(R.drawable.ic_activity_summary);
+         final List<GbDrawerNavItem> drawerItems = new ArrayList<>(drawerMenu.size());
+         final Map<Integer, Integer> drawerGroups = new HashMap<>();
+         for (int i = 0; i < drawerMenu.size(); i++) {
+@@ -641,6 +655,13 @@ public class ControlCenterv2 extends AppCompatActivity
+         final DrawerLayout drawer = findViewById(R.id.drawer_layout);
+         drawer.closeDrawer(GravityCompat.START, AndroidUtils.areAnimationsEnabled(this));
+ 
++        if (item.getItemId() == MENU_ACTIVITY_SUMMARY) {
++            startActivity(new android.content.Intent(
++                    this,
++                    nodomain.freeyourgadget.gadgetbridge.activities.ActivitySummaryActivity.class));
++            return false;
++        }
++
+         final int itemId = item.getItemId();
+         if (itemId == R.id.action_settings) {
+             final Intent settingsIntent = new Intent(this, SettingsActivity.class);
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt
 new file mode 100644
-index 0000000..7869319
+index 0000000000..78693191ca
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/ui/compose/screens/activity/ActivitySummaryScreen.kt
 @@ -0,0 +1,1234 @@
@@ -1417,7 +1413,7 @@ index 0000000..7869319
 +    NumberFormat.getIntegerInstance().format(steps)
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt
 new file mode 100644
-index 0000000..dcab23a
+index 0000000000..dcab23a714
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummary.kt
 @@ -0,0 +1,181 @@
@@ -1604,7 +1600,7 @@ index 0000000..dcab23a
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt
 new file mode 100644
-index 0000000..4d959ed
+index 0000000000..fc73cc45d2
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryRepository.kt
 @@ -0,0 +1,117 @@
@@ -1717,7 +1713,7 @@ index 0000000..4d959ed
 +            }
 +            return result
 +        } finally {
-+            db.release()
++            db.close()
 +        }
 +    }
 +
@@ -1727,10 +1723,10 @@ index 0000000..4d959ed
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt
 new file mode 100644
-index 0000000..b91549b
+index 0000000000..6caff1198c
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummary.kt
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,219 @@
 +/*  Copyright (C) 2026 Gadgetbridge contributors
 +
 +    This file is part of Gadgetbridge.
@@ -1946,12 +1942,13 @@ index 0000000..b91549b
 +        return (scored.sumOf { it.score ?: 0 }.toDouble() / scored.size).roundToInt()
 +    }
 +
-+    private fun percentage(part: Long, total: Long): Int =
-+        if (total <= 0) 0 else ((part * 100) / total).toInt().coerceIn(0, 100)
 +}
++
++private fun percentage(part: Long, total: Long): Int =
++    if (total <= 0) 0 else ((part * 100) / total).toInt().coerceIn(0, 100)
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt
 new file mode 100644
-index 0000000..13e9a40
+index 0000000000..4f2524ea60
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryRepository.kt
 @@ -0,0 +1,173 @@
@@ -2117,7 +2114,7 @@ index 0000000..13e9a40
 +
 +            return nights.values.sortedBy { it.date }
 +        } finally {
-+            db.release()
++            db.close()
 +        }
 +    }
 +
@@ -2130,7 +2127,7 @@ index 0000000..13e9a40
 +}
 diff --git a/app/src/main/res/drawable/ic_activity_summary.xml b/app/src/main/res/drawable/ic_activity_summary.xml
 new file mode 100644
-index 0000000..b88e3f5
+index 0000000000..b88e3f537a
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_activity_summary.xml
 @@ -0,0 +1,11 @@
@@ -2147,7 +2144,7 @@ index 0000000..b88e3f5
 +</vector>
 diff --git a/app/src/main/res/values-zh-rCN/strings_activity_summary.xml b/app/src/main/res/values-zh-rCN/strings_activity_summary.xml
 new file mode 100644
-index 0000000..ec677b7
+index 0000000000..ec677b77c0
 --- /dev/null
 +++ b/app/src/main/res/values-zh-rCN/strings_activity_summary.xml
 @@ -0,0 +1,67 @@
@@ -2220,7 +2217,7 @@ index 0000000..ec677b7
 +</resources>
 diff --git a/app/src/main/res/values-zh-rTW/strings_activity_summary.xml b/app/src/main/res/values-zh-rTW/strings_activity_summary.xml
 new file mode 100644
-index 0000000..07a6c04
+index 0000000000..07a6c04b60
 --- /dev/null
 +++ b/app/src/main/res/values-zh-rTW/strings_activity_summary.xml
 @@ -0,0 +1,67 @@
@@ -2293,7 +2290,7 @@ index 0000000..07a6c04
 +</resources>
 diff --git a/app/src/main/res/values/strings_activity_summary.xml b/app/src/main/res/values/strings_activity_summary.xml
 new file mode 100644
-index 0000000..cdc37e5
+index 0000000000..cdc37e5784
 --- /dev/null
 +++ b/app/src/main/res/values/strings_activity_summary.xml
 @@ -0,0 +1,67 @@
@@ -2364,9 +2361,30 @@ index 0000000..cdc37e5
 +    <string name="sleep_summary_quality_poor">Poor</string>
 +    <string name="sleep_summary_quality_unknown">Unrated</string>
 +</resources>
+diff --git a/app/src/main/res/xml/charts_preferences.xml b/app/src/main/res/xml/charts_preferences.xml
+index 27909db96e..282c3c578b 100644
+--- a/app/src/main/res/xml/charts_preferences.xml
++++ b/app/src/main/res/xml/charts_preferences.xml
+@@ -79,6 +79,16 @@
+             android:title="@string/pref_title_age_based_sleep_score"
+             app:iconSpaceReserved="false" />
+ 
++        <Preference
++            android:icon="@drawable/ic_activity_summary"
++            android:key="charts_activity_summary"
++            android:summary="@string/activity_summary_pref_summary"
++            android:title="@string/activity_summary_title">
++            <intent
++                android:targetClass="nodomain.freeyourgadget.gadgetbridge.activities.ActivitySummaryActivity"
++                android:targetPackage="@string/applicationId" />
++        </Preference>
++
+         <MultiSelectListPreference
+             android:defaultValue="@array/pref_chart_weight_body_composition_default"
+             android:dialogTitle="@string/pref_title_chart_weight_body_composition"
 diff --git a/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt
 new file mode 100644
-index 0000000..f9e48ab
+index 0000000000..f9e48ab484
 --- /dev/null
 +++ b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/activity/ActivitySummaryCalculatorTest.kt
 @@ -0,0 +1,127 @@
@@ -2499,7 +2517,7 @@ index 0000000..f9e48ab
 +}
 diff --git a/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt
 new file mode 100644
-index 0000000..0bc850b
+index 0000000000..0bc850b100
 --- /dev/null
 +++ b/app/src/test/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/SleepSummaryCalculatorTest.kt
 @@ -0,0 +1,161 @@

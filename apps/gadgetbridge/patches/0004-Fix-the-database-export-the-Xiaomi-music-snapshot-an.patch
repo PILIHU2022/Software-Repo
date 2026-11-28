@@ -97,7 +97,7 @@ index 5f1653e8da..58abf22f37 100644
  
      override fun getHeaderShade(): View? {
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
-index d855c29ce6..c05a8ce7c4 100644
+index d3bdc1e636..c24d6506c8 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/automations/AbstractAutoExportSettingsFragment.kt
 @@ -38,6 +38,7 @@ import nodomain.freeyourgadget.gadgetbridge.util.DateTimeUtils
@@ -108,7 +108,7 @@ index d855c29ce6..c05a8ce7c4 100644
  import nodomain.freeyourgadget.gadgetbridge.util.backup.PeriodicZipExporter
  import org.slf4j.Logger
  import org.slf4j.LoggerFactory
-@@ -245,6 +246,10 @@ abstract class AbstractAutoExportSettingsFragment(
+@@ -257,6 +258,10 @@ abstract class AbstractAutoExportSettingsFragment(
              if (nextExecution != null) {
                  prefNextExecution?.summary = formatDateWithDiff(Date(nextExecution.nextScheduleTimeMillis))
              }
@@ -120,7 +120,7 @@ index d855c29ce6..c05a8ce7c4 100644
      }
  
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
-index 0e79c4a320..286e3c6226 100644
+index 219a29a14f..e0f918ead3 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
 @@ -331,7 +331,7 @@ public class SleepDailyFragment extends SleepFragment<SleepDailyFragment.MyChart

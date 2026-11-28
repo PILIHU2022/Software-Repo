@@ -13,17 +13,17 @@ five-character prefix, so it continues to work with the same privacy model as
 the upstream breach report. The check is available in both the browser popup
 and the Electron desktop window.
 ---
- apps/browser/src/popup/app-routing.module.ts | 8 +++++++
- apps/browser/src/popup/index.html | 2 ++
- apps/desktop/src/app/app-routing.module.ts | 8 +++++++
+ apps/browser/src/popup/app-routing.module.ts | 7 +++++++
+ apps/browser/src/popup/index.ejs | 2 ++
+ apps/desktop/src/app/app-routing.module.ts | 7 +++++++
  apps/desktop/src/index.html | 2 ++
- libs/common/src/patchwork/security-check.component.ts | 538 +++++++++++++++++++++
- 5 files changed, 558 insertions(+)
+ libs/common/src/patchwork/security-check.component.ts | 546 +++++++++++++++++++++
+ 5 files changed, 564 insertions(+)
 
 diff --git a/apps/browser/src/popup/app-routing.module.ts b/apps/browser/src/popup/app-routing.module.ts
 --- a/apps/browser/src/popup/app-routing.module.ts
 +++ b/apps/browser/src/popup/app-routing.module.ts
-@@ -20,1 +20,9 @@
+@@ -161,2 +161,9 @@
  const routes: Routes = [
 +  {
 +    path: "security-check",
@@ -32,18 +32,20 @@ diff --git a/apps/browser/src/popup/app-routing.module.ts b/apps/browser/src/pop
 +        (m) => m.SecurityCheckComponent,
 +      ),
 +  },
-diff --git a/apps/browser/src/popup/index.html b/apps/browser/src/popup/index.html
---- a/apps/browser/src/popup/index.html
-+++ b/apps/browser/src/popup/index.html
-@@ -14,1 +14,3 @@
-     <app-root></app-root>
+   {
+diff --git a/apps/browser/src/popup/index.ejs b/apps/browser/src/popup/index.ejs
+--- a/apps/browser/src/popup/index.ejs
++++ b/apps/browser/src/popup/index.ejs
+@@ -12,2 +12,4 @@
+     </app-root>
 +<a id="patchwork-security-check" href="#/security-check" title="打开安全检测">安全检测</a>
 +<style>#patchwork-security-check{position:fixed;right:8px;bottom:56px;z-index:2147483647;padding:6px 10px;border-radius:999px;background:#175ddc;color:#fff;font:600 12px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 2px 8px #0003}</style>
+   </body>
 diff --git a/apps/desktop/src/app/app-routing.module.ts b/apps/desktop/src/app/app-routing.module.ts
 --- a/apps/desktop/src/app/app-routing.module.ts
 +++ b/apps/desktop/src/app/app-routing.module.ts
-@@ -20,1 +20,9 @@
- const routes: Routes = [
+@@ -95,2 +95,9 @@
+ export const routes: Routes = [
 +  {
 +    path: "security-check",
 +    loadComponent: () =>
@@ -51,20 +53,24 @@ diff --git a/apps/desktop/src/app/app-routing.module.ts b/apps/desktop/src/app/a
 +        (m) => m.SecurityCheckComponent,
 +      ),
 +  },
+   {
 diff --git a/apps/desktop/src/index.html b/apps/desktop/src/index.html
 --- a/apps/desktop/src/index.html
 +++ b/apps/desktop/src/index.html
-@@ -14,1 +14,3 @@
-     <app-root></app-root>
+@@ -18,2 +18,4 @@
+     </app-root>
 +<a id="patchwork-security-check" href="#/security-check" title="Open security check">安全检测</a>
 +<style>#patchwork-security-check{position:fixed;right:12px;bottom:12px;z-index:2147483647;padding:6px 10px;border-radius:999px;background:#175ddc;color:#fff;font:600 12px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 2px 8px #0003}</style>
+   </body>
 diff --git a/libs/common/src/patchwork/security-check.component.ts b/libs/common/src/patchwork/security-check.component.ts
 new file mode 100644
 --- /dev/null
 +++ b/libs/common/src/patchwork/security-check.component.ts
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,546 @@
 +import { Component, OnInit, inject } from "@angular/core";
++import { firstValueFrom } from "rxjs";
 +
++import { AccountService } from "../auth/abstractions/account.service";
 +import { CipherService } from "../vault/abstractions/cipher.service";
 +
 +type CheckKind = "exposed" | "weak" | "reused" | "totp";
@@ -359,6 +365,7 @@ new file mode 100644
 +})
 +export class SecurityCheckComponent implements OnInit {
 +  private readonly cipherService = inject(CipherService);
++  private readonly accountService = inject(AccountService);
 +  private readonly breachCache = new Map<string, number>();
 +
 +  protected readonly categories: { id: CheckKind; label: string }[] = [
@@ -400,15 +407,20 @@ new file mode 100644
 +    this.findings = this.emptyFindings();
 +
 +    try {
++      const account = await firstValueFrom(this.accountService.activeAccount$);
++      if (!account) {
++        throw new Error("no active account; unlock the vault before scanning");
++      }
++
 +      const service = this.cipherService as unknown as {
-+        getAllDecrypted?: () => Promise<unknown[]>;
++        getAllDecrypted?: (userId: string) => Promise<unknown[]>;
 +      };
 +      const getAllDecrypted = service.getAllDecrypted;
 +      if (typeof getAllDecrypted !== "function") {
 +        throw new Error("the vault service does not expose decrypted ciphers");
 +      }
 +
-+      const ciphers = (await getAllDecrypted.call(service)) as any[];
++      const ciphers = (await getAllDecrypted.call(service, account.id)) as any[];
 +      const rows: LoginRow[] = [];
 +
 +      for (const cipher of ciphers) {

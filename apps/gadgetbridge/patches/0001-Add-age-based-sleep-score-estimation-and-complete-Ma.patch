@@ -15,26 +15,26 @@ Material 3:
 - Migrate the remaining MaterialComponents filter chip, dialog, translucent and text input styles to their Material 3 equivalents.
 - Add Material 3 bottom sheet styles and component styles for the new score details sheet.
 ---
- app/src/main/AndroidManifest.xml              |   4 +
- .../charts/DefaultChartsProvider.kt           |  56 ++++++-
- .../activities/charts/SleepDailyFragment.java |  46 +++++-
- .../activities/charts/SleepFragment.java      |  62 +++++--
+ app/src/main/AndroidManifest.xml              |   4 +-
+ .../charts/DefaultChartsProvider.kt           |  56 ++-
+ .../activities/charts/SleepDailyFragment.java |  48 +-
+ .../activities/charts/SleepFragment.java      |  62 ++-
  .../charts/SleepPeriodFragment.java           |  17 +-
- .../charts/SleepScoreDetailsSheet.kt          | 170 +++++++++++++++++++++
- .../util/sleep/AgeSleepScore.java             |  66 ++++++++
- .../util/sleep/AgeSleepScoreCalculator.java   | 414 ++++++++++++++++++++++++++++++++++++++++++++++++++
- .../gadgetbridge/widgets/WidgetDataScope.kt   |  56 +++++++
- .../widgets/impl/SleepScoreWidget.kt          | 252 +++++++++++++++++++++++++++---
+ .../charts/SleepScoreDetailsSheet.kt          | 170 +++++++
+ .../util/sleep/AgeSleepScore.java             |  66 +++
+ .../util/sleep/AgeSleepScoreCalculator.java   | 414 ++++++++++++++++++
+ .../gadgetbridge/widgets/WidgetDataScope.kt   |  56 +++
+ .../widgets/impl/SleepScoreWidget.kt          | 252 +++++++++--
  .../gadgetbridge/widgets/impl/SleepWidget.kt  |  13 +-
- app/src/main/res/layout/activity_auth_key.xml |   4 +
- .../res/layout/activity_installer_gpx.xml     |   2 +
- .../layout/fragment_sleep_score_details.xml   | 231 ++++++++++++++++++++++++++++
+ app/src/main/res/layout/activity_auth_key.xml |   4 +-
+ .../res/layout/activity_installer_gpx.xml     |   2 +-
+ .../layout/fragment_sleep_score_details.xml   | 231 ++++++++++
  .../main/res/layout/fragment_sleepchart.xml   |   1 +
- app/src/main/res/values/strings.xml           |  13 ++
- app/src/main/res/values/styles.xml            |  34 +++-
+ app/src/main/res/values/strings.xml           |  13 +
+ app/src/main/res/values/styles.xml            |  34 +-
  app/src/main/res/xml/charts_preferences.xml   |   8 +
- .../sleep/AgeSleepScoreCalculatorTest.java    | 203 +++++++++++++++++++++++++
-19 files changed, 1585 insertions(+), 67 deletions(-)
+ .../sleep/AgeSleepScoreCalculatorTest.java    | 203 +++++++++
+ 19 files changed, 1586 insertions(+), 68 deletions(-)
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepScoreDetailsSheet.kt
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
  create mode 100644 app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScoreCalculator.java
@@ -64,7 +64,7 @@ index 160485cbad..9ded9abd11 100644
          <!-- Settings screen for Quick Settings tiles and Device Controls. -->
          <activity
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
-index 0d3b3a74f0..29c0ab4f62 100644
+index 0d3b3a74f0..c4cfcba529 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/DefaultChartsProvider.kt
 @@ -22,6 +22,8 @@ import nodomain.freeyourgadget.gadgetbridge.model.TemperatureUnit
@@ -139,8 +139,8 @@ index 0d3b3a74f0..29c0ab4f62 100644
 +                    null
 +                }
 +                val score = nativeScore ?: estimatedScore
-+                val sleepMinutes = if (daySessions.isNotEmpty()) {
-+                    AgeSleepScore.totalSleepMinutes(daySessions).toInt()
++                val sleepMinutes: Long = if (daySessions.isNotEmpty()) {
++                    AgeSleepScore.totalSleepMinutes(daySessions).toLong()
 +                } else {
 +                    DailyTotals.getDailyTotalsForDevice(device, calendarOf(timestamp), db).sleep
 +                }
@@ -150,7 +150,7 @@ index 0d3b3a74f0..29c0ab4f62 100644
                          "$score • $sleepTime"
                      } else {
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
-index 4a52f0cd9d..0e79c4a320 100644
+index 4a52f0cd9d..219a29a14f 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/activities/charts/SleepDailyFragment.java
 @@ -83,6 +83,8 @@ import nodomain.freeyourgadget.gadgetbridge.util.Accumulator;
@@ -166,8 +166,9 @@ index 4a52f0cd9d..0e79c4a320 100644
          }
  
          int sleepScore = 0;
+-        if (!sleepScoreSamples.isEmpty()) {
 +        AgeSleepScoreCalculator.Result sleepScoreResult = null;
-         if (!sleepScoreSamples.isEmpty() && sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore() > 0) {
++        if (!sleepScoreSamples.isEmpty() && sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore() > 0) {
              sleepScore = sleepScoreSamples.get(sleepScoreSamples.size() - 1).getSleepScore();
 +        } else if (AgeSleepScore.isEnabled() && !sleepSessions.isEmpty()) {
 +            // No native score: estimate one from the recorded stages, adjusted for the user's age.
@@ -571,7 +572,7 @@ index 0000000000..8c76a68978
 +}
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
 new file mode 100644
-index 0000000000..785c538449
+index 0000000000..3da8292876
 --- /dev/null
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/util/sleep/AgeSleepScore.java
 @@ -0,0 +1,66 @@
@@ -1136,7 +1137,7 @@ index 2d0cdf6561..02da2927dc 100644
          val goal = ActivityUser().sleepDurationGoal
          return (sleepMinutesTotal.toFloat() / goal).coerceAtMost(1f)
 diff --git a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
-index d42ba69d6b..bc743c9fa8 100644
+index d42ba69d6b..8f931dc87a 100644
 --- a/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
 +++ b/app/src/main/java/nodomain/freeyourgadget/gadgetbridge/widgets/impl/SleepScoreWidget.kt
 @@ -3,8 +3,10 @@ package nodomain.freeyourgadget.gadgetbridge.widgets.impl

@@ -11,13 +11,13 @@ replaced but the conflict copy could not be deleted: that state is no longer
 reported as a failed overwrite and the card remains visible for cleanup.
 ---
  CHANGELOG.md                                |  1 +
- app/src/main/AndroidManifest.xml            | 15 ++++
+ app/src/main/AndroidManifest.xml            | 15 ++++++
  .../basicsync/settings/ConflictsScreen.kt   | 58 +++++++++++++++++++++
- .../basicsync/syncthing/ConflictResolver.kt | 13 ++++-
- .../values-zh-rCN/strings_conflicts.xml     |  4 +
- app/src/main/res/values/strings_conflicts.xml | 4 +
- app/src/main/res/xml/file_provider_paths.xml | 12 ++++
- 7 files changed, 107 insertions(+), 2 deletions(-)
+ .../basicsync/syncthing/ConflictResolver.kt | 14 ++++-
+ .../res/values-zh-rCN/strings_conflicts.xml |  6 +++
+ .../main/res/values/strings_conflicts.xml   |  6 +++
+ .../main/res/xml/file_provider_paths.xml    | 12 +++++
+ 7 files changed, 110 insertions(+), 2 deletions(-)
 
 diff --git a/CHANGELOG.md b/CHANGELOG.md
 index d9beacf..e56e7e0 100644
@@ -32,7 +32,7 @@ diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
 index 2c760c0..baf0798 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
-@@ -114,4 +114,19 @@
+@@ -114,5 +114,20 @@
          <activity
              android:name=".settings.ConflictsActivity"
              android:exported="false" />
@@ -52,7 +52,7 @@ index 2c760c0..baf0798 100644
 +                android:resource="@xml/file_provider_paths" />
 +        </provider>
  
-         <service
+         <activity
 diff --git a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt b/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
 index 26346dd..50c53c8 100644
 --- a/app/src/main/java/com/chiller3/basicsync/settings/ConflictsScreen.kt
@@ -64,10 +64,11 @@ index 26346dd..50c53c8 100644
  import androidx.compose.foundation.layout.Arrangement
  import androidx.compose.foundation.layout.Column
  import androidx.compose.foundation.layout.PaddingValues
-@@ -62,3 +63,4 @@ import androidx.compose.ui.unit.dp
+@@ -62,3 +63,5 @@ import androidx.compose.ui.unit.dp
  import androidx.compose.ui.tooling.preview.Preview
  import androidx.compose.ui.unit.dp
 +import androidx.core.content.FileProvider
++import java.io.File
  import com.chiller3.basicsync.R
 @@ -242,2 +244,10 @@ fun ConflictsScreen(
                  when (result) {
@@ -80,7 +81,7 @@ index 26346dd..50c53c8 100644
 +                    }
 +
                      is ConflictResult.Success -> {
-@@ -300,2 +310,37 @@ fun ConflictsScreen(
+@@ -300,3 +310,38 @@ fun ConflictsScreen(
              },
 +            onPreview = { item ->
 +                val uri = when {
@@ -132,7 +133,7 @@ index 26346dd..50c53c8 100644
      onKeepOriginal: () -> Unit,
 +    onPreview: (() -> Unit)?,
      onOpenFolder: (() -> Unit)?,
-@@ -550,8 +607,18 @@ private fun ConflictCard(
+@@ -550,11 +607,19 @@ private fun ConflictCard(
              onOpenFolder?.let { onOpenFolder ->
                  TextButton(
                      onClick = onOpenFolder,
@@ -160,7 +161,7 @@ diff --git a/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver
 index 12e11e7..fe5c317 100644
 --- a/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
 +++ b/app/src/main/java/com/chiller3/basicsync/syncthing/ConflictResolver.kt
-@@ -25,4 +25,10 @@ sealed interface ConflictResult {
+@@ -25,5 +25,11 @@ sealed interface ConflictResult {
      /** The conflict was resolved. */
      data object Success : ConflictResult
  
@@ -172,18 +173,18 @@ index 12e11e7..fe5c317 100644
 +
      /**
       * The conflict could not be resolved.
-@@ -315,7 +321,11 @@ class ConflictResolver(private val context: Context) {
+@@ -315,7 +321,9 @@ class ConflictResolver(private val context: Context) {
          if (!conflict.delete()) {
 -            return failure(R.string.conflict_error_remove_after_copy, original.name)
 +            return ConflictResult.PartialSuccess(
 +                context.getString(R.string.conflict_error_remove_after_copy, original.name),
 +            )
-+        }
-+
+         }
+ 
          scanFile(original)
          return ConflictResult.Success
      }
-@@ -388,6 +398,8 @@ class ConflictResolver(private val context: Context) {
+@@ -388,5 +398,7 @@ class ConflictResolver(private val context: Context) {
          if (!DocumentsContract.deleteDocument(context.contentResolver, conflictDocumentUri)) {
 -            return failure(R.string.conflict_error_remove_after_copy, originalName)
 +            return ConflictResult.PartialSuccess(
@@ -196,7 +197,7 @@ diff --git a/app/src/main/res/values-zh-rCN/strings_conflicts.xml b/app/src/main
 index a38a2d1..c67a1e0 100644
 --- a/app/src/main/res/values-zh-rCN/strings_conflicts.xml
 +++ b/app/src/main/res/values-zh-rCN/strings_conflicts.xml
-@@ -30,5 +30,9 @@
+@@ -30,6 +30,12 @@
      <!-- Button that opens the folder containing the conflict file. -->
      <string name="conflicts_action_open_folder">打开文件夹</string>
  
@@ -213,7 +214,7 @@ diff --git a/app/src/main/res/values/strings_conflicts.xml b/app/src/main/res/va
 index 7b46071..d9168d0 100644
 --- a/app/src/main/res/values/strings_conflicts.xml
 +++ b/app/src/main/res/values/strings_conflicts.xml
-@@ -30,5 +30,9 @@
+@@ -30,6 +30,12 @@
      <!-- Button that opens the folder containing the conflict file. -->
      <string name="conflicts_action_open_folder">Open folder</string>
  
