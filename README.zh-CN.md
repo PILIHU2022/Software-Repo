@@ -57,7 +57,7 @@ issue，而不是继续发布过期代码。
 | ScreenTime | [Atharok/ScreenTime](https://gitlab.com/Atharok/ScreenTime)（`main`） | `ec95b22` | 11 | `1.4.2-patchwork`（1405，arm64-v8a） |
 | Fcitx5 for Android | [fcitx5-android/fcitx5-android](https://github.com/fcitx5-android/fcitx5-android)（`master`） | `eb5b5021` | 17 | `0.1.3-patchwork`（11207，arm64-v8a） |
 | BasicSync | [chenxiaolong/BasicSync](https://github.com/chenxiaolong/BasicSync)（`master`） | `9111cae` | 5 | `3.30-patchwork`（25807204，arm64-v8a） |
-| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `c4d3372` | 9 | `2026.11.1-patchwork`（25708，arm64-v8a） |
+| Gadgetbridge | [Freeyourgadget/Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge)（`master`） | `c4d3372` | 9 | `2026.11.1-patchwork`（25709，arm64-v8a） |
 | BaiduNetGo（桌面） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`） | `60ca12c` | 48 | `0.8.3.48` —— 上游 `0.8.3` + 48 个补丁（linux/windows x86、Arch 包；Release + feed） |
 | BaiduNetGo（Android） | [pengstem/baidunetgo](https://github.com/pengstem/baidunetgo)（`main`）—— 与桌面版共用同一条队列 | `60ca12c` | 48 | `0.8.3-patchwork`（80348 —— 上游 803 × 100 + 48 个补丁） |
 | Bitwarden | [bitwarden/clients](https://github.com/bitwarden/clients)（`main`） | *首次 CI 构建* | 2 | workflow artifact —— Chrome/Firefox/Edge、Linux/Windows/macOS |
