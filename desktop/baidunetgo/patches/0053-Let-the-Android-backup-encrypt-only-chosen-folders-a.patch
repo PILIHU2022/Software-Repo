@@ -1,0 +1,919 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 28 Nov 2026 15:09:36 +0800
+Subject: [PATCH] =?UTF-8?q?Let=20the=20Android=20backup=20encrypt=20only?=
+ =?UTF-8?q?=20chosen=20folders=20and=20albums=20=E2=80=94=20=E5=8A=A0?=
+ =?UTF-8?q?=E5=AF=86=E8=8C=83=E5=9B=B4=20lists=20the=20configured=20folder?=
+ =?UTF-8?q?s=20or=20the=20selected=20albums=20with=20per-item=20checkboxes?=
+ =?UTF-8?q?=20(null=20scope=20=3D=20all,=20so=20existing=20settings=20and?=
+ =?UTF-8?q?=20new=20items=20stay=20encrypted),=20the=20runner=20loads=20ke?=
+ =?UTF-8?q?ys=20once=20and=20passes=20them=20per=20tree/album,=20and=20a?=
+ =?UTF-8?q?=20scope=20of=20nothing=20runs=20plaintext=20without=20demandin?=
+ =?UTF-8?q?g=20a=20passphrase,=20recipient=20keys=20or=20signer=20#minor?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../pengstem/baidunetgo/data/AppSettings.kt   |  69 +++++++++
+ .../pengstem/baidunetgo/data/BackupRunner.kt  |  28 ++--
+ .../pengstem/baidunetgo/ui/AppViewModel.kt    | 101 +++++++++++--
+ .../ui/components/EncryptScopeDialog.kt       | 139 ++++++++++++++++++
+ .../baidunetgo/ui/screens/BackupScreen.kt     |  63 +++++++-
+ .../ui/screens/GalleryBackupScreen.kt         |  56 +++++++
+ android/app/src/main/res/values/strings.xml   |  16 ++
+ .../baidunetgo/data/EncryptedScopeTest.kt     | 124 ++++++++++++++++
+ 8 files changed, 566 insertions(+), 30 deletions(-)
+ create mode 100644 android/app/src/main/java/com/pengstem/baidunetgo/ui/components/EncryptScopeDialog.kt
+ create mode 100644 android/app/src/test/java/com/pengstem/baidunetgo/data/EncryptedScopeTest.kt
+
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/data/AppSettings.kt b/android/app/src/main/java/com/pengstem/baidunetgo/data/AppSettings.kt
+index ba4368b..3918abe 100644
+--- a/android/app/src/main/java/com/pengstem/baidunetgo/data/AppSettings.kt
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/data/AppSettings.kt
+@@ -87,12 +87,62 @@ data class AppSettings(
+     val ignoredVersionCode: Int = 0,
+     /** Which launcher icon (activity-alias) the user picked; see [LauncherIcons]. */
+     val launcherIcon: LauncherIcon = LauncherIcon.Classic,
++    /**
++     * Which configured SAF trees the backup encrypts, by tree URI. `null` is
++     * the default, and the meaning of settings written before per-item scopes
++     * existed: every configured tree is encrypted, including one added later.
++     * An empty set means nothing is encrypted; any other set means exactly the
++     * trees it lists. Only consulted while [folderEncrypt] is on.
++     */
++    val encryptedFolders: Set<String>? = null,
++    /**
++     * Which backed-up albums the backup encrypts, by MediaStore bucket id.
++     * `null` (the default, and the legacy meaning) is every album that is not
++     * in [deselectedAlbums]; an empty set is none. Only consulted while
++     * [albumEncrypt] is on.
++     */
++    val encryptedAlbums: Set<Long>? = null,
+ ) {
+     companion object {
+         const val DEFAULT_DEST = "/备份"
+     }
+ }
+ 
++/**
++ * Whether the SAF tree at [uri] is encrypted by this configuration: encryption
++ * must be switched on, and [uri] must be in scope (an
++ * [AppSettings.encryptedFolders] of `null` means every tree).
++ */
++fun AppSettings.encryptsFolder(uri: String): Boolean =
++    folderEncrypt && (encryptedFolders?.contains(uri) ?: true)
++
++/**
++ * Whether the album with [bucketId] is encrypted by this configuration:
++ * encryption must be switched on, and the album must be in scope (an
++ * [AppSettings.encryptedAlbums] of `null` means every selected album). An album
++ * in [AppSettings.deselectedAlbums] is not backed up, so its bit does not matter.
++ */
++fun AppSettings.encryptsAlbum(bucketId: Long): Boolean =
++    albumEncrypt && (encryptedAlbums?.contains(bucketId) ?: true)
++
++/**
++ * Whether at least one configured tree would actually be encrypted, i.e.
++ * whether a folder run needs the passphrase, recipient keys or signer at all.
++ * False when [AppSettings.folderEncrypt] is off, when the scope is empty, and
++ * when there is no configured tree to encrypt.
++ */
++fun AppSettings.anyFolderEncrypted(): Boolean =
++    folderEncrypt && folders.any { encryptedFolders?.contains(it.uri) ?: true }
++
++/**
++ * Whether any of [selectedBucketIds] (the albums that will actually be backed
++ * up) is in the encryption scope. Unlike folders, [AppSettings] no longer keeps
++ * the selected albums (it stores the deselected ones), so the caller passes the
++ * live selection; the album run and the UI both know it.
++ */
++fun AppSettings.anyAlbumEncrypted(selectedBucketIds: Collection<Long>): Boolean =
++    albumEncrypt && selectedBucketIds.any { encryptedAlbums?.contains(it) ?: true }
++
+ /** Encodes settings / credentials / passphrase documents without a codegen plugin. */
+ internal object SecureJson {
+ 
+@@ -128,6 +178,15 @@ internal object SecureJson {
+         putJsonArray("deselectedAlbums") {
+             settings.deselectedAlbums.sorted().forEach { add(it) }
+         }
++        // The per-item scopes are written only when the user narrowed them: an
++        // absent key decodes to null, the "everything in scope" default, which
++        // is also what settings from before this feature mean.
++        settings.encryptedFolders?.let { scope ->
++            putJsonArray("encryptedFolders") { scope.sorted().forEach { add(it) } }
++        }
++        settings.encryptedAlbums?.let { scope ->
++            putJsonArray("encryptedAlbums") { scope.sorted().forEach { add(it) } }
++        }
+     }.toString()
+ 
+     fun decodeSettings(text: String?): AppSettings {
+@@ -142,6 +201,14 @@ internal object SecureJson {
+             val deselected = obj["deselectedAlbums"]?.jsonArray
+                 ?.mapNotNull { it.jsonPrimitive.contentOrNullSafe()?.toLongOrNull() }
+                 ?.toSet().orEmpty()
++            // Absent = the legacy "everything in scope" meaning; a present array
++            // (even an empty one) is the user's explicit choice.
++            val encryptedFolders = obj["encryptedFolders"]?.jsonArray
++                ?.mapNotNull { it.jsonPrimitive.contentOrNullSafe() }
++                ?.toSet()
++            val encryptedAlbums = obj["encryptedAlbums"]?.jsonArray
++                ?.mapNotNull { it.jsonPrimitive.contentOrNullSafe()?.toLongOrNull() }
++                ?.toSet()
+             AppSettings(
+                 dest = obj["dest"]?.jsonPrimitive?.contentOrNullSafe() ?: AppSettings.DEFAULT_DEST,
+                 autoFolder = obj["autoFolder"]?.jsonPrimitive?.contentOrNullSafe()?.toBooleanStrictOrNull() ?: false,
+@@ -166,6 +233,8 @@ internal object SecureJson {
+                 launcherIcon = obj["launcherIcon"]?.jsonPrimitive?.contentOrNullSafe()
+                     ?.let { name -> LauncherIcon.entries.firstOrNull { it.name == name } }
+                     ?: LauncherIcon.Classic,
++                encryptedFolders = encryptedFolders,
++                encryptedAlbums = encryptedAlbums,
+             )
+         }.getOrElse { AppSettings() }
+     }
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/data/BackupRunner.kt b/android/app/src/main/java/com/pengstem/baidunetgo/data/BackupRunner.kt
+index 2e6f151..2a1efe1 100644
+--- a/android/app/src/main/java/com/pengstem/baidunetgo/data/BackupRunner.kt
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/data/BackupRunner.kt
+@@ -44,7 +44,8 @@ class BackupRunner(
+         withContext(Dispatchers.IO) {
+         if (settings.folders.isEmpty()) throw IOException(context.getString(R.string.error_no_folders))
+         val api = requireApi()
+-        val crypto = cryptoFor(settings.folderEncrypt, settings)
++        val anyEncrypt = settings.anyFolderEncrypted()
++        val crypto = cryptoFor(anyEncrypt, settings)
+         val throttle = ProgressThrottle(onProgress)
+         val meter = SpeedMeter()
+         var uploaded = 0
+@@ -56,6 +57,7 @@ class BackupRunner(
+ 
+         try {
+             trees.forEachIndexed { index, tree ->
++                val encrypt = settings.encryptsFolder(tree.uri)
+                 val source = DocumentSource(
+                     context = context,
+                     treeUri = tree.uri.toUri(),
+@@ -66,7 +68,7 @@ class BackupRunner(
+                 )
+                 val config = BackupConfig(
+                     dest = settings.dest,
+-                    encrypt = settings.folderEncrypt,
++                    encrypt = encrypt,
+                     parallel = settings.concurrency.coerceIn(1, 4),
+                     remoteName = safeRemoteSegment(tree.name, "文件夹"),
+                 )
+@@ -76,10 +78,10 @@ class BackupRunner(
+                         source = source,
+                         config = config,
+                         state = stateStore,
+-                        passphrase = crypto.passphrase,
+-                        recipients = crypto.recipients,
+-                        signer = crypto.signer,
+-                        signerPassphrase = crypto.signerPassphrase,
++                        passphrase = if (encrypt) crypto.passphrase else null,
++                        recipients = if (encrypt) crypto.recipients else emptyList(),
++                        signer = if (encrypt) crypto.signer else null,
++                        signerPassphrase = if (encrypt) crypto.signerPassphrase else null,
+                     ) { progress ->
+                         val snapshot = progress.toSnapshot(
+                             kind = RunKind.Folder,
+@@ -153,7 +155,8 @@ class BackupRunner(
+         if (albums.isEmpty()) throw IOException(context.getString(R.string.error_no_albums))
+ 
+         val api = requireApi()
+-        val crypto = cryptoFor(settings.albumEncrypt, settings)
++        val anyEncrypt = albums.any { settings.encryptsAlbum(it.bucketId) }
++        val crypto = cryptoFor(anyEncrypt, settings)
+         val throttle = ProgressThrottle(onProgress)
+         val meter = SpeedMeter()
+         var uploaded = 0
+@@ -164,13 +167,14 @@ class BackupRunner(
+ 
+         try {
+             albums.forEachIndexed { index, album ->
++                val encrypt = settings.encryptsAlbum(album.bucketId)
+                 val source = MediaAlbumSource(container.mediaScanner, album)
+                 val stateStore = BackupStateStore(
+                     File(context.filesDir, "album-backup-${album.bucketId}.json").absolutePath,
+                 )
+                 val config = BackupConfig(
+                     dest = settings.dest,
+-                    encrypt = settings.albumEncrypt,
++                    encrypt = encrypt,
+                     parallel = settings.concurrency.coerceIn(1, 4),
+                     remoteName = "相册/" + safeRemoteSegment(album.displayName, "未命名相册"),
+                 )
+@@ -180,10 +184,10 @@ class BackupRunner(
+                         source = source,
+                         config = config,
+                         state = stateStore,
+-                        passphrase = crypto.passphrase,
+-                        recipients = crypto.recipients,
+-                        signer = crypto.signer,
+-                        signerPassphrase = crypto.signerPassphrase,
++                        passphrase = if (encrypt) crypto.passphrase else null,
++                        recipients = if (encrypt) crypto.recipients else emptyList(),
++                        signer = if (encrypt) crypto.signer else null,
++                        signerPassphrase = if (encrypt) crypto.signerPassphrase else null,
+                     ) { progress ->
+                         val snapshot = progress.toSnapshot(
+                             kind = RunKind.Album,
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/ui/AppViewModel.kt b/android/app/src/main/java/com/pengstem/baidunetgo/ui/AppViewModel.kt
+index bac5bd1..769b8c3 100644
+--- a/android/app/src/main/java/com/pengstem/baidunetgo/ui/AppViewModel.kt
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/ui/AppViewModel.kt
+@@ -29,6 +29,9 @@ import com.pengstem.baidunetgo.data.BackupBus
+ import com.pengstem.baidunetgo.data.BackupScheduler
+ import com.pengstem.baidunetgo.data.BackupStatus
+ import com.pengstem.baidunetgo.data.EncryptMode
++import com.pengstem.baidunetgo.data.anyFolderEncrypted
++import com.pengstem.baidunetgo.data.encryptsAlbum
++import com.pengstem.baidunetgo.data.encryptsFolder
+ import com.pengstem.baidunetgo.data.FolderEntry
+ import com.pengstem.baidunetgo.data.LastResult
+ import com.pengstem.baidunetgo.data.LauncherIcon
+@@ -465,8 +468,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+     fun toggleAlbum(bucketId: Long) {
+         updateSettings { settings ->
+             val deselected = settings.deselectedAlbums.toMutableSet()
+-            if (bucketId in deselected) deselected.remove(bucketId) else deselected.add(bucketId)
+-            settings.copy(deselectedAlbums = deselected)
++            val selecting = bucketId in deselected
++            if (selecting) deselected.remove(bucketId) else deselected.add(bucketId)
++            settings.copy(
++                deselectedAlbums = deselected,
++                // Keep an explicit encryption scope in step with the selection:
++                // a re-selected album joins it, a deselected one leaves it.
++                encryptedAlbums = settings.encryptedAlbums?.let { scope ->
++                    if (selecting) scope + bucketId else scope - bucketId
++                },
++            )
+         }
+         val settings = _ui.value.settings
+         _ui.update { state ->
+@@ -475,7 +486,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+     }
+ 
+     fun selectAllAlbums() {
+-        updateSettings { it.copy(deselectedAlbums = emptySet()) }
++        val all = _ui.value.albums.map { it.album.bucketId }.toSet()
++        updateSettings { settings ->
++            settings.copy(
++                deselectedAlbums = emptySet(),
++                encryptedAlbums = settings.encryptedAlbums?.plus(all),
++            )
++        }
+         _ui.update { state -> state.copy(albums = state.albums.map { it.copy(selected = true) }) }
+     }
+ 
+@@ -498,7 +515,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+                 _messages.tryEmit(str(R.string.backup_folder_duplicate))
+                 return@launch
+             }
+-            updateSettings { it.copy(folders = it.folders + entry) }
++            updateSettings { settings ->
++                settings.copy(
++                    folders = settings.folders + entry,
++                    // Under a narrowed scope a new tree starts out encrypted.
++                    encryptedFolders = settings.encryptedFolders?.plus(entry.uri),
++                )
++            }
+             _ui.update { state ->
+                 state.copy(folders = state.folders + FolderUi(entry, null))
+             }
+@@ -507,7 +530,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+     }
+ 
+     fun removeFolder(entry: FolderEntry) {
+-        updateSettings { settings -> settings.copy(folders = settings.folders.filterNot { it.uri == entry.uri }) }
++        updateSettings { settings ->
++            settings.copy(
++                folders = settings.folders.filterNot { it.uri == entry.uri },
++                // The tree is gone, so it cannot be in the encryption scope either.
++                encryptedFolders = settings.encryptedFolders?.minus(entry.uri),
++            )
++        }
+         _ui.update { state -> state.copy(folders = state.folders.filterNot { it.entry.uri == entry.uri }) }
+         folderStatuses = folderStatuses - entry.uri
+     }
+@@ -577,6 +606,47 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+ 
+     fun setSign(enabled: Boolean) = updateSettings { it.copy(sign = enabled) }
+ 
++    // ---------------------------------------------------- encryption scope
++
++    /**
++     * Turns encryption of one configured SAF tree on or off. The default scope
++     * is null, meaning every tree; the first toggle materialises the current
++     * set of trees and then flips one entry, so turning one tree off leaves the
++     * others encrypted (and turning them all off yields an explicit empty set).
++     */
++    fun toggleFolderEncryption(uri: String) {
++        updateSettings { settings ->
++            val current = settings.encryptedFolders ?: settings.folders.map { it.uri }.toSet()
++            settings.copy(encryptedFolders = if (uri in current) current - uri else current + uri)
++        }
++    }
++
++    /** Encrypts every configured tree, including ones added later: null = all. */
++    fun selectAllFolderEncryption() = updateSettings { it.copy(encryptedFolders = null) }
++
++    /** Encrypts no configured tree: an explicit empty scope. */
++    fun selectNoFolderEncryption() = updateSettings { it.copy(encryptedFolders = emptySet()) }
++
++    /**
++     * Turns encryption of one backed-up album on or off. The default scope is
++     * null, meaning every selected album; the first toggle materialises the
++     * current selected albums (all albums minus [AppSettings.deselectedAlbums])
++     * and then flips one, as [toggleFolderEncryption] does for trees.
++     */
++    fun toggleAlbumEncryption(bucketId: Long) {
++        val selectedNow = _ui.value.albums.filter { it.selected }.map { it.album.bucketId }.toSet()
++        updateSettings { settings ->
++            val current = settings.encryptedAlbums ?: selectedNow
++            settings.copy(encryptedAlbums = if (bucketId in current) current - bucketId else current + bucketId)
++        }
++    }
++
++    /** Encrypts every backed-up album, including ones selected later: null = all. */
++    fun selectAllAlbumEncryption() = updateSettings { it.copy(encryptedAlbums = null) }
++
++    /** Encrypts no backed-up album: an explicit empty scope. */
++    fun selectNoAlbumEncryption() = updateSettings { it.copy(encryptedAlbums = emptySet()) }
++
+     fun markNotificationAsked() = updateSettings { it.copy(notificationAsked = true) }
+ 
+     fun setPassphrase(passphrase: CharArray) {
+@@ -863,7 +933,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+             _messages.tryEmit(str(R.string.backup_dest_invalid))
+             return
+         }
+-        if (!encryptionReady(settings.folderEncrypt, state)) return
++        if (!encryptionReady(settings.anyFolderEncrypted(), state)) return
+         if (BackupBus.isRunning(RunKind.Folder)) return
+         BackupService.start(context, RunKind.Folder)
+         _messages.tryEmit(str(R.string.backup_started))
+@@ -884,7 +954,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+             _messages.tryEmit(str(R.string.album_need_selection))
+             return
+         }
+-        if (!encryptionReady(settings.albumEncrypt, state)) return
++        if (!encryptionReady(settings.albumEncrypt && state.albums.any { it.selected && settings.encryptsAlbum(it.album.bucketId) }, state)) return
+         if (BackupBus.isRunning(RunKind.Album)) return
+         BackupService.start(context, RunKind.Album)
+         _messages.tryEmit(str(R.string.album_run_started))
+@@ -897,13 +967,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+      * is on. Emits the matching toast and returns false otherwise.
+      */
+     private fun encryptionReady(encrypt: Boolean, state: AppUiState): Boolean {
+-        if (!encrypt) {
+-            if (state.settings.sign && state.signer == null) {
+-                _messages.tryEmit(str(R.string.backup_need_signer))
+-                return false
+-            }
+-            return true
+-        }
++        // [encrypt] is whether anything in the run is actually in the encryption
++        // scope; a run that encrypts nothing is a plain run and needs no
++        // passphrase, recipient keys or signer (signing only touches .gpg files).
++        if (!encrypt) return true
+         val mode = state.settings.encryptMode
+         if (mode != EncryptMode.Keys && !state.passphraseSet) {
+             _messages.tryEmit(str(R.string.backup_need_passphrase))
+@@ -1332,8 +1399,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
+     fun requiresPassphrase(kind: RunKind): Boolean {
+         val settings = _ui.value.settings
+         val encrypt = when (kind) {
+-            RunKind.Folder -> settings.folderEncrypt
+-            RunKind.Album -> settings.albumEncrypt
++            RunKind.Folder -> settings.anyFolderEncrypted()
++            RunKind.Album -> _ui.value.albums.any {
++                it.selected && settings.encryptsAlbum(it.album.bucketId)
++            }
+         }
+         return encrypt && settings.encryptMode != EncryptMode.Keys
+     }
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/ui/components/EncryptScopeDialog.kt b/android/app/src/main/java/com/pengstem/baidunetgo/ui/components/EncryptScopeDialog.kt
+new file mode 100644
+index 0000000..7f4deec
+--- /dev/null
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/ui/components/EncryptScopeDialog.kt
+@@ -0,0 +1,139 @@
++package com.pengstem.baidunetgo.ui.components
++
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.heightIn
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material3.Checkbox
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++
++/**
++ * One choosable encryption-scope entry: a SAF folder or a MediaStore album.
++ * [id] is the stable key the ViewModel toggles (a tree URI or a bucket id as
++ * text), [subtitle] an optional second line (an album's 项数 · 大小).
++ */
++data class EncryptScopeItem(
++    val id: String,
++    val label: String,
++    val subtitle: String? = null,
++)
++
++/**
++ * 加密范围 selector: a 全选 / 全不选 segmented control over a scrollable list of
++ * checkboxes, one row per folder or album. The caller owns the selection (the
++ * ViewModel persists it), so a toggle is reported immediately and there is no
++ * separate save step — 完成 only closes the dialog.
++ *
++ * Styled like [RecipientsDialog]: [ExpressiveDialog], content capped at 420 dp
++ * with its own scroll, so a long folder list stays inside the dialog.
++ */
++@Composable
++fun EncryptScopeDialog(
++    title: String,
++    description: String?,
++    items: List<EncryptScopeItem>,
++    selectedIds: Set<String>,
++    emptyText: String,
++    allLabel: String,
++    noneLabel: String,
++    doneLabel: String,
++    onToggle: (String) -> Unit,
++    onSelectAll: () -> Unit,
++    onSelectNone: () -> Unit,
++    onDismiss: () -> Unit,
++) {
++    ExpressiveDialog(
++        onDismissRequest = onDismiss,
++        title = { Text(title) },
++        text = {
++            Column(
++                modifier = Modifier
++                    .heightIn(max = 420.dp)
++                    .verticalScroll(rememberScrollState()),
++                verticalArrangement = Arrangement.spacedBy(8.dp),
++            ) {
++                if (description != null) {
++                    Text(
++                        text = description,
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                }
++                if (items.isEmpty()) {
++                    Text(
++                        text = emptyText,
++                        style = MaterialTheme.typography.bodyMedium,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                } else {
++                    val allSelected = items.all { it.id in selectedIds }
++                    val noneSelected = items.none { it.id in selectedIds }
++                    ExpressiveSegmentedRow(
++                        options = listOf(allLabel, noneLabel),
++                        selectedIndex = when {
++                            allSelected -> 0
++                            noneSelected -> 1
++                            else -> -1
++                        },
++                        onSelect = { index ->
++                            if (index == 0) onSelectAll() else onSelectNone()
++                        },
++                        modifier = Modifier.fillMaxWidth(),
++                        // A dialog's container is also surfaceContainerHigh, so
++                        // the segmented pill needs one step more contrast than
++                        // the default to read as a control at all.
++                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
++                    )
++                    items.forEach { item ->
++                        Row(
++                            modifier = Modifier
++                                .fillMaxWidth()
++                                .clip(MaterialTheme.shapes.medium)
++                                .clickable { onToggle(item.id) }
++                                .padding(vertical = 4.dp),
++                            verticalAlignment = Alignment.CenterVertically,
++                        ) {
++                            Checkbox(
++                                checked = item.id in selectedIds,
++                                onCheckedChange = { onToggle(item.id) },
++                            )
++                            Column(modifier = Modifier.weight(1f)) {
++                                Text(
++                                    text = item.label,
++                                    style = MaterialTheme.typography.bodyMedium,
++                                    maxLines = 2,
++                                    overflow = TextOverflow.Ellipsis,
++                                )
++                                if (item.subtitle != null) {
++                                    Text(
++                                        text = item.subtitle,
++                                        style = MaterialTheme.typography.bodySmall,
++                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
++                                    )
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        },
++        confirmButton = {
++            TextButton(onClick = onDismiss) {
++                Text(doneLabel)
++            }
++        },
++    )
++}
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/BackupScreen.kt b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/BackupScreen.kt
+index 91ca85d..d60bacd 100644
+--- a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/BackupScreen.kt
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/BackupScreen.kt
+@@ -55,12 +55,16 @@ import androidx.compose.ui.unit.dp
+ import com.pengstem.baidunetgo.R
+ import com.pengstem.baidunetgo.data.EncryptMode
+ import com.pengstem.baidunetgo.data.RunKind
++import com.pengstem.baidunetgo.data.anyFolderEncrypted
++import com.pengstem.baidunetgo.data.encryptsFolder
+ import com.pengstem.baidunetgo.ui.AppFormat
+ import com.pengstem.baidunetgo.ui.AppUiState
+ import com.pengstem.baidunetgo.ui.FolderUi
+ import com.pengstem.baidunetgo.ui.AppViewModel
+ import com.pengstem.baidunetgo.ui.components.ConfirmDialog
+ import com.pengstem.baidunetgo.ui.components.DestDialog
++import com.pengstem.baidunetgo.ui.components.EncryptScopeDialog
++import com.pengstem.baidunetgo.ui.components.EncryptScopeItem
+ import com.pengstem.baidunetgo.ui.components.EmptyState
+ import com.pengstem.baidunetgo.ui.components.IntervalDialog
+ import com.pengstem.baidunetgo.ui.components.LastResultCard
+@@ -94,10 +98,26 @@ fun BackupScreen(
+     var showDestDialog by rememberSaveable { mutableStateOf(false) }
+     var showIntervalDialog by rememberSaveable { mutableStateOf(false) }
+     var showPassphraseDialog by rememberSaveable { mutableStateOf(false) }
++    var showScopeDialog by rememberSaveable { mutableStateOf(false) }
+     var showRecipientsDialog by rememberSaveable { mutableStateOf(false) }
+     var showSignerDialog by rememberSaveable { mutableStateOf(false) }
+     var removeTarget by remember { mutableStateOf<FolderUi?>(null) }
+ 
++    // 加密范围: null means every configured folder is encrypted; a set lists the
++    // chosen tree URIs. The row's value and the dialog read the same intersection.
++    val folderUris = settings.folders.map { it.uri }
++    val encryptedScope = settings.encryptedFolders
++    val scopeUris = if (encryptedScope == null) {
++        folderUris.toSet()
++    } else {
++        folderUris.filter { it in encryptedScope }.toSet()
++    }
++    val scopeValue = when {
++        encryptedScope == null -> stringResource(R.string.encrypt_scope_all, folderUris.size)
++        scopeUris.isEmpty() -> stringResource(R.string.encrypt_scope_none)
++        else -> stringResource(R.string.encrypt_scope_partial, scopeUris.size, folderUris.size)
++    }
++
+     val folderPicker = rememberLauncherForActivityResult(
+         ActivityResultContracts.OpenDocumentTree(),
+     ) { uri: Uri? ->
+@@ -175,6 +195,17 @@ fun BackupScreen(
+                             onCheckedChange = vm::setFolderEncrypt,
+                         )
+                     }
++                    if (settings.folderEncrypt) {
++                        item(key = "scope") {
++                            SegmentedActionRow(
++                                title = stringResource(R.string.encrypt_scope),
++                                description = stringResource(R.string.encrypt_scope_desc),
++                                leading = Icons.Filled.Lock,
++                                value = scopeValue,
++                                onClick = { showScopeDialog = true },
++                            )
++                        }
++                    }
+                     item(key = "mode") {
+                         SegmentedChoiceRow(
+                             title = stringResource(R.string.encrypt_mode),
+@@ -255,6 +286,18 @@ fun BackupScreen(
+                 }
+             }
+ 
++            // 加密备份 is on but nothing is in scope: every file goes up as-is.
++            if (settings.folderEncrypt && !settings.anyFolderEncrypted()) {
++                item(key = "encrypt-scope-hint") {
++                    Text(
++                        text = stringResource(R.string.encrypt_scope_none_hint),
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.error,
++                        modifier = Modifier.padding(horizontal = 4.dp),
++                    )
++                }
++            }
++
+             item(key = "folders-header") {
+                 Row(
+                     modifier = Modifier.fillMaxWidth(),
+@@ -296,10 +339,10 @@ fun BackupScreen(
+                         folder = folder,
+                         // A light note of what this folder's next run will do.
+                         cryptoNote = buildList {
+-                            if (settings.folderEncrypt && settings.encryptMode != EncryptMode.Passphrase) {
++                            if (settings.encryptsFolder(folder.entry.uri) && settings.encryptMode != EncryptMode.Passphrase) {
+                                 add(stringResource(R.string.status_keyed))
+                             }
+-                            if (settings.folderEncrypt && settings.sign) {
++                            if (settings.encryptsFolder(folder.entry.uri) && settings.sign) {
+                                 add(stringResource(R.string.status_signed))
+                             }
+                         }.joinToString(" · ").ifEmpty { null },
+@@ -389,6 +432,22 @@ fun BackupScreen(
+             onDismiss = { showPassphraseDialog = false },
+         )
+     }
++    if (showScopeDialog) {
++        EncryptScopeDialog(
++            title = stringResource(R.string.encrypt_scope_title_folder),
++            description = stringResource(R.string.encrypt_scope_desc),
++            items = settings.folders.map { folder -> EncryptScopeItem(id = folder.uri, label = folder.name) },
++            selectedIds = scopeUris,
++            emptyText = stringResource(R.string.encrypt_scope_empty_folder),
++            allLabel = stringResource(R.string.encrypt_scope_select_all),
++            noneLabel = stringResource(R.string.encrypt_scope_select_none),
++            doneLabel = stringResource(R.string.encrypt_scope_done),
++            onToggle = vm::toggleFolderEncryption,
++            onSelectAll = vm::selectAllFolderEncryption,
++            onSelectNone = vm::selectNoFolderEncryption,
++            onDismiss = { showScopeDialog = false },
++        )
++    }
+     if (showRecipientsDialog) {
+         RecipientsDialog(
+             recipients = state.recipients,
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/GalleryBackupScreen.kt b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/GalleryBackupScreen.kt
+index a99ef6d..2075a9c 100644
+--- a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/GalleryBackupScreen.kt
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/GalleryBackupScreen.kt
+@@ -56,12 +56,15 @@ import com.pengstem.baidunetgo.R
+ import com.pengstem.baidunetgo.data.EncryptMode
+ import com.pengstem.baidunetgo.data.MediaPermissions
+ import com.pengstem.baidunetgo.data.RunKind
++import com.pengstem.baidunetgo.data.encryptsAlbum
+ import com.pengstem.baidunetgo.ui.AppFormat
+ import com.pengstem.baidunetgo.ui.AlbumUi
+ import com.pengstem.baidunetgo.ui.AppUiState
+ import com.pengstem.baidunetgo.ui.AppViewModel
+ import com.pengstem.baidunetgo.ui.components.EmptyState
+ import com.pengstem.baidunetgo.ui.components.ExpressiveSegmentedRow
++import com.pengstem.baidunetgo.ui.components.EncryptScopeDialog
++import com.pengstem.baidunetgo.ui.components.EncryptScopeItem
+ import com.pengstem.baidunetgo.ui.components.IntervalDialog
+ import com.pengstem.baidunetgo.ui.components.LastResultCard
+ import com.pengstem.baidunetgo.ui.components.PassphraseDialog
+@@ -91,10 +94,26 @@ fun GalleryBackupScreen(
+     val lastAlbumResult = state.lastAlbumResult
+     var showPassphraseDialog by rememberSaveable { mutableStateOf(false) }
+     var showIntervalDialog by rememberSaveable { mutableStateOf(false) }
++    var showScopeDialog by rememberSaveable { mutableStateOf(false) }
+     val permissionLauncher = rememberLauncherForActivityResult(
+         ActivityResultContracts.RequestMultiplePermissions(),
+     ) { grants -> vm.onMediaPermissionResult(grants.values.any { it }) }
+ 
++    // 加密范围 covers the albums that will actually be backed up: null = all of
++    // them, otherwise the stored bucket ids intersected with the selection.
++    val backupAlbums = state.albums.filter { it.selected }
++    val albumScope = settings.encryptedAlbums
++    val scopeAlbumIds = if (albumScope == null) {
++        backupAlbums.map { it.album.bucketId }.toSet()
++    } else {
++        backupAlbums.map { it.album.bucketId }.filter { it in albumScope }.toSet()
++    }
++    val albumScopeValue = when {
++        albumScope == null -> stringResource(R.string.encrypt_scope_all, backupAlbums.size)
++        scopeAlbumIds.isEmpty() -> stringResource(R.string.encrypt_scope_none)
++        else -> stringResource(R.string.encrypt_scope_partial, scopeAlbumIds.size, backupAlbums.size)
++    }
++
+     PullToRefreshBox(
+         isRefreshing = state.albumsLoading,
+         onRefresh = {
+@@ -136,6 +155,17 @@ fun GalleryBackupScreen(
+                             onCheckedChange = vm::setAlbumEncrypt,
+                         )
+                     }
++                    if (settings.albumEncrypt) {
++                        item(key = "scope") {
++                            SegmentedActionRow(
++                                title = stringResource(R.string.encrypt_scope),
++                                description = stringResource(R.string.encrypt_scope_desc),
++                                leading = Icons.Filled.Lock,
++                                value = albumScopeValue,
++                                onClick = { showScopeDialog = true },
++                            )
++                        }
++                    }
+                     item(key = "interval") {
+                         SegmentedActionRow(
+                             title = stringResource(R.string.backup_interval),
+@@ -301,6 +331,32 @@ fun GalleryBackupScreen(
+             onDismiss = { showIntervalDialog = false },
+         )
+     }
++    if (showScopeDialog) {
++        EncryptScopeDialog(
++            title = stringResource(R.string.encrypt_scope_title_album),
++            description = stringResource(R.string.encrypt_scope_desc),
++            items = backupAlbums.map { entry ->
++                EncryptScopeItem(
++                    id = entry.album.bucketId.toString(),
++                    label = entry.album.displayName,
++                    subtitle = stringResource(
++                        R.string.album_items,
++                        entry.album.itemCount,
++                        AppFormat.bytes(entry.album.sizeBytes),
++                    ),
++                )
++            },
++            selectedIds = scopeAlbumIds.map { it.toString() }.toSet(),
++            emptyText = stringResource(R.string.encrypt_scope_empty_album),
++            allLabel = stringResource(R.string.encrypt_scope_select_all),
++            noneLabel = stringResource(R.string.encrypt_scope_select_none),
++            doneLabel = stringResource(R.string.encrypt_scope_done),
++            onToggle = { id -> id.toLongOrNull()?.let(vm::toggleAlbumEncryption) },
++            onSelectAll = vm::selectAllAlbumEncryption,
++            onSelectNone = vm::selectNoAlbumEncryption,
++            onDismiss = { showScopeDialog = false },
++        )
++    }
+     if (showPassphraseDialog) {
+         PassphraseDialog(
+             title = stringResource(
+diff --git a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
+index 9601921..47e75b7 100644
+--- a/android/app/src/main/res/values/strings.xml
++++ b/android/app/src/main/res/values/strings.xml
+@@ -199,6 +199,22 @@
+     <string name="backup_need_signer">已开启签名，请先设置签名密钥</string>
+     <string name="status_keyed">密钥加密</string>
+     <string name="status_signed">已签名</string>
++
++    <!-- 加密范围：加密备份只对勾选的文件夹 / 相册生效 -->
++    <string name="encrypt_scope">加密范围</string>
++    <string name="encrypt_scope_desc">选择哪些文件夹/相册在上传前加密，未勾选的按普通文件上传</string>
++    <string name="encrypt_scope_all">全部（%1$d 个）</string>
++    <string name="encrypt_scope_partial">已选 %1$d / %2$d 个</string>
++    <string name="encrypt_scope_none">未选择</string>
++    <string name="encrypt_scope_title_folder">选择加密的文件夹</string>
++    <string name="encrypt_scope_title_album">选择加密的相册</string>
++    <string name="encrypt_scope_empty_folder">还没有可加密的文件夹，先在下方添加文件夹</string>
++    <string name="encrypt_scope_empty_album">还没有要备份的相册，先勾选相册</string>
++    <string name="encrypt_scope_select_all">全选</string>
++    <string name="encrypt_scope_select_none">全不选</string>
++    <string name="encrypt_scope_done">完成</string>
++    <string name="encrypt_scope_none_hint">当前没有文件夹会被加密，备份将按普通文件上传。</string>
++    <string name="encrypt_scope_none_hint_album">当前没有相册会被加密，备份将按普通文件上传。</string>
+     <string name="backup_folders">备份文件夹</string>
+     <string name="backup_add_folder">添加文件夹</string>
+     <string name="backup_folder_added">已添加文件夹</string>
+diff --git a/android/app/src/test/java/com/pengstem/baidunetgo/data/EncryptedScopeTest.kt b/android/app/src/test/java/com/pengstem/baidunetgo/data/EncryptedScopeTest.kt
+new file mode 100644
+index 0000000..2894803
+--- /dev/null
++++ b/android/app/src/test/java/com/pengstem/baidunetgo/data/EncryptedScopeTest.kt
+@@ -0,0 +1,124 @@
++package com.pengstem.baidunetgo.data
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * JVM tests for the per-item encrypted-backup scope: the persisted
++ * `encryptedFolders`/`encryptedAlbums` arrays and the helpers the backup runner
++ * and the UI use to ask what a run encrypts. They need no Android APIs.
++ */
++class EncryptedScopeTest {
++
++    private val treeA = FolderEntry(uri = "content://tree/a", name = "相机")
++    private val treeB = FolderEntry(uri = "content://tree/b", name = "文档")
++
++    @Test
++    fun defaultNullScopeIsNotWrittenAndRoundTrips() {
++        val settings = AppSettings(
++            folderEncrypt = true,
++            albumEncrypt = true,
++            folders = listOf(treeA),
++            deselectedAlbums = setOf(6L),
++        )
++        val encoded = SecureJson.encodeSettings(settings)
++        // An absent key is the "everything" default, so nothing is written.
++        assertFalse(encoded.contains("encryptedFolders"))
++        assertFalse(encoded.contains("encryptedAlbums"))
++        val decoded = SecureJson.decodeSettings(encoded)
++        assertEquals(settings, decoded)
++        assertNull(decoded.encryptedFolders)
++        assertNull(decoded.encryptedAlbums)
++    }
++
++    @Test
++    fun explicitSubsetRoundTrips() {
++        val settings = AppSettings(
++            folderEncrypt = true,
++            albumEncrypt = true,
++            folders = listOf(treeB, treeA),
++            deselectedAlbums = setOf(6L),
++            encryptedFolders = setOf(treeA.uri),
++            encryptedAlbums = setOf(2L, 1L),
++        )
++        val decoded = SecureJson.decodeSettings(SecureJson.encodeSettings(settings))
++        assertEquals(settings, decoded)
++        assertEquals(setOf(treeA.uri), decoded.encryptedFolders)
++        assertEquals(setOf(1L, 2L), decoded.encryptedAlbums)
++    }
++
++    @Test
++    fun explicitEmptyScopeRoundTrips() {
++        val settings = AppSettings(
++            folderEncrypt = true,
++            albumEncrypt = true,
++            folders = listOf(treeA),
++            encryptedFolders = emptySet(),
++            encryptedAlbums = emptySet(),
++        )
++        val decoded = SecureJson.decodeSettings(SecureJson.encodeSettings(settings))
++        assertEquals(emptySet<String>(), decoded.encryptedFolders)
++        assertEquals(emptySet<Long>(), decoded.encryptedAlbums)
++    }
++
++    @Test
++    fun legacyJsonWithoutScopeKeysDecodesToNull() {
++        val legacy = """{"version":1,"dest":"/备份","deselectedAlbums":[3]}"""
++        val decoded = SecureJson.decodeSettings(legacy)
++        assertNull(decoded.encryptedFolders)
++        assertNull(decoded.encryptedAlbums)
++    }
++
++    @Test
++    fun folderScopeHelpersTruthTable() {
++        val off = AppSettings(folderEncrypt = false, folders = listOf(treeA, treeB), encryptedFolders = emptySet())
++        assertFalse(off.anyFolderEncrypted())
++        assertFalse(off.encryptsFolder(treeA.uri))
++
++        val all = AppSettings(folderEncrypt = true, folders = listOf(treeA, treeB))
++        assertTrue(all.anyFolderEncrypted())
++        assertTrue(all.encryptsFolder(treeA.uri))
++        assertTrue(all.encryptsFolder(treeB.uri))
++
++        val subset = AppSettings(
++            folderEncrypt = true,
++            folders = listOf(treeA, treeB),
++            encryptedFolders = setOf(treeA.uri),
++        )
++        assertTrue(subset.anyFolderEncrypted())
++        assertTrue(subset.encryptsFolder(treeA.uri))
++        assertFalse(subset.encryptsFolder(treeB.uri))
++
++        val none = AppSettings(folderEncrypt = true, folders = listOf(treeA), encryptedFolders = emptySet())
++        assertFalse(none.anyFolderEncrypted())
++        assertFalse(none.encryptsFolder(treeA.uri))
++
++        val noTrees = AppSettings(folderEncrypt = true, folders = emptyList())
++        assertFalse(noTrees.anyFolderEncrypted())
++    }
++
++    @Test
++    fun albumScopeHelpersTruthTable() {
++        val off = AppSettings(albumEncrypt = false, encryptedAlbums = setOf(1L))
++        assertFalse(off.anyAlbumEncrypted(listOf(1L, 2L)))
++        assertFalse(off.encryptsAlbum(1L))
++
++        val all = AppSettings(albumEncrypt = true)
++        assertTrue(all.anyAlbumEncrypted(listOf(1L, 2L)))
++        assertTrue(all.encryptsAlbum(1L))
++        assertTrue(all.encryptsAlbum(99L))
++
++        val subset = AppSettings(albumEncrypt = true, encryptedAlbums = setOf(2L))
++        assertTrue(subset.anyAlbumEncrypted(listOf(1L, 2L)))
++        assertFalse(subset.anyAlbumEncrypted(listOf(1L, 3L)))
++        assertTrue(subset.encryptsAlbum(2L))
++        assertFalse(subset.encryptsAlbum(1L))
++
++        val none = AppSettings(albumEncrypt = true, encryptedAlbums = emptySet())
++        assertFalse(none.anyAlbumEncrypted(listOf(1L)))
++        assertFalse(none.encryptsAlbum(1L))
++    }
++}

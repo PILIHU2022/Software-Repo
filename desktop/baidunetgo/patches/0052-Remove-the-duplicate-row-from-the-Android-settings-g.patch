@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DeepSeek Harness <noreply@deepseek.com>
+Date: Sat, 28 Nov 2026 15:02:50 +0800
+Subject: [PATCH] =?UTF-8?q?Remove=20the=20duplicate=20=E5=8A=A0=E5=AF=86?=
+ =?UTF-8?q?=E5=AF=86=E7=A0=81=20row=20from=20the=20Android=20settings'=20?=
+ =?UTF-8?q?=E5=A4=87=E4=BB=BD=20group=20=E2=80=94=20the=20=E5=A4=87?=
+ =?UTF-8?q?=E4=BB=BD=20page's=20=E5=8A=A0=E5=AF=86=20group=20already=20set?=
+ =?UTF-8?q?s=20the=20passphrase=20next=20to=20=E5=8A=A0=E5=AF=86=E8=8C=83?=
+ =?UTF-8?q?=E5=9B=B4=20and=20=E5=8A=A0=E5=AF=86=E6=96=B9=E5=BC=8F,=20so=20?=
+ =?UTF-8?q?two=20entrances=20only=20made=20the=20setting=20look=20like=20t?=
+ =?UTF-8?q?wo=20different=20things?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../baidunetgo/ui/screens/SettingsScreen.kt   | 33 +++----------------
+ 1 file changed, 5 insertions(+), 28 deletions(-)
+
+diff --git a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/SettingsScreen.kt b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/SettingsScreen.kt
+index 56bd140..4a92700 100644
+--- a/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/SettingsScreen.kt
++++ b/android/app/src/main/java/com/pengstem/baidunetgo/ui/screens/SettingsScreen.kt
+@@ -25,7 +25,6 @@ import androidx.compose.material.icons.filled.Image
+ import androidx.compose.material.icons.filled.Info
+ import androidx.compose.material.icons.filled.Key
+ import androidx.compose.material.icons.filled.Link
+-import androidx.compose.material.icons.filled.Lock
+ import androidx.compose.material.icons.filled.Notifications
+ import androidx.compose.material.icons.filled.Refresh
+ import androidx.compose.material.icons.filled.Wifi
+@@ -66,7 +65,6 @@ import com.pengstem.baidunetgo.ui.UpdateUiState
+ import com.pengstem.baidunetgo.ui.components.ConfirmDialog
+ import com.pengstem.baidunetgo.ui.components.LabeledValue
+ import com.pengstem.baidunetgo.ui.components.LauncherIconDialog
+-import com.pengstem.baidunetgo.ui.components.PassphraseDialog
+ import com.pengstem.baidunetgo.ui.components.SegmentedActionRow
+ import com.pengstem.baidunetgo.ui.components.SegmentedChoiceRow
+ import com.pengstem.baidunetgo.ui.components.SegmentedGroup
+@@ -74,8 +72,11 @@ import com.pengstem.baidunetgo.ui.components.SegmentedSwitchRow
+ import com.pengstem.baidunetgo.ui.components.TonalCard
+ 
+ /**
+- * 设置: account card, backup options (concurrency, WiFi, shared passphrase),
+- * appearance (theme), and 关于 with the community-patch declaration.
++ * 设置: account card, backup options (concurrency, WiFi), appearance (theme),
++ * and 关于 with the community-patch declaration.
++ *
++ * The encryption passphrase is no longer set here: it belongs to the 备份 page's
++ * 加密 group, next to the 加密范围 choice it applies to.
+  *
+  * Laid out as KernelSU-style segmented settings groups: each option is its own
+  * `surfaceBright` tonal row, with the group label in the primary color above.
+@@ -88,7 +89,6 @@ fun SettingsScreen(
+ ) {
+     val settings = state.settings
+     val context = LocalContext.current
+-    var showPassphraseDialog by rememberSaveable { mutableStateOf(false) }
+     var showSignOutDialog by rememberSaveable { mutableStateOf(false) }
+     var showLauncherIconDialog by rememberSaveable { mutableStateOf(false) }
+     val themeOptions = ThemeMode.entries.map { stringResource(themeLabel(it)) }
+@@ -140,18 +140,6 @@ fun SettingsScreen(
+                     onCheckedChange = vm::setWifiOnly,
+                 )
+             }
+-            item(key = "passphrase") {
+-                SegmentedActionRow(
+-                    title = stringResource(R.string.settings_encryption_password),
+-                    description = stringResource(R.string.settings_encryption_password_desc),
+-                    leading = Icons.Filled.Lock,
+-                    value = stringResource(
+-                        if (state.passphraseSet) R.string.backup_passphrase_set
+-                        else R.string.backup_passphrase_unset,
+-                    ),
+-                    onClick = { showPassphraseDialog = true },
+-                )
+-            }
+         }
+ 
+         SegmentedGroup(title = stringResource(R.string.settings_group_app)) {
+@@ -321,17 +309,6 @@ fun SettingsScreen(
+             onDismiss = { showLauncherIconDialog = false },
+         )
+     }
+-    if (showPassphraseDialog) {
+-        PassphraseDialog(
+-            title = stringResource(
+-                if (state.passphraseSet) R.string.passphrase_change_title
+-                else R.string.passphrase_set_title,
+-            ),
+-            warning = if (state.passphraseSet) stringResource(R.string.passphrase_change_warning) else null,
+-            onSave = vm::setPassphrase,
+-            onDismiss = { showPassphraseDialog = false },
+-        )
+-    }
+     if (showSignOutDialog) {
+         ConfirmDialog(
+             title = stringResource(R.string.settings_sign_out_title),
