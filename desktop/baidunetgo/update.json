@@ -1,8 +1,8 @@
 {
-  "notes": "社区修复版（x86），基于上游 b55b251，含 48 个补丁。",
+  "notes": "社区修复版（x86），基于上游 b55b251，含 51 个补丁。",
   "url": {
-    "linux-amd64": "https://github.com/PILIHU2022/Software-Repo/releases/download/baidunetgo-desktop-0.9.1.48-b55b251/baidunetgo-0.9.1.48-linux-amd64.tar.gz",
-    "windows-amd64": "https://github.com/PILIHU2022/Software-Repo/releases/download/baidunetgo-desktop-0.9.1.48-b55b251/BaiduNetGo-0.9.1.48-windows-amd64.zip"
+    "linux-amd64": "https://github.com/PILIHU2022/Software-Repo/releases/download/baidunetgo-desktop-0.9.1.51-b55b251/baidunetgo-0.9.1.51-linux-amd64.tar.gz",
+    "windows-amd64": "https://github.com/PILIHU2022/Software-Repo/releases/download/baidunetgo-desktop-0.9.1.51-b55b251/BaiduNetGo-0.9.1.51-windows-amd64.zip"
   },
-  "version": "0.9.1.48"
+  "version": "0.9.1.51"
 }
