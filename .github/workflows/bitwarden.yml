@@ -177,7 +177,13 @@ jobs:
   desktop:
     name: Build desktop (${{ matrix.target }})
     needs: check
-    if: needs.check.result == 'success' && needs.check.outputs.build == 'true'
+    # macOS runners are not available for this repository ("The configuration
+    # 'macos-14-arm64-us-default' is not supported"), so the macOS leg would
+    # cancel every run. Keep it behind a repository variable: set
+    # PATCHWORK_ENABLE_MACOS=true once a macOS runner is available.
+    if: |
+      needs.check.result == 'success' && needs.check.outputs.build == 'true' &&
+      (matrix.target != 'desktop-macos' || vars.PATCHWORK_ENABLE_MACOS == 'true')
     strategy:
       fail-fast: false
       matrix:
