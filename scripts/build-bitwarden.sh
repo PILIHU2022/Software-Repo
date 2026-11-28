@@ -321,7 +321,15 @@ build_desktop() {
     fi
     (cd "$WORK" && npm run build --workspace "$workspace")
 
-    if (cd "$WORK" && has_script apps/desktop "dist:$platform"); then
+    if [[ "$target" == "desktop-windows" ]]; then
+        # Upstream's dist:win packages both x64 and arm64, but build-native
+        # only produces desktop_proxy.win32-x64.exe on an x64 runner, so the
+        # arm64 appx fails MakeAppx validation ("app\desktop_proxy.exe" is
+        # missing from the package). Package the x64 installer only.
+        (cd "$WORK" && npm run clean:dist --workspace "$workspace")
+        (cd "$WORK/apps/desktop" && "$WORK/node_modules/.bin/electron-builder" \
+            --win --x64 --publish never)
+    elif (cd "$WORK" && has_script apps/desktop "dist:$platform"); then
         (cd "$WORK" && npm run "dist:$platform" --workspace "$workspace")
     else
         (cd "$WORK/apps/desktop" && "$WORK/node_modules/.bin/electron-builder" \
